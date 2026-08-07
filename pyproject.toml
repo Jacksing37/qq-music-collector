@@ -1,0 +1,20 @@
+[project]
+name = "qq-music-collector"
+version = "0.1.0"
+description = "QQ 群音乐分享收集机器人"
+requires-python = ">=3.10"
+dependencies = [
+    "nonebot2[fastapi]>=2.3.0",
+    "nonebot-adapter-onebot>=2.4.3",
+    "nonebot-plugin-apscheduler>=0.5.0",
+    "httpx>=0.27.0",
+    "pycryptodome>=3.20.0",
+    "Pillow>=10.3.0",
+    "PyYAML>=6.0.1",
+    "aiosqlite>=0.20.0",
+    "pydantic>=2.7.0",
+]
+
+[tool.nonebot]
+plugins = ["music_collector"]
+plugin_dirs = ["src/plugins"]
