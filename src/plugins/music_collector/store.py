@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import aiosqlite
 
@@ -216,3 +216,59 @@ class Store:
             await db.execute("DELETE FROM songs WHERE id=?", (target.row_id,))
             await db.commit()
         return target
+
+    async def delete_songs_by_indices(
+        self, group_id: int, window_key: str, indices: Sequence[int]
+    ) -> int:
+        """按序号（从 1 开始）批量删除，支持不连续与重复序号。返回实际删除条数。"""
+        songs = await self.list_songs(group_id, window_key)
+        row_ids: set[int] = set()
+        for i in indices:
+            if 1 <= i <= len(songs) and songs[i - 1].row_id is not None:
+                row_ids.add(songs[i - 1].row_id)
+        if not row_ids:
+            return 0
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.executemany(
+                "DELETE FROM songs WHERE id=?", [(rid,) for rid in row_ids]
+            )
+            await db.commit()
+        return len(row_ids)
+
+    async def delete_window(self, group_id: int, window_key: str) -> int:
+        """清空某个群在某个窗口下的全部已收集歌曲。"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "DELETE FROM songs WHERE group_id=? AND window_key=?",
+                (group_id, window_key),
+            )
+            await db.commit()
+        return cur.rowcount
+
+    async def prune_old(self, before_ts: float) -> int:
+        """删除早于 ``before_ts`` 的收集记录（按创建时间）。用于定时清理。"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute("DELETE FROM songs WHERE created_at < ?", (before_ts,))
+            await db.commit()
+        return cur.rowcount
+
+    async def windows_with_counts(
+        self, group_id: Optional[int] = None
+    ) -> list[tuple[str, int]]:
+        """列出各窗口及其歌曲数，供手动清理时选择目标窗口。"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            if group_id is None:
+                async with db.execute(
+                    "SELECT window_key, COUNT(*) AS n FROM songs "
+                    "GROUP BY window_key ORDER BY window_key DESC"
+                ) as cur:
+                    rows = await cur.fetchall()
+            else:
+                async with db.execute(
+                    "SELECT window_key, COUNT(*) AS n FROM songs WHERE group_id=? "
+                    "GROUP BY window_key ORDER BY window_key DESC",
+                    (group_id,),
+                ) as cur:
+                    rows = await cur.fetchall()
+        return [(r["window_key"], int(r["n"])) for r in rows]

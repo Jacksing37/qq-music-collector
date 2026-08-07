@@ -57,9 +57,25 @@ class WindowConfig(BaseModel):
 
 
 class PlaylistConfig(BaseModel):
-    #: 可用占位符 {window} {group} {count} {date}
+    """歌单命名与简介。占位符说明见 naming.py 顶部注释。
+
+    例：``Wk.{seq}线上学习{slash}`` -> ``Wk.86线上学习26/8/7``
+    """
+
+    #: 歌单名模板，常用占位符 {seq} {slash} {yy} {m} {d} {window} {count}
     name_template: str = "群歌单 {window}"
+    #: 简介开头；后面会自动接上「谁分享了什么歌」的清单
     description_template: str = "由 QQ 群 {group} 在 {window} 期间收集，共 {count} 首。"
+    #: 简介里附上分享清单
+    include_sharers: bool = True
+    #: 清单样式：list=逐首列（含分享者）  by_person=按人聚合  none=不附
+    sharer_style: Literal["list", "by_person", "none"] = "list"
+    #: 自增期号，每成功归档一次 +1（用于 Wk.86 这种编号）
+    seq: int = 1
+    #: 归档成功后是否自动递增 seq
+    seq_auto_increment: bool = True
+    #: 一次性歌单名。设置后仅下一次归档生效，用完自动清空
+    pending_name: str = ""
     #: 歌单是否设为隐私
     privacy: bool = False
     #: 非网易云来源的歌曲，是否在网易云搜索匹配后加入
@@ -68,6 +84,38 @@ class PlaylistConfig(BaseModel):
     strict_match: bool = True
     #: 单次加歌批大小（网易云接口限制）
     batch_size: int = 100
+
+
+class CacheConfig(BaseModel):
+    """缓存图片自动回收。"""
+
+    #: 总开关
+    enabled: bool = True
+    #: 保留天数，超过就删；<=0 表示不按时间清
+    keep_days: float = 3
+    #: 榜单长图最多保留个数；<=0 表示不限
+    max_render_files: int = 60
+    #: 封面缓存最多保留个数；<=0 表示不限
+    max_cover_files: int = 400
+    #: 每天几点做一次清理，格式 `04:30`
+    clean_at: str = "04:30"
+    #: 启动时先清一次
+    clean_on_start: bool = True
+    #: 每次渲染完顺手清一次
+    clean_after_render: bool = True
+
+
+class ClearConfig(BaseModel):
+    """已收集歌曲的清理（注意区别于 cache：cache 清理的是榜单图片缓存）。"""
+
+    #: 归档（结束收集）建歌单成功后，是否自动清空本期已收集歌曲
+    after_archive: bool = False
+    #: 定时清理总开关
+    scheduled_enabled: bool = False
+    #: 保留天数；早于 now - keep_days 的收集记录会被删除；<=0 表示不按时间清
+    keep_days: float = 30
+    #: 每天执行定时清理的时刻，格式 `05:00`
+    prune_at: str = "05:00"
 
 
 class RenderConfig(BaseModel):
@@ -92,9 +140,13 @@ class AppConfig(BaseModel):
     notify_duplicate: bool = True
     #: 汇总 / 归档结果发送到哪些群，留空则发回收集所在群
     report_groups: list[int] = Field(default_factory=list)
+    #: 识别过程写详细日志，排查"分享了没反应"时打开
+    debug_detect: bool = False
     window: WindowConfig = Field(default_factory=WindowConfig)
     playlist: PlaylistConfig = Field(default_factory=PlaylistConfig)
     render: RenderConfig = Field(default_factory=RenderConfig)
+    cache: CacheConfig = Field(default_factory=CacheConfig)
+    clear: ClearConfig = Field(default_factory=ClearConfig)
 
 
 class ConfigManager:

@@ -10,8 +10,17 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
+from datetime import datetime
+
 from .config import PlaylistConfig
 from .models import Song
+from .naming import (
+    build_context,
+    build_sharer_lines,
+    build_song_lines,
+    fit_description,
+    render_template,
+)
 from .netease_api import NeteaseAPI, NeteaseError
 from .store import Store
 
@@ -88,6 +97,7 @@ class ArchiveReport:
     message: str = ""
     playlist_id: Optional[int] = None
     playlist_url: Optional[str] = None
+    playlist_name: str = ""
     total: int = 0
     added: int = 0
     unmatched: list[Song] = field(default_factory=list)
@@ -96,7 +106,7 @@ class ArchiveReport:
         if not self.ok:
             return f"归档失败：{self.message}"
         lines = [
-            "歌单已生成",
+            f"歌单已生成：{self.playlist_name}" if self.playlist_name else "歌单已生成",
             f"链接: {self.playlist_url}",
             f"收录 {self.added}/{self.total} 首",
         ]
@@ -152,6 +162,10 @@ class Archiver:
         window_label: str,
         songs: Sequence[Song],
         cfg: PlaylistConfig,
+        *,
+        start_at: Optional[datetime] = None,
+        end_at: Optional[datetime] = None,
+        name_override: str = "",
     ) -> ArchiveReport:
         report = ArchiveReport(total=len(songs))
         if not songs:
@@ -162,11 +176,11 @@ class Archiver:
             return report
 
         # 1. 逐首匹配 id
-        track_ids: list[str] = []
+        matched_pairs: list[tuple[str, Song]] = []
         for song in songs:
             netease_id = await self.match_netease_id(song, cfg)
             if netease_id:
-                track_ids.append(netease_id)
+                matched_pairs.append((netease_id, song))
                 if song.row_id is not None and song.netease_id != netease_id:
                     await self.store.mark_matched(song.row_id, netease_id)
             else:
@@ -176,21 +190,32 @@ class Archiver:
 
         # 保持先后顺序的同时去重
         ordered_unique: list[str] = []
+        matched_songs: list[Song] = []
         seen: set[str] = set()
-        for tid in track_ids:
+        for tid, song in matched_pairs:
             if tid not in seen:
                 seen.add(tid)
                 ordered_unique.append(tid)
+                matched_songs.append(song)
 
         if not ordered_unique:
             report.message = "没有任何歌曲能匹配到网易云曲库"
             return report
 
         # 2. 建歌单
-        name = cfg.name_template.format(
-            window=window_label, group=group_id, count=len(ordered_unique),
-            date=window_label,
+        context = build_context(
+            group_id=group_id,
+            window_label=window_label,
+            start_at=start_at,
+            end_at=end_at,
+            count=len(ordered_unique),
+            total=len(songs),
+            seq=cfg.seq,
+            songs=songs,
         )
+        name = (name_override or cfg.pending_name or cfg.name_template).strip()
+        name = render_template(name, context) or f"群歌单 {window_label}"
+        report.playlist_name = name
         try:
             playlist_id = await self.api.create_playlist(name, cfg.privacy)
         except NeteaseError as exc:
@@ -212,10 +237,22 @@ class Archiver:
                 pass
             await asyncio.sleep(0.5)
 
-        desc = cfg.description_template.format(
-            window=window_label, group=group_id, count=added, date=window_label,
-        )
-        await self.api.update_description(playlist_id, desc)
+        # 4. 简介：模板开头 + 「谁分享了什么歌」清单
+        context["count"] = str(added)
+        header = render_template(cfg.description_template, context)
+        body_lines: list[str] = []
+        if cfg.include_sharers and cfg.sharer_style != "none":
+            listed = matched_songs or list(songs)
+            if cfg.sharer_style == "by_person":
+                body_lines = build_sharer_lines(listed)
+            else:
+                body_lines = build_song_lines(listed)
+        if report.unmatched:
+            body_lines.append(
+                f"（另有 {len(report.unmatched)} 首在网易云未匹配到，未收录）"
+            )
+        desc = fit_description(header, body_lines)
+        await self.api.update_description(playlist_id, desc, name=name)
 
         report.ok = True
         report.playlist_id = playlist_id

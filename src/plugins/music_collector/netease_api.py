@@ -266,13 +266,22 @@ class NeteaseAPI:
             raise NeteaseError(int(code or -1), str(data.get("message") or data))
         return data
 
-    async def update_description(self, playlist_id: int, desc: str) -> None:
-        payload = {"id": str(playlist_id), "desc": desc[:1000]}
+    async def update_description(self, playlist_id: int, desc: str, name: str = "") -> None:
+        """更新歌单简介。
+
+        网易云没有独立的 desc 接口，必须用 ``playlist/update``，并且必须带上
+        ``name`` 否则标题会被清空。旧接口 ``/api/playlist/desc/update`` 已下线，
+        调用只会静默失败（表现为“简介一直是空的”）。
+        """
+        payload: dict[str, Any] = {"id": str(playlist_id), "desc": desc[:1000]}
+        if name:
+            payload["name"] = name[:40]
         try:
-            await self._api_post("/playlist/desc/update", payload)
+            await self._post_checked("/playlist/update", payload)
         except Exception:
+            # 旧 /api 接口兜底
             try:
-                await self._post("/playlist/desc/update", payload)
+                await self._api_post("/playlist/update", payload)
             except Exception:
                 pass
 

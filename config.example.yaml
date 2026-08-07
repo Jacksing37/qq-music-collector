@@ -51,6 +51,17 @@ playlist:
   strict_match: true
   batch_size: 100
 
+# 已收集歌曲的清理（区别于 cache：cache 清理的是榜单图片缓存）
+clear:
+  # 归档（结束收集）建歌单成功后，是否自动清空本期已收集歌曲
+  after_archive: false
+  # 定时清理总开关
+  scheduled_enabled: false
+  # 保留天数；早于 now-keep_days 的收集记录会被删除；<=0 表示不按时间清
+  keep_days: 30
+  # 每天执行定时清理的时刻
+  prune_at: '05:00'
+
 render:
   max_items_per_image: 40
   show_cover: true

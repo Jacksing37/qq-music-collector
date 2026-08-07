@@ -14,7 +14,7 @@ from nonebot_plugin_apscheduler import scheduler
 
 from .bot_utils import safe_send_group, send_report
 from .service import service
-from .window import WindowParseError
+from .window import WindowParseError, parse_daily
 
 JOB_PREFIX = "music_collector_"
 
@@ -79,7 +79,36 @@ async def job_archive() -> None:
         await safe_send_group(bot, group_id, Message(report.summary()))
 
 
-_JOB_FUNCS = {"start": job_start, "summary": job_summary, "archive": job_archive}
+async def job_clean() -> None:
+    """每日缓存回收。"""
+    cfg = service.config.cache
+    if not cfg.enabled:
+        return
+    result = service.clean_cache()
+    logger.info(f"[music] 定时缓存清理：{result.text()}")
+
+
+async def job_prune() -> None:
+    """定时清理过期的已收集歌曲（区别于图片缓存清理）。"""
+    cfg = service.config.clear
+    if not cfg.scheduled_enabled:
+        return
+    if cfg.keep_days and cfg.keep_days > 0:
+        removed = await service.prune_old(cfg.keep_days)
+        logger.info(
+            f"[music] 定时清理已收集歌曲：删除 {removed} 首（保留 {cfg.keep_days} 天）"
+        )
+    else:
+        logger.info("[music] 定时清理跳过：keep_days <= 0")
+
+
+_JOB_FUNCS = {
+    "start": job_start,
+    "summary": job_summary,
+    "archive": job_archive,
+    "clean": job_clean,
+    "prune": job_prune,
+}
 
 
 def remove_jobs() -> None:
@@ -89,12 +118,44 @@ def remove_jobs() -> None:
             scheduler.remove_job(job_id)
 
 
+def _clean_spec() -> Optional[tuple[str, str, dict]]:
+    """缓存清理任务：每天固定时刻跑一次。"""
+    cfg = service.config.cache
+    if not cfg.enabled:
+        return None
+    try:
+        point = parse_daily(cfg.clean_at)
+    except WindowParseError:
+        point = parse_daily("04:30")
+    return ("clean", "cron", {**point.cron_kwargs(), "timezone": service.resolver.tz})
+
+
+def _prune_spec() -> Optional[tuple[str, str, dict]]:
+    """已收集歌曲定时清理：每天固定时刻跑一次。"""
+    cfg = service.config.clear
+    if not cfg.scheduled_enabled:
+        return None
+    try:
+        point = parse_daily(cfg.prune_at)
+    except WindowParseError:
+        point = parse_daily("05:00")
+    return ("prune", "cron", {**point.cron_kwargs(), "timezone": service.resolver.tz})
+
+
 def reload_jobs() -> tuple[bool, str]:
-    """按当前配置重建三个定时任务。返回 (是否成功, 提示)。"""
+    """按当前配置重建定时任务。返回 (是否成功, 提示)。"""
     try:
         specs = service.resolver.schedule_specs()
     except WindowParseError as exc:
         return False, f"时间配置有误，定时任务未生效：{exc}"
+
+    clean_spec = _clean_spec()
+    if clean_spec is not None:
+        specs.append(clean_spec)
+
+    prune_spec = _prune_spec()
+    if prune_spec is not None:
+        specs.append(prune_spec)
 
     remove_jobs()
     lines: list[str] = []
