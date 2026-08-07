@@ -29,15 +29,27 @@ def _get_bot() -> Optional[Bot]:
 
 
 async def job_start() -> None:
-    """收集窗口开启，向目标群播报。"""
+    """收集窗口开启，向目标群播报"开始收录"提醒。
+
+    注意：开始时本窗口还没有任何收集数据，所以不能靠 groups_in_window 找群，
+    否则提醒永远发不出去。优先用配置的 groups / report_groups，都没有再退回到
+    所有"曾经收集过"的群。
+    """
     bot = _get_bot()
     if bot is None:
         return
     state = service.current_window()
-    groups = service.config.groups or await service.store.groups_in_window(state.key)
+    cfg = service.config
+    groups: list[int] = list(cfg.groups) or list(cfg.report_groups)
+    if not groups:
+        groups = await service.store.all_groups()
+    if not groups:
+        logger.warning("[music] 没有可广播的群（未配置 groups/report_groups，也无历史收集），跳过开始提醒")
+        return
     text = (
-        f"本期音乐收集开始啦（{state.label}）\n"
-        f"直接把网易云 / QQ音乐 等平台的歌曲分享到群里就会自动收录。"
+        f"🎵 本期音乐收集开始啦（{state.label}）\n"
+        f"把网易云 / QQ音乐 / 酷狗 / 酷我 等平台的歌曲分享到群里，就会自动收录并排序。\n"
+        f"发送 /music help 查看全部命令。"
     )
     for group_id in groups:
         if service.group_enabled(group_id):

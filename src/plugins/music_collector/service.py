@@ -37,11 +37,14 @@ class CollectResult:
         self.accepted: list[Song] = []      # 新收录
         self.duplicated: list[Song] = []    # 重复分享
         self.outside_window: list[Song] = []  # 不在收集期，仅回卡片
+        self.unidentified: list[Song] = []  # 没认出来的链接，不入榜
         self.index_of: dict[int, int] = {}  # id(song) -> 榜单序号
 
     @property
     def any_music(self) -> bool:
-        return bool(self.accepted or self.duplicated or self.outside_window)
+        return bool(
+            self.accepted or self.duplicated or self.outside_window or self.unidentified
+        )
 
 
 class CollectorService:
@@ -108,6 +111,11 @@ class CollectorService:
             song = await self.providers.resolve(link)
             song.sharer_id = sharer_id
             song.sharer_name = sharer_name
+
+            # 没认出来的链接不入榜（如解析失败、非音乐页面）
+            if not song.title or song.title == "未识别歌曲":
+                result.unidentified.append(song)
+                continue
 
             if not state.collecting:
                 result.outside_window.append(song)

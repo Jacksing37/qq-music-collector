@@ -120,6 +120,11 @@ async def handle_music_share(bot: Bot, event: GroupMessageEvent) -> None:
             text = f" 这首《{song.title}》已经在榜单第 {index} 位了（首发: {who}）"
             await _reply_song(bot, event, text, song)
 
+    if result.unidentified:
+        tip = " 这条分享没识别成音乐，已跳过收录（若确实是音乐链接，换种方式再发一次试试）"
+        for song in result.unidentified:
+            await _reply_song(bot, event, tip, song)
+
     if result.outside_window and cfg.window.reply_outside_window:
         song = result.outside_window[0]
         tip = (

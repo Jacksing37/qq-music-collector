@@ -196,6 +196,15 @@ class Store:
                 rows = await cur.fetchall()
         return [int(r[0]) for r in rows]
 
+    async def all_groups(self) -> list[int]:
+        """所有出现过收集记录的群（不限窗口），用于"开始收录"全群广播。"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT DISTINCT group_id FROM songs"
+            ) as cur:
+                rows = await cur.fetchall()
+        return [int(r[0]) for r in rows]
+
     async def get_archive(self, group_id: int, window_key: str) -> Optional[dict]:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row

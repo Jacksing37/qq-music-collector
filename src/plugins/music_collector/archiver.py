@@ -113,7 +113,11 @@ class ArchiveReport:
         if self.unmatched:
             lines.append(f"以下 {len(self.unmatched)} 首在网易云没匹配到，需要手动处理：")
             for s in self.unmatched[:15]:
-                lines.append(f"  · {s.display()}（{s.platform_name}）")
+                sharer = s.sharer_name or (str(s.sharer_id) if s.sharer_id else "匿名")
+                artist = s.artists or "未知歌手"
+                lines.append(
+                    f"  · {sharer} 分享《{s.title}》- {artist}（{s.platform_name}）"
+                )
             if len(self.unmatched) > 15:
                 lines.append(f"  …… 还有 {len(self.unmatched) - 15} 首")
         return "\n".join(lines)
@@ -248,9 +252,8 @@ class Archiver:
             else:
                 body_lines = build_song_lines(listed)
         if report.unmatched:
-            body_lines.append(
-                f"（另有 {len(report.unmatched)} 首在网易云未匹配到，未收录）"
-            )
+            body_lines.append("以下歌曲在网易云未匹配到，未收录（含分享者方便查找）：")
+            body_lines += build_song_lines(report.unmatched, with_platform=True)
         desc = fit_description(header, body_lines)
         await self.api.update_description(playlist_id, desc, name=name)
 
