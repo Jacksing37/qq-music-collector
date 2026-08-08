@@ -48,6 +48,18 @@ CREATE TABLE IF NOT EXISTS archives (
     created_at   REAL    NOT NULL,
     UNIQUE(group_id, window_key)
 );
+
+-- 简介写入失败时暂存，等定时任务或 /music descfix 补写
+CREATE TABLE IF NOT EXISTS pending_desc (
+    playlist_id   TEXT    PRIMARY KEY,
+    playlist_name TEXT    NOT NULL DEFAULT '',
+    group_id      INTEGER NOT NULL DEFAULT 0,
+    description   TEXT    NOT NULL,
+    last_error    TEXT    NOT NULL DEFAULT '',
+    tries         INTEGER NOT NULL DEFAULT 0,
+    created_at    REAL    NOT NULL,
+    updated_at    REAL    NOT NULL
+);
 """
 
 _COLUMNS = (
@@ -154,6 +166,54 @@ class Store:
                 """,
                 (group_id, window_key, playlist_id, playlist_url, total, added, failed, time.time()),
             )
+            await db.commit()
+
+    # ------------------------------------------------------- 简介待补写队列
+
+    async def save_pending_desc(
+        self,
+        playlist_id: str,
+        playlist_name: str,
+        group_id: int,
+        description: str,
+        last_error: str,
+    ) -> None:
+        """简介写入失败时入队，等后续自动 / 手动补写。"""
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO pending_desc
+                    (playlist_id, playlist_name, group_id, description,
+                     last_error, tries, created_at, updated_at)
+                VALUES (?,?,?,?,?,1,?,?)
+                ON CONFLICT(playlist_id) DO UPDATE SET
+                    playlist_name=excluded.playlist_name,
+                    description=excluded.description,
+                    last_error=excluded.last_error,
+                    tries=pending_desc.tries + 1,
+                    updated_at=excluded.updated_at
+                """,
+                (playlist_id, playlist_name, group_id, description, last_error, now, now),
+            )
+            await db.commit()
+
+    async def list_pending_desc(self, group_id: Optional[int] = None) -> list[dict]:
+        sql = "SELECT * FROM pending_desc"
+        args: tuple = ()
+        if group_id is not None:
+            sql += " WHERE group_id=?"
+            args = (group_id,)
+        sql += " ORDER BY updated_at ASC"
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, args) as cur:
+                rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def drop_pending_desc(self, playlist_id: str) -> None:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM pending_desc WHERE playlist_id=?", (playlist_id,))
             await db.commit()
 
     # ------------------------------------------------------------ 读取

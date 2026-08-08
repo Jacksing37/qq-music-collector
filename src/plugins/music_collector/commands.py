@@ -17,63 +17,84 @@ from nonebot.params import CommandArg
 from nonebot.permission import SUPERUSER
 
 from . import detector
-from .bot_utils import send_report, split_text
+from .bot_utils import card_breaker, send_report, split_text
 from .config import config_manager
 from .naming import build_context, render_template, unknown_placeholders
 from .scheduler import next_runs, reload_jobs
 from .service import service
 from .window import WindowParseError, parse_daily, parse_once, parse_weekly
 
-HELP_TEXT = """音乐收集机器人 · 命令一览
-【所有人】
-/music list        当前榜单（文字 + 长图）
-/music count       已收集数量
-/music window      查看时间窗口配置
-/music status      运行状态与网易云登录状态
-/music preview     预览本期歌单名
-【管理员 · 时间】
-/music mode weekly|daily|once   切换循环模式
-/music set start   <时间点>     设置开始收集时刻
-/music set summary <时间点>     设置汇总播报时刻
-/music set archive <时间点>     设置归档建歌单时刻
-/music set tz      <时区>       如 Asia/Shanghai
-【管理员 · 歌单】
-/music name <模板>          歌单命名模板
-/music title <名称>         只对下一次归档生效的歌单名
-/music seq <数字>           设置自增期号（Wk.86 里的 86）
-/music desc <模板>          歌单简介开头模板
-/music sharer list|by_person|none   简介里分享清单的样式
-/music archive [歌单名]     立即归档并建歌单
-/music export      导出榜单文本（weapi 不可用时手动建歌单）
-【管理员 · 清理收集数据】
-/music del <序号|范围|all|window>   删除已收集歌曲
-   del 3          删除第 3 首
-   del 1-5        批量删除第 1~5 首
-   del 2 4 7      批量删除指定序号
-   del all        清空本期榜单
-   del window     查看可清理的历史窗口
-   del window <key>   清空指定窗口
-/music delauto on|off   归档（结束收集）后自动清空本期
-/music prune on|off|days|at   定时清理历史收集
-   prune on|off        开关定时清理
-   prune days <天数>   保留天数（默认 30）
-   prune at <HH:MM>    每天执行时刻（默认 05:00）
-/music clean [天数]        立即清理图片缓存
-/music on | off    开关收集
-/music cookie <MUSIC_U>    设置网易云登录凭证（建议私聊使用）
-/music parse <链接>        诊断某个链接为什么没被识别
-/music debug on|off        开关识别过程详细日志
-【时间点格式】
-weekly: MON 20:00 或 周一 20:00 ／ daily: 23:00 ／ once: 2026-08-10 00:00
-【命名占位符】
-{seq} 期号  {slash} 26/8/7  {yy}{m}{d} 年月日  {week} 周数
-{window} 区间  {count} 首数  {sharers} 参与人数  {group} 群号
-例：/music name Wk.{seq}线上学习{slash}  ->  Wk.86线上学习26/8/7"""
+HELP_TEXT = """音乐收集机器人 · 命令一览（每条命令不带参数发送可看各自详细用法）
+
+【查询】所有人可用
+/music list      本期榜单（文字 + 长图）
+/music count     已收集数量
+/music window    时间窗口配置与下次触发
+/music status    运行状态 / 网易云登录状态
+/music preview   预览本期歌单名
+
+【时间】管理员
+/music mode weekly|daily|once                切换循环模式
+/music set time <开始>-<结束>                 一键设：开始-结束（汇总/归档统一=结束）
+   例: /music set time 周五 12:00-周五 20:00
+/music set start|summary|end|archive <时间点>  单独设置某一时刻
+/music set tz <时区>                          如 Asia/Shanghai
+
+【歌单】管理员
+/music name <模板>                 命名模板（如 Wk.{seq}线上学习{slash}）
+/music title <名称>                仅本次归档生效的歌单名
+/music seq <数字>                 期号（可 seq auto on|off 开自动递增）
+/music desc <模板>                 简介开头模板
+/music sharer list|by_person|none  简介分享清单样式
+
+【简介样式】管理员
+/music emoji text|strip|keep   昵称/歌名表情处理（text=转中文词，推荐）
+/music artist on|off           简介是否带歌手名
+/music blank on|off            简介条目间空行（by_person 样式生效）
+
+【收集控制】管理员
+/music on|off                 开关收集
+/music collect auto|on|off    临时覆盖收集状态（测试用，不改时间表）
+/music archive [歌单名]       立即归档建歌单
+/music descfix                补写失败的歌单简介
+
+【音乐卡片】管理员
+/music card                        查看卡片状态与用法
+/music card native|custom|off      切换卡片模式
+       签名服务老是 500 就切 custom（不依赖签名服务）
+/music card reset                  解除卡片熔断
+
+【自我介绍】被 @ 时回应
+/music intro [on|off|text|cooldown|at|always|skipcmd|skipmusic]
+       不带参数 = 查看当前配置与预览；text 后接自定义文案（\\n 换行）
+
+【清理 / 维护】管理员
+/music del <序号|范围|all|window>   删除收集（del window 看历史窗口）
+/music delauto on|off               归档后自动清空本期
+/music prune on|off|days|at         定时清理历史收集
+/music clean [天数]                 立即清理图片缓存
+/music cookie <MUSIC_U>            设置网易云登录凭证（建议私聊）
+
+【诊断】
+/music parse <链接>    诊断链接为何没被识别
+/music debug on|off    识别过程详细日志
+/music export          导出榜单文本（手动建歌单用）
+
+【时间格式】weekly: MON 20:00 ｜ daily: 23:00 ｜ once: 2026-08-10 00:00
+【命名占位符】{seq}{slash}{yy}{m}{d}{week}{window}{count}{sharers}{group}
+例：/music name Wk.{seq}线上学习{slash}  →  Wk.86线上学习26/8/7"""
 
 _FIELD_ALIASES = {
     "start": "start", "开始": "start", "起始": "start",
     "summary": "summary", "汇总": "summary", "播报": "summary",
-    "archive": "archive", "归档": "archive", "结束": "archive",
+    "end": "end", "结束收集": "end", "截止": "end",
+    "archive": "archive", "归档": "archive",
+}
+
+_CARD_MODE_CN = {
+    "native": "原生卡片（依赖签名服务，可能 500）",
+    "custom": "自定义卡片（不走签名服务，最稳）",
+    "off": "关闭（只发文字 + 封面）",
 }
 
 
@@ -129,6 +150,37 @@ def _demo_context(group_id: Optional[int] = None) -> dict[str, str]:
     )
 
 
+async def _intro_context(nick: str, group_id: Optional[int]) -> dict[str, str]:
+    """自我介绍文案占位符表，含 {nick}/{count}/{state}/{playlist}。
+
+    与 __init__._build_intro 共用同一套占位符，保证命令预览与运行时一致。
+    """
+    cfg = service.config
+    state = service.current_window()
+    count = 0
+    if group_id is not None:
+        try:
+            count = await service.store.count(group_id, state.key)
+        except Exception:
+            count = 0
+    ctx = build_context(
+        group_id=group_id or 0,
+        window_label=state.label,
+        start_at=state.start_at,
+        end_at=state.archive_at,
+        count=count,
+        total=count,
+        seq=cfg.playlist.seq,
+        songs=[],
+    )
+    ctx["nick"] = nick
+    ctx["state"] = "收集中" if state.collecting else "未在收集期"
+    ctx["playlist"] = render_template(
+        cfg.playlist.pending_name or cfg.playlist.name_template, ctx
+    )
+    return ctx
+
+
 @cmd.handle()
 async def handle_command(bot: Bot, event: MessageEvent, args: Message = CommandArg()) -> None:
     raw = args.extract_plain_text().strip()
@@ -174,6 +226,14 @@ async def handle_command(bot: Bot, event: MessageEvent, args: Message = CommandA
         await _cmd_prune(bot, event, rest)
     elif action in ("on", "off", "开", "关"):
         await _cmd_toggle(bot, event, action)
+    elif action in ("collect", "收集"):
+        await _cmd_collect(bot, event, rest)
+    elif action in ("emoji", "表情"):
+        await _cmd_emoji(bot, event, rest)
+    elif action in ("artist", "歌手"):
+        await _cmd_artist(bot, event, rest)
+    elif action in ("blank", "空行"):
+        await _cmd_blank(bot, event, rest)
     elif action in ("cookie", "cookies", "凭证"):
         await _cmd_cookie(bot, event, rest)
     elif action in ("export", "导出"):
@@ -184,6 +244,12 @@ async def handle_command(bot: Bot, event: MessageEvent, args: Message = CommandA
         await _cmd_parse(rest)
     elif action in ("debug", "调试"):
         await _cmd_debug(bot, event, rest)
+    elif action in ("card", "卡片"):
+        await _cmd_card(bot, event, rest)
+    elif action in ("intro", "介绍", "自我介绍"):
+        await _cmd_intro(bot, event, rest, group_id)
+    elif action in ("descfix", "补写", "补简介"):
+        await _cmd_descfix(bot, event, group_id)
     else:
         await cmd.finish(Message(f"未知子命令: {action}\n发送 /music help 查看用法"))
 
@@ -222,6 +288,7 @@ async def _cmd_status() -> None:
     groups = "、".join(str(g) for g in cfg.groups) if cfg.groups else "全部群"
     text = (
         f"收集开关: {'开启' if cfg.enabled else '关闭'}\n"
+        f"收集模式: {cfg.collect_override}（auto=自动 / on=强制 / off=强制关）\n"
         f"生效群: {groups}\n"
         f"网易云账号: {account}\n"
         f"当前窗口: {state.label}（{'收集中' if state.collecting else '不在收集期'}）\n"
@@ -233,6 +300,8 @@ async def _cmd_status() -> None:
         f"归档后清空本期: {'开启' if cfg.clear.after_archive else '关闭'}\n"
         f"定时清理收集: {'开启' if cfg.clear.scheduled_enabled else '关闭'}"
         f"（保留 {cfg.clear.keep_days} 天 / 每天 {cfg.clear.prune_at}）\n"
+        f"音乐卡片: {_CARD_MODE_CN.get(cfg.card.mode, cfg.card.mode)}"
+        f" · {card_breaker.status()}\n"
         f"识别调试日志: {'开启' if cfg.debug_detect else '关闭'}"
     )
     await cmd.finish(Message(text))
@@ -263,6 +332,40 @@ async def _cmd_mode(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
 async def _cmd_set(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
     if not await _is_admin(bot, event):
         await cmd.finish(Message("只有管理员可以修改配置"))
+
+    field_raw = rest[0].lower() if rest else ""
+
+    # `set time 开始-结束`：一键设开始与结束，且汇总/归档统一对齐到结束时刻
+    if field_raw in ("time", "时间"):
+        value = " ".join(rest[1:]).strip()
+        if "-" not in value:
+            await cmd.finish(Message(
+                "用法: /music set time <开始>-<结束>\n"
+                "例: /music set time 周五 12:00-周五 20:00\n"
+                "（汇总播报与归档建歌单都会对齐到结束时刻）"
+            ))
+        start_str, _, end_str = value.partition("-")
+        start_str, end_str = start_str.strip(), end_str.strip()
+        if not start_str or not end_str:
+            await cmd.finish(Message(
+                "开始和结束都要有，用 - 连接，例: 周五 12:00-周五 20:00"
+            ))
+        mode = service.config.window.mode
+        try:
+            _validate_point(mode, start_str)
+            _validate_point(mode, end_str)
+        except WindowParseError as exc:
+            await cmd.finish(Message(str(exc)))
+        config_manager.update(f"window.{mode}.start", start_str)
+        config_manager.update(f"window.{mode}.summary", end_str)
+        config_manager.update(f"window.{mode}.end", end_str)
+        config_manager.update(f"window.{mode}.archive", end_str)
+        ok, info = reload_jobs()
+        await cmd.finish(Message(
+            f"[{mode}] 开始={start_str}，结束(汇总/归档统一)={end_str}\n\n"
+            + service.resolver.summary_text() + "\n\n下次触发：\n" + info
+        ))
+
     if len(rest) < 2:
         await cmd.finish(Message("用法: /music set start MON 20:00"))
 
@@ -287,6 +390,12 @@ async def _cmd_set(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
         await cmd.finish(Message(str(exc)))
 
     config_manager.update(f"window.{mode}.{field}", value)
+    # 用户要求：设结束收集时，汇总播报也对齐到结束时刻；
+    # 归档时刻在 archive_same_as_end 打开时同样跟随结束时刻
+    if field == "end":
+        config_manager.update(f"window.{mode}.summary", value)
+        if service.resolver.same_archive:
+            config_manager.update(f"window.{mode}.archive", value)
     ok, info = reload_jobs()
     await cmd.finish(Message(
         f"[{mode}] {field} 已设为 {value}\n\n"
@@ -423,6 +532,170 @@ async def _cmd_toggle(bot: Bot, event: MessageEvent, action: str) -> None:
     enabled = action in ("on", "开")
     config_manager.update("enabled", enabled)
     await cmd.finish(Message("收集已开启" if enabled else "收集已关闭"))
+
+
+async def _cmd_collect(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
+    """手动覆盖收集状态，方便测试（不改动时间表）。
+
+    auto=按窗口自动判断  on=强制正在收集  off=强制停止。
+    """
+    if not await _is_admin(bot, event):
+        await cmd.finish(Message("只有管理员可以切换收集模式"))
+    if not rest or rest[0].lower() not in (
+        "auto", "on", "off", "自动", "开", "关"
+    ):
+        cur = service.config.collect_override
+        await cmd.finish(Message(
+            f"当前收集模式: {cur}\n"
+            "用法: /music collect auto|on|off\n"
+            "  auto  按时间窗口自动判断（默认）\n"
+            "  on    强制正在收集（无视时间，方便测试）\n"
+            "  off   强制停止收集（无视时间，方便测试）"
+        ))
+    raw = rest[0].lower()
+    value = (
+        "auto" if raw in ("auto", "自动")
+        else "on" if raw in ("on", "开")
+        else "off"
+    )
+    note = service.set_collect_override(value)
+    await cmd.finish(Message(f"收集模式已切换：{note}"))
+
+
+async def _cmd_card(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
+    """音乐卡片发送策略。
+
+    原生卡片要协议端向签名服务换 ArkShare 结构，那个服务经常 500，
+    表现为群里只回文字不回卡片、日志刷「音乐卡片签名失败」。
+    切到 custom 就不再依赖签名服务。
+    """
+    cfg = service.config.card
+    sub = rest[0].lower() if rest else ""
+
+    if sub in ("", "status", "状态"):
+        await cmd.finish(Message(
+            f"音乐卡片模式: {_CARD_MODE_CN.get(cfg.mode, cfg.mode)}\n"
+            f"原生失败转自定义: {'开' if cfg.fallback_custom else '关'}\n"
+            f"卡片失败转文字: {'开' if cfg.fallback_text else '关'}"
+            f"（附封面: {'是' if cfg.fallback_cover else '否'}）\n"
+            f"熔断: 连续失败 {cfg.failure_threshold} 次后停 {cfg.cooldown_minutes} 分钟\n"
+            f"当前状态: {card_breaker.status()}\n\n"
+            "用法:\n"
+            "/music card native|custom|off   切换卡片模式\n"
+            "/music card text on|off         卡片失败时是否补发文字\n"
+            "/music card cover on|off        文字兜底是否附封面\n"
+            "/music card retry <次数> [分钟]  熔断阈值与冷却时长\n"
+            "/music card reset               立即解除熔断\n"
+            "提示: 老是签名失败就用 /music card custom"
+        ))
+
+    if not await _is_admin(bot, event):
+        await cmd.finish(Message("只有管理员可以修改配置"))
+
+    if sub in ("native", "原生", "custom", "自定义", "off", "关闭", "关"):
+        value = (
+            "native" if sub in ("native", "原生")
+            else "custom" if sub in ("custom", "自定义")
+            else "off"
+        )
+        config_manager.update("card.mode", value)
+        card_breaker.reset()
+        await cmd.finish(Message(
+            f"音乐卡片模式已设为 {value}：{_CARD_MODE_CN[value]}\n熔断状态已重置"
+        ))
+
+    if sub in ("text", "文字"):
+        if len(rest) < 2 or rest[1].lower() not in ("on", "off", "开", "关"):
+            await cmd.finish(Message("用法: /music card text on|off"))
+        enabled = rest[1].lower() in ("on", "开")
+        config_manager.update("card.fallback_text", enabled)
+        await cmd.finish(Message(f"卡片失败时{'会' if enabled else '不会'}补发文字"))
+
+    if sub in ("cover", "封面"):
+        if len(rest) < 2 or rest[1].lower() not in ("on", "off", "开", "关"):
+            await cmd.finish(Message("用法: /music card cover on|off"))
+        enabled = rest[1].lower() in ("on", "开")
+        config_manager.update("card.fallback_cover", enabled)
+        await cmd.finish(Message(f"文字兜底{'会' if enabled else '不会'}附封面图"))
+
+    if sub in ("retry", "熔断"):
+        if len(rest) < 2 or not rest[1].isdigit():
+            await cmd.finish(Message(
+                "用法: /music card retry <连续失败次数> [冷却分钟]\n"
+                "例: /music card retry 3 10   （失败 3 次停 10 分钟；0 = 不熔断）"
+            ))
+        config_manager.update("card.failure_threshold", int(rest[1]))
+        minutes = cfg.cooldown_minutes
+        if len(rest) >= 3 and rest[2].isdigit():
+            minutes = int(rest[2])
+            config_manager.update("card.cooldown_minutes", minutes)
+        card_breaker.reset()
+        await cmd.finish(Message(
+            f"熔断已设为：连续失败 {rest[1]} 次后停 {minutes} 分钟"
+            if int(rest[1]) > 0 else "熔断已关闭，每首歌都会尝试发卡片"
+        ))
+
+    if sub in ("reset", "重置"):
+        card_breaker.reset()
+        await cmd.finish(Message("卡片熔断状态已重置，下一首会重新尝试发卡片"))
+
+    await cmd.finish(Message(f"未知参数: {sub}\n发送 /music card 查看用法"))
+
+
+async def _cmd_emoji(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
+    """昵称 / 歌名里的表情处理方式。"""
+    if not await _is_admin(bot, event):
+        await cmd.finish(Message("只有管理员可以修改配置"))
+    cfg = service.config.playlist
+    if not rest or rest[0].lower() not in (
+        "text", "strip", "keep", "文字", "删除", "原样"
+    ):
+        await cmd.finish(Message(
+            f"当前表情处理: {cfg.emoji_style}\n"
+            "用法: /music emoji text|strip|keep\n"
+            "  text   转成中文词（如 🎵→[音符]），推荐\n"
+            "  strip  直接删除表情\n"
+            "  keep   原样（带 emoji 的昵称简介可能写不进网易云）"
+        ))
+    raw = rest[0].lower()
+    value = (
+        "text" if raw in ("text", "文字")
+        else "strip" if raw in ("strip", "删除")
+        else "keep"
+    )
+    config_manager.update("playlist.emoji_style", value)
+    await cmd.finish(Message(f"昵称/歌名表情处理已设为 {value}"))
+
+
+async def _cmd_artist(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
+    """简介清单里是否带歌手名。"""
+    if not await _is_admin(bot, event):
+        await cmd.finish(Message("只有管理员可以修改配置"))
+    cfg = service.config.playlist
+    if not rest or rest[0].lower() not in ("on", "off", "开", "关"):
+        await cmd.finish(Message(
+            f"当前简介是否带歌手: {'开' if cfg.desc_show_artist else '关'}\n"
+            "用法: /music artist on|off"
+        ))
+    enabled = rest[0].lower() in ("on", "开")
+    config_manager.update("playlist.desc_show_artist", enabled)
+    await cmd.finish(Message(f"简介清单{'已带' if enabled else '已不带'}歌手名"))
+
+
+async def _cmd_blank(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
+    """简介清单条目之间插空行（by_person 样式下按人分段）。"""
+    if not await _is_admin(bot, event):
+        await cmd.finish(Message("只有管理员可以修改配置"))
+    cfg = service.config.playlist
+    if not rest or rest[0].lower() not in ("on", "off", "开", "关"):
+        await cmd.finish(Message(
+            f"当前简介条目间空行: {'开' if cfg.desc_blank_line else '关'}\n"
+            "用法: /music blank on|off\n"
+            "（仅 by_person 样式下生效，按人分段更清晰）"
+        ))
+    enabled = rest[0].lower() in ("on", "开")
+    config_manager.update("playlist.desc_blank_line", enabled)
+    await cmd.finish(Message(f"简介条目间空行已{'开启' if enabled else '关闭'}"))
 
 
 # ---------------------------------------------------------------- 操作类
@@ -636,4 +909,126 @@ async def _cmd_debug(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
     await cmd.finish(Message(
         f"识别调试日志已{'开启' if enabled else '关闭'}"
         + ("，现在分享一首歌，然后看机器人控制台的 [music/detect] 日志" if enabled else "")
+    ))
+
+
+# ---------------------------------------------------------------- 自我介绍 / 简介补写
+
+
+async def _cmd_intro(
+    bot: Bot, event: MessageEvent, rest: list[str], group_id: Optional[int]
+) -> None:
+    """被 @ 时的自我介绍：查看 / 开关 / 自定义文案 / 冷却等。"""
+    cfg = service.config.intro
+
+    # 无参数：展示当前配置 + 渲染预览（所有人可见）
+    if not rest:
+        ctx = await _intro_context("你", group_id)
+        preview = render_template(cfg.text, ctx)
+        await cmd.finish(Message(
+            "被 @ 时自我介绍：\n"
+            f"  开关: {'开启' if cfg.enabled else '关闭'}\n"
+            f"  冷却: {cfg.cooldown} 秒（0=不限频）\n"
+            f"  @提问者: {'是' if cfg.at_sender else '否'}\n"
+            f"  关收集时也回应: {'是' if cfg.always_reply else '否'}\n"
+            f"  遇 /music 命令跳过: {'是' if cfg.skip_commands else '否'}\n"
+            f"  遇音乐分享跳过: {'是' if cfg.skip_music else '否'}\n\n"
+            f"当前文案：\n{cfg.text}\n\n"
+            f"预览效果：\n{preview}\n\n"
+            "用法:\n"
+            "  /music intro on|off            开关自我介绍\n"
+            "  /music intro text <文案>       自定义文案（\\n 表示换行）\n"
+            "  /music intro cooldown <秒>     冷却秒数（0=不限）\n"
+            "  /music intro at on|off         是否 @ 提问者\n"
+            "  /music intro always on|off     关收集时也回应\n"
+            "  /music intro skipcmd on|off    遇命令跳过\n"
+            "  /music intro skipmusic on|off  遇音乐跳过\n"
+            "  /music intro preview           只看渲染预览"
+        ))
+
+    sub = rest[0].lower()
+    if sub == "preview":
+        ctx = await _intro_context("你", group_id)
+        await cmd.finish(Message("预览效果：\n" + render_template(cfg.text, ctx)))
+
+    # 其余均为写操作，仅管理员
+    if not await _is_admin(bot, event):
+        await cmd.finish(Message("只有管理员可以修改自我介绍设置"))
+
+    if sub in ("on", "off", "开", "关"):
+        enabled = sub in ("on", "开")
+        config_manager.update("intro.enabled", enabled)
+        await cmd.finish(Message(f"被 @ 时的自我介绍已{'开启' if enabled else '关闭'}"))
+    if sub == "text":
+        if len(rest) < 2:
+            await cmd.finish(Message(
+                "用法: /music intro text 你好 {nick}，我是…（\\n 表示换行）\n"
+                "可用占位符: {nick} {state} {playlist} 以及 {window} {count} {seq} 等"
+            ))
+        template = " ".join(rest[1:]).replace("\\n", "\n")
+        ctx = await _intro_context("你", group_id)
+        unknown = unknown_placeholders(template, ctx)
+        if unknown:
+            await cmd.finish(Message(
+                f"这些占位符不认识: {'、'.join('{' + u + '}' for u in unknown)}\n"
+                "可用的有：{nick} {state} {playlist} 以及命名占位符 {window} {count} {seq} 等"
+            ))
+        config_manager.update("intro.text", template)
+        await cmd.finish(Message("自我介绍文案已更新\n预览：\n" + render_template(template, ctx)))
+    if sub == "cooldown":
+        if len(rest) < 2 or not rest[1].lstrip("-").isdigit():
+            await cmd.finish(Message("用法: /music intro cooldown <秒数>，0 表示不限"))
+        cd = int(rest[1])
+        if cd < 0:
+            await cmd.finish(Message("冷却秒数不能为负"))
+        config_manager.update("intro.cooldown", cd)
+        await cmd.finish(Message(f"自我介绍冷却已设为 {cd} 秒" + ("（不限频）" if cd == 0 else "")))
+    if sub == "at":
+        if len(rest) < 2 or rest[1].lower() not in ("on", "off", "开", "关"):
+            await cmd.finish(Message("用法: /music intro at on|off"))
+        v = rest[1].lower() in ("on", "开")
+        config_manager.update("intro.at_sender", v)
+        await cmd.finish(Message(f"@ 提问者已{'开启' if v else '关闭'}"))
+    if sub == "always":
+        if len(rest) < 2 or rest[1].lower() not in ("on", "off", "开", "关"):
+            await cmd.finish(Message("用法: /music intro always on|off"))
+        v = rest[1].lower() in ("on", "开")
+        config_manager.update("intro.always_reply", v)
+        await cmd.finish(Message(f"关收集时也回应已{'开启' if v else '关闭'}"))
+    if sub in ("skipcmd", "skip_command", "skip-cmd"):
+        if len(rest) < 2 or rest[1].lower() not in ("on", "off", "开", "关"):
+            await cmd.finish(Message("用法: /music intro skipcmd on|off"))
+        v = rest[1].lower() in ("on", "开")
+        config_manager.update("intro.skip_commands", v)
+        await cmd.finish(Message(f"遇到 /music 命令时跳过自我介绍已{'开启' if v else '关闭'}"))
+    if sub in ("skipmusic", "skip_music", "skip-music"):
+        if len(rest) < 2 or rest[1].lower() not in ("on", "off", "开", "关"):
+            await cmd.finish(Message("用法: /music intro skipmusic on|off"))
+        v = rest[1].lower() in ("on", "开")
+        config_manager.update("intro.skip_music", v)
+        await cmd.finish(Message(f"遇到音乐分享时跳过自我介绍已{'开启' if v else '关闭'}"))
+
+    await cmd.finish(Message("用法见 /music intro"))
+
+
+async def _cmd_descfix(
+    bot: Bot, event: MessageEvent, group_id: Optional[int]
+) -> None:
+    """手动补写之前归档失败（频控拦截）的歌单简介。"""
+    if not await _is_admin(bot, event):
+        await cmd.finish(Message("只有管理员可以补写简介"))
+    if group_id is None:
+        await cmd.finish(Message("该命令请在群里使用"))
+
+    pending = await service.pending_desc_list(group_id)
+    if not pending:
+        await cmd.finish(Message("当前没有待补写的歌单简介 ✓"))
+    await bot.send(event, Message(f"发现 {len(pending)} 个待补写简介，开始重试…"))
+    ok, failed = await service.retry_pending_desc(group_id)
+    if failed == 0:
+        await cmd.finish(Message(f"简介补写完成，成功 {ok} 个，全部搞定 ✓"))
+    await cmd.finish(Message(
+        f"简介补写结果：成功 {ok} 个，仍失败 {failed} 个。\n"
+        "失败的可能是网易云仍在频控，定时补写任务（desc_retry_minutes）会自动再试，"
+        "也可稍后再次 /music descfix。"
     ))

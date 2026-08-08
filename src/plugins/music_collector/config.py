@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # 项目根目录（.../qq-music-collector）
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -22,35 +22,56 @@ DB_PATH = DATA_DIR / "collector.db"
 NETEASE_SESSION_PATH = DATA_DIR / "netease_session.json"
 
 
-class WeeklyWindow(BaseModel):
+class _PointsBase(BaseModel):
+    """四个时间点的公共校验：老配置没有 `end` 时自动继承 `archive`。
+
+    这样从旧版本升上来的 data/config.yaml 不用手改也能跑。
+    """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_end(cls, data: object) -> object:
+        if isinstance(data, dict) and not data.get("end") and data.get("archive"):
+            data = dict(data)
+            data["end"] = data["archive"]
+        return data
+
+
+class WeeklyWindow(_PointsBase):
     """每周循环。时间点格式：`MON 20:00`（星期缩写 + 24 小时制）。"""
 
     start: str = "MON 00:00"
     summary: str = "SUN 22:00"
+    #: 结束收集（此刻起不再收录新歌）
+    end: str = "SUN 22:30"
+    #: 归档建歌单；archive_same_as_end 打开时会被 end 覆盖
     archive: str = "SUN 22:30"
 
 
-class DailyWindow(BaseModel):
+class DailyWindow(_PointsBase):
     """每日循环。时间点格式：`23:00`。"""
 
     start: str = "00:00"
     summary: str = "23:00"
+    end: str = "23:30"
     archive: str = "23:30"
 
 
-class OnceWindow(BaseModel):
+class OnceWindow(_PointsBase):
     """单次区间。时间点格式：`2026-08-10 00:00`。"""
 
     start: str = "2026-08-10 00:00"
     summary: str = "2026-08-20 22:00"
+    end: str = "2026-08-20 22:30"
     archive: str = "2026-08-20 22:30"
 
 
 class WindowConfig(BaseModel):
     mode: Literal["weekly", "daily", "once"] = "weekly"
     timezone: str = "Asia/Shanghai"
-    #: 窗口关闭后收到的音乐链接是否仍然回复卡片（只是不入库）
-    reply_outside_window: bool = True
+    #: 开：归档时刻 = 结束收集时刻（收工即建歌单，只跑一个任务）
+    #: 关：先在 end 结束收集并播报，再到 archive 单独建歌单
+    archive_same_as_end: bool = True
     weekly: WeeklyWindow = Field(default_factory=WeeklyWindow)
     daily: DailyWindow = Field(default_factory=DailyWindow)
     once: OnceWindow = Field(default_factory=OnceWindow)
@@ -84,6 +105,72 @@ class PlaylistConfig(BaseModel):
     strict_match: bool = True
     #: 单次加歌批大小（网易云接口限制）
     batch_size: int = 100
+    #: 简介写入失败时的重试次数（网易云对改简介有频控，失败会自动入队补写）
+    desc_retry: int = 3
+    #: 定时补写待写入简介的间隔分钟数；<=0 关闭自动补写
+    desc_retry_minutes: int = 30
+    #: 昵称 / 歌名里的表情处理：text=转中文词 [音符]  strip=直接删  keep=原样
+    #: 网易云简介是 utf8(3字节) 存储，emoji 是 4 字节，keep 有很大概率写不进去
+    emoji_style: Literal["text", "strip", "keep"] = "text"
+    #: 简介清单里是否带歌手名
+    desc_show_artist: bool = True
+    #: 简介清单条目之间是否插空行（by_person 样式下按人分段）
+    desc_blank_line: bool = False
+
+
+#: 自我介绍默认文案。占位符见 naming.py，另有 {nick} {count} {state} {playlist}
+DEFAULT_INTRO = (
+    "你好 {nick}，我是群音乐收集助手 🎵\n"
+    "把网易云 / QQ音乐 / 酷狗 / 酷我 的歌曲分享到群里，我会自动收录并排序。\n"
+    "本期：{window}（{state}），已收集 {count} 首。\n"
+    "发送 /music help 查看全部命令。"
+)
+
+
+class IntroConfig(BaseModel):
+    """被 @ 时的自我介绍。"""
+
+    #: 总开关
+    enabled: bool = True
+    #: 文案模板，支持占位符；命令行里用 \n 表示换行
+    text: str = DEFAULT_INTRO
+    #: 同一个群的冷却秒数，防止刷屏；0 表示不限
+    cooldown: int = 10
+    #: 回复时是否 @ 提问者
+    at_sender: bool = True
+    #: 消息里带 /music 命令时不发自我介绍（避免和命令回复重复）
+    skip_commands: bool = True
+    #: 消息里同时带音乐链接时不发自我介绍（那是分享，不是提问）
+    skip_music: bool = True
+    #: 收集开关关闭 / 不在收集期时，是否仍然回应自我介绍
+    always_reply: bool = True
+
+
+class CardConfig(BaseModel):
+    """音乐卡片发送策略。
+
+    背景：NapCat / go-cqhttp 发送平台原生音乐卡片时要走外部**签名服务**换取
+    ArkShare 结构，这个服务经常 500 或超时，表现为
+    ``[音乐卡片签名失败] Unexpected status code: 500`` 加一条
+    ``消息体无法解析`` 的报错。所以这里做成可降级的三级链路，
+    保证签名服务挂掉时群里依然能看到歌曲信息。
+    """
+
+    #: 卡片模式：
+    #: native = 平台原生卡片（好看，但依赖签名服务）
+    #: custom = 自定义音乐卡片（自己拼标题/封面/跳转链接，不走签名服务）
+    #: off    = 完全不发卡片，只发文字 + 封面
+    mode: Literal["native", "custom", "off"] = "native"
+    #: 原生卡片失败后，是否自动再试一次自定义卡片
+    fallback_custom: bool = True
+    #: 卡片全部失败时，是否补发一条文字（歌名 / 歌手 / 可点击链接）
+    fallback_text: bool = True
+    #: 文字兜底里是否附上封面图
+    fallback_cover: bool = True
+    #: 同一平台连续失败多少次后熔断，冷却期内直接跳过卡片不再空等；<=0 关闭熔断
+    failure_threshold: int = 3
+    #: 熔断冷却分钟数，到点后自动恢复试探
+    cooldown_minutes: int = 10
 
 
 class CacheConfig(BaseModel):
@@ -132,6 +219,9 @@ class RenderConfig(BaseModel):
 class AppConfig(BaseModel):
     #: 总开关
     enabled: bool = True
+    #: 手动覆盖收集状态（方便测试）：
+    #: auto=按时间窗口自动判断  on=强制正在收集  off=强制不收集
+    collect_override: Literal["auto", "on", "off"] = "auto"
     #: 生效群号，留空表示所有群
     groups: list[int] = Field(default_factory=list)
     #: 识别到音乐后是否 @ 分享者并回发卡片
@@ -144,9 +234,11 @@ class AppConfig(BaseModel):
     debug_detect: bool = False
     window: WindowConfig = Field(default_factory=WindowConfig)
     playlist: PlaylistConfig = Field(default_factory=PlaylistConfig)
+    card: CardConfig = Field(default_factory=CardConfig)
     render: RenderConfig = Field(default_factory=RenderConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     clear: ClearConfig = Field(default_factory=ClearConfig)
+    intro: IntroConfig = Field(default_factory=IntroConfig)
 
 
 class ConfigManager:

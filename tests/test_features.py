@@ -87,7 +87,7 @@ def test_description() -> None:
         Song(platform="netease", song_id="3", title="七里香", artists="周杰伦", sharer_name="张三"),
     ]
     lines = build_song_lines(songs)
-    check("逐首清单含分享者", lines[0] == "1. 张三 分享《晴天》- 周杰伦", f"-> {lines[0]!r}")
+    check("逐首清单含分享者", lines[0] == "1. 张三 分享《晴天》 - 周杰伦", f"-> {lines[0]!r}")
     check("逐首清单条数", len(lines) == 3)
 
     by_person = build_sharer_lines(songs)
@@ -168,8 +168,9 @@ class _FakeAPI:
     async def add_tracks(self, playlist_id: int, track_ids: list[str]) -> None:
         self.added_ids.append(list(track_ids))
 
-    async def update_description(self, playlist_id: int, desc: str, name: str = "") -> None:
+    async def update_description(self, playlist_id: int, desc: str, name: str = "") -> tuple[bool, str]:
         self.descriptions.append(desc)
+        return True, "stub"
 
     def playlist_url(self, playlist_id: int) -> str:
         return f"https://music.163.com/playlist/{playlist_id}"

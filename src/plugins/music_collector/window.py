@@ -155,13 +155,20 @@ class WindowState:
     collecting: bool
     start_at: Optional[datetime]
     archive_at: Optional[datetime]
+    #: 结束收集时刻（到点后不再收录新歌）
+    end_at: Optional[datetime] = None
+    #: 手动覆盖说明；空串表示按时间表自动判断
+    override: str = ""
 
     def describe(self) -> str:
         state = "收集中" if self.collecting else "未开始/已结束"
+        if self.override:
+            state += f" · {self.override}"
         fmt = "%Y-%m-%d %H:%M"
         s = self.start_at.strftime(fmt) if self.start_at else "-"
-        a = self.archive_at.strftime(fmt) if self.archive_at else "-"
-        return f"[{self.mode}] {s} → {a}（{state}）"
+        e = (self.end_at or self.archive_at)
+        e_text = e.strftime(fmt) if e else "-"
+        return f"[{self.mode}] {s} → {e_text}（{state}）"
 
 
 class WindowResolver:
@@ -179,20 +186,36 @@ class WindowResolver:
 
     # ---------- 各模式的时间点 ----------
 
-    def weekly_points(self) -> tuple[WeeklyPoint, WeeklyPoint, WeeklyPoint]:
-        w = self.cfg.weekly
-        return parse_weekly(w.start), parse_weekly(w.summary), parse_weekly(w.archive)
+    @property
+    def same_archive(self) -> bool:
+        """归档时刻是否跟随「结束收集」时刻。"""
+        return bool(getattr(self.cfg, "archive_same_as_end", True))
 
-    def daily_points(self) -> tuple[DailyPoint, DailyPoint, DailyPoint]:
-        d = self.cfg.daily
-        return parse_daily(d.start), parse_daily(d.summary), parse_daily(d.archive)
+    def _raw_points(self) -> tuple[str, str, str, str]:
+        """返回当前模式下的 (start, summary, end, archive) 原始字符串。
 
-    def once_points(self) -> tuple[datetime, datetime, datetime]:
-        o = self.cfg.once
+        打开 archive_same_as_end 时，archive 直接取 end。
+        """
+        section = getattr(self.cfg, self.cfg.mode)
+        end = getattr(section, "end", None) or section.archive
+        archive = end if self.same_archive else section.archive
+        return section.start, section.summary, end, archive
+
+    def weekly_points(self) -> tuple[WeeklyPoint, WeeklyPoint, WeeklyPoint, WeeklyPoint]:
+        s, m, e, a = self._raw_points()
+        return parse_weekly(s), parse_weekly(m), parse_weekly(e), parse_weekly(a)
+
+    def daily_points(self) -> tuple[DailyPoint, DailyPoint, DailyPoint, DailyPoint]:
+        s, m, e, a = self._raw_points()
+        return parse_daily(s), parse_daily(m), parse_daily(e), parse_daily(a)
+
+    def once_points(self) -> tuple[datetime, datetime, datetime, datetime]:
+        s, m, e, a = self._raw_points()
         return (
-            parse_once(o.start, self.tz),
-            parse_once(o.summary, self.tz),
-            parse_once(o.archive, self.tz),
+            parse_once(s, self.tz),
+            parse_once(m, self.tz),
+            parse_once(e, self.tz),
+            parse_once(a, self.tz),
         )
 
     # ---------- 状态计算 ----------
@@ -207,86 +230,126 @@ class WindowResolver:
         return self._resolve_once(now)
 
     def _resolve_weekly(self, now: datetime) -> WindowState:
-        p_start, _, p_archive = self.weekly_points()
+        p_start, _, p_end, p_archive = self.weekly_points()
         start_at = _last_weekly(now, p_start)
-        archive_at = _next_weekly(start_at, p_archive)
+        end_at = _next_weekly(start_at, p_end)
+        archive_at = end_at if self.same_archive else _next_weekly(start_at, p_archive)
         return WindowState(
             mode="weekly",
             key=f"W{start_at:%Y%m%d-%H%M}",
-            label=f"{start_at:%Y-%m-%d} ~ {archive_at:%Y-%m-%d}",
-            collecting=start_at <= now < archive_at,
+            label=f"{start_at:%Y-%m-%d} ~ {end_at:%Y-%m-%d}",
+            collecting=start_at <= now < end_at,
             start_at=start_at,
             archive_at=archive_at,
+            end_at=end_at,
         )
 
     def _resolve_daily(self, now: datetime) -> WindowState:
-        p_start, _, p_archive = self.daily_points()
+        p_start, _, p_end, p_archive = self.daily_points()
         start_at = _last_daily(now, p_start)
-        archive_at = _next_daily(start_at, p_archive)
+        end_at = _next_daily(start_at, p_end)
+        archive_at = end_at if self.same_archive else _next_daily(start_at, p_archive)
         return WindowState(
             mode="daily",
             key=f"D{start_at:%Y%m%d-%H%M}",
             label=f"{start_at:%Y-%m-%d}",
-            collecting=start_at <= now < archive_at,
+            collecting=start_at <= now < end_at,
             start_at=start_at,
             archive_at=archive_at,
+            end_at=end_at,
         )
 
     def _resolve_once(self, now: datetime) -> WindowState:
-        start_at, _, archive_at = self.once_points()
+        start_at, _, end_at, archive_at = self.once_points()
+        if self.same_archive:
+            archive_at = end_at
         return WindowState(
             mode="once",
             key=f"O{start_at:%Y%m%d-%H%M}",
-            label=f"{start_at:%Y-%m-%d} ~ {archive_at:%Y-%m-%d}",
-            collecting=start_at <= now < archive_at,
+            label=f"{start_at:%Y-%m-%d} ~ {end_at:%Y-%m-%d}",
+            collecting=start_at <= now < end_at,
             start_at=start_at,
             archive_at=archive_at,
+            end_at=end_at,
         )
 
     # ---------- 调度参数 ----------
 
     def schedule_specs(self) -> list[tuple[str, str, dict]]:
-        """返回 [(任务名, 触发器类型, 触发器参数)]，供 APScheduler 注册。"""
+        """返回 [(任务名, 触发器类型, 触发器参数)]，供 APScheduler 注册。
+
+        两处防重复：
+
+        1. ``archive_same_as_end`` 打开时不注册 end —— archive 会在建歌单前先
+           播报最终榜单，两个任务撞在同一时刻会各发一遍。
+        2. summary 与 end/archive 撞点时不注册 summary —— 这是「结束时榜单发两次」
+           的真正原因：15:20 同时挂着 summary 和 archive，一个发榜单，另一个又
+           在归档前发一次最终榜单。归档播报已经包含完整榜单，summary 是多余的。
+        """
         mode = self.cfg.mode
         specs: list[tuple[str, str, dict]] = []
-        if mode == "weekly":
-            p_start, p_summary, p_archive = self.weekly_points()
-            for name, point in (
-                ("start", p_start), ("summary", p_summary), ("archive", p_archive)
-            ):
-                specs.append((name, "cron", {**point.cron_kwargs(), "timezone": self.tz}))
-        elif mode == "daily":
-            p_start, p_summary, p_archive = self.daily_points()
-            for name, point in (
-                ("start", p_start), ("summary", p_summary), ("archive", p_archive)
-            ):
-                specs.append((name, "cron", {**point.cron_kwargs(), "timezone": self.tz}))
-        else:
-            d_start, d_summary, d_archive = self.once_points()
-            for name, when in (
-                ("start", d_start), ("summary", d_summary), ("archive", d_archive)
-            ):
+        if mode == "once":
+            d_start, d_summary, d_end, d_archive = self.once_points()
+            pairs: list[tuple[str, datetime]] = [("start", d_start)]
+            later = {d_archive} if self.same_archive else {d_end, d_archive}
+            if d_summary not in later:
+                pairs.append(("summary", d_summary))
+            if not self.same_archive:
+                pairs.append(("end", d_end))
+            pairs.append(("archive", d_archive))
+            for name, when in pairs:
                 specs.append((name, "date", {"run_date": when}))
+            return specs
+
+        points = self.weekly_points() if mode == "weekly" else self.daily_points()
+        p_start, p_summary, p_end, p_archive = points
+        named = [("start", p_start)]
+        later_points = {p_archive} if self.same_archive else {p_end, p_archive}
+        if p_summary not in later_points:
+            named.append(("summary", p_summary))
+        if not self.same_archive:
+            named.append(("end", p_end))
+        named.append(("archive", p_archive))
+        for name, point in named:
+            specs.append((name, "cron", {**point.cron_kwargs(), "timezone": self.tz}))
         return specs
+
+    def summary_merged(self) -> bool:
+        """汇总播报是否因为与结束/归档撞点而被合并掉（用于状态展示）。"""
+        try:
+            mode = self.cfg.mode
+            if mode == "once":
+                _, m, e, a = self.once_points()
+            else:
+                _, m, e, a = (
+                    self.weekly_points() if mode == "weekly" else self.daily_points()
+                )
+        except WindowParseError:
+            return False
+        return m == a or (not self.same_archive and m == e)
 
     def summary_text(self) -> str:
         """给 /music window 命令用的可读描述。"""
         mode = self.cfg.mode
-        lines = [f"模式: {mode}    时区: {self.cfg.timezone}"]
-        if mode == "weekly":
-            s, m, a = self.weekly_points()
-            lines += [f"开始收集: {s.label()}", f"汇总播报: {m.label()}", f"归档建歌单: {a.label()}"]
-        elif mode == "daily":
-            s, m, a = self.daily_points()
-            lines += [f"开始收集: {s.label()}", f"汇总播报: {m.label()}", f"归档建歌单: {a.label()}"]
-        else:
-            s, m, a = self.once_points()
+        same = self.same_archive
+        lines = [
+            f"模式: {mode}    时区: {self.cfg.timezone}",
+            f"归档跟随结束时刻: {'开（同一时刻收工+建歌单）' if same else '关（分开设置）'}",
+        ]
+        if mode == "once":
+            s, m, e, a = self.once_points()
             fmt = "%Y-%m-%d %H:%M"
-            lines += [
-                f"开始收集: {s:{fmt}}",
-                f"汇总播报: {m:{fmt}}",
-                f"归档建歌单: {a:{fmt}}",
-            ]
+            labels = [f"{s:{fmt}}", f"{m:{fmt}}", f"{e:{fmt}}", f"{a:{fmt}}"]
+        else:
+            s, m, e, a = self.weekly_points() if mode == "weekly" else self.daily_points()
+            labels = [s.label(), m.label(), e.label(), a.label()]
+        merged = self.summary_merged()
+        lines += [
+            f"开始收集: {labels[0]}",
+            f"汇总播报: {labels[1]}" + ("（与结束/归档同刻，已并入归档播报）" if merged else ""),
+            f"结束收集: {labels[2]}",
+            f"归档建歌单: {labels[3]}" + ("（= 结束收集）" if same else ""),
+        ]
         state = self.resolve()
         lines.append(f"当前窗口: {state.label}（{'收集中' if state.collecting else '不在收集期'}）")
         return "\n".join(lines)

@@ -27,6 +27,7 @@ from datetime import datetime
 from typing import Optional, Sequence
 
 from .models import Song
+from .textutil import sanitize, sanitize_name
 
 _WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 
@@ -44,12 +45,13 @@ def build_context(
     total: int,
     seq: int,
     songs: Sequence[Song] = (),
+    emoji_style: str = "text",
 ) -> dict[str, str]:
     """组装占位符表。"""
     ref = end_at or start_at or datetime.now()
     sharer_names = []
     for song in songs:
-        name = song.sharer_name or (str(song.sharer_id) if song.sharer_id else "")
+        name = sharer_of(song, emoji_style)
         if name and name not in sharer_names:
             sharer_names.append(name)
 
@@ -99,49 +101,102 @@ def unknown_placeholders(template: str, context: dict[str, str]) -> list[str]:
 # ---------------------------------------------------------------- 清单文案
 
 
-def build_song_lines(songs: Sequence[Song], with_platform: bool = False) -> list[str]:
-    """「1. 张三 分享《歌名》- 歌手」逐行清单。"""
+def sharer_of(song: Song, emoji_style: str = "text") -> str:
+    """取分享者展示名，顺手把昵称里的表情转成文字。
+
+    昵称里的 emoji 是 4 字节字符，网易云简介写不进去，必须先转掉。
+    """
+    raw = song.sharer_name or ""
+    fallback = str(song.sharer_id) if song.sharer_id else "匿名"
+    return sanitize_name(raw, emoji_style, fallback)
+
+
+def build_song_lines(
+    songs: Sequence[Song],
+    with_platform: bool = False,
+    emoji_style: str = "text",
+    show_artist: bool = True,
+) -> list[str]:
+    """「1. 张三 分享《歌名》- 歌手」逐首一行的清单。"""
     lines: list[str] = []
     for idx, song in enumerate(songs, start=1):
-        sharer = song.sharer_name or (str(song.sharer_id) if song.sharer_id else "匿名")
-        artist = song.artists or "未知歌手"
-        line = f"{idx}. {sharer} 分享《{song.title}》- {artist}"
+        sharer = sharer_of(song, emoji_style)
+        title = sanitize(song.title, emoji_style) or song.title
+        line = f"{idx}. {sharer} 分享《{title}》"
+        if show_artist:
+            artist = sanitize(song.artists, emoji_style) or "未知歌手"
+            line += f" - {artist}"
         if with_platform:
             line += f"（{song.platform_name}）"
         lines.append(line)
     return lines
 
 
-def build_sharer_lines(songs: Sequence[Song]) -> list[str]:
-    """按人聚合：「张三（3首）：A、B、C」。"""
-    grouped: dict[str, list[str]] = {}
+def build_sharer_lines(
+    songs: Sequence[Song],
+    emoji_style: str = "text",
+    show_artist: bool = True,
+    blank_line: bool = False,
+) -> list[str]:
+    """按人聚合，但**每首歌独占一行**，看起来整齐：
+
+    ::
+
+        张三（2首）
+          · 晴天 - 周杰伦
+          · 稻香 - 周杰伦
+    """
+    grouped: dict[str, list[Song]] = {}
     for song in songs:
-        sharer = song.sharer_name or (str(song.sharer_id) if song.sharer_id else "匿名")
-        grouped.setdefault(sharer, []).append(song.title)
-    return [
-        f"{name}（{len(titles)}首）：{'、'.join(titles)}"
-        for name, titles in grouped.items()
-    ]
+        grouped.setdefault(sharer_of(song, emoji_style), []).append(song)
+
+    lines: list[str] = []
+    for i, (name, items) in enumerate(grouped.items()):
+        if blank_line and i:
+            lines.append("")
+        lines.append(f"{name}（{len(items)}首）")
+        for song in items:
+            title = sanitize(song.title, emoji_style) or song.title
+            line = f"  · {title}"
+            if show_artist:
+                artist = sanitize(song.artists, emoji_style) or "未知歌手"
+                line += f" - {artist}"
+            lines.append(line)
+    return lines
 
 
-def fit_description(header: str, body_lines: Sequence[str], limit: int = 990) -> str:
-    """网易云简介上限 1000 字，超了就截断并注明省略了多少条。"""
-    text = header.rstrip()
+def fit_description(
+    header: str,
+    body_lines: Sequence[str],
+    limit: int = 990,
+    blank_line_after_header: bool = True,
+) -> str:
+    """拼装简介：每条独占一行；网易云上限 1000 字，超了截断并注明省略数。"""
+    text = (header or "").rstrip()
     if not body_lines:
         return text[:limit]
 
-    parts = [text] if text else []
-    used = len(text)
+    parts: list[str] = []
+    used = 0
+    if text:
+        parts.append(text)
+        used += len(text) + 1
+        if blank_line_after_header:
+            parts.append("")
+            used += 1
+
     written = 0
+    # 空行不计入「首数」，统计时要排除
+    countable = sum(1 for line in body_lines if line.strip())
     for line in body_lines:
         need = len(line) + 1
-        # 预留省略提示的空间
-        if used + need > limit - 24:
+        if used + need > limit - 24:  # 预留省略提示的空间
             break
         parts.append(line)
         used += need
-        written += 1
-    remain = len(body_lines) - written
+        if line.strip():
+            written += 1
+    remain = countable - written
     if remain > 0:
-        parts.append(f"…… 还有 {remain} 首未列出")
+        parts.append(f"…… 还有 {remain} 条未列出")
     return "\n".join(parts)[:limit]

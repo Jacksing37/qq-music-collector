@@ -101,6 +101,12 @@ class ArchiveReport:
     total: int = 0
     added: int = 0
     unmatched: list[Song] = field(default_factory=list)
+    #: 简介是否成功写入网易云
+    desc_ok: bool = False
+    #: 简介写入失败原因（成功时是命中的通道名）
+    desc_note: str = ""
+    #: 实际生成的简介文本，失败时可用于手动补写
+    description: str = ""
 
     def summary(self) -> str:
         if not self.ok:
@@ -110,6 +116,13 @@ class ArchiveReport:
             f"链接: {self.playlist_url}",
             f"收录 {self.added}/{self.total} 首",
         ]
+        if self.description:
+            lines.append(
+                "简介（含分享清单）已写入 ✅"
+                if self.desc_ok
+                else f"简介写入失败 ⚠️（{self.desc_note}）\n"
+                     f"已存入待补写队列，稍后自动重试，也可手动执行 /music descfix"
+            )
         if self.unmatched:
             lines.append(f"以下 {len(self.unmatched)} 首在网易云没匹配到，需要手动处理：")
             for s in self.unmatched[:15]:
@@ -127,6 +140,29 @@ class Archiver:
     def __init__(self, api: NeteaseAPI, store: Store) -> None:
         self.api = api
         self.store = store
+
+    async def write_description(
+        self,
+        playlist_id: int,
+        desc: str,
+        *,
+        name: str = "",
+        group_id: int = 0,
+        retries: int = 3,
+    ) -> tuple[bool, str]:
+        """写简介 + 退避重试；仍失败则入队等待补写。"""
+        note = "未尝试"
+        for attempt in range(1, max(1, retries) + 1):
+            ok, note = await self.api.update_description(playlist_id, desc, name=name)
+            if ok:
+                await self.store.drop_pending_desc(str(playlist_id))
+                return True, note
+            if attempt < max(1, retries):
+                await asyncio.sleep(min(3 * attempt, 10))
+        await self.store.save_pending_desc(
+            str(playlist_id), name, group_id, desc, note
+        )
+        return False, note
 
     async def match_netease_id(self, song: Song, cfg: PlaylistConfig) -> Optional[str]:
         """为一首歌找到对应的网易云歌曲 id。"""
@@ -216,6 +252,7 @@ class Archiver:
             total=len(songs),
             seq=cfg.seq,
             songs=songs,
+            emoji_style=cfg.emoji_style,
         )
         name = (name_override or cfg.pending_name or cfg.name_template).strip()
         name = render_template(name, context) or f"群歌单 {window_label}"
@@ -248,14 +285,31 @@ class Archiver:
         if cfg.include_sharers and cfg.sharer_style != "none":
             listed = matched_songs or list(songs)
             if cfg.sharer_style == "by_person":
-                body_lines = build_sharer_lines(listed)
+                body_lines = build_sharer_lines(
+                    listed,
+                    emoji_style=cfg.emoji_style,
+                    show_artist=cfg.desc_show_artist,
+                    blank_line=cfg.desc_blank_line,
+                )
             else:
-                body_lines = build_song_lines(listed)
+                body_lines = build_song_lines(
+                    listed,
+                    emoji_style=cfg.emoji_style,
+                    show_artist=cfg.desc_show_artist,
+                )
         if report.unmatched:
             body_lines.append("以下歌曲在网易云未匹配到，未收录（含分享者方便查找）：")
-            body_lines += build_song_lines(report.unmatched, with_platform=True)
+            body_lines += build_song_lines(
+                report.unmatched,
+                with_platform=True,
+                emoji_style=cfg.emoji_style,
+                show_artist=cfg.desc_show_artist,
+            )
         desc = fit_description(header, body_lines)
-        await self.api.update_description(playlist_id, desc, name=name)
+        report.description = desc
+        report.desc_ok, report.desc_note = await self.write_description(
+            playlist_id, desc, name=name, group_id=group_id, retries=cfg.desc_retry
+        )
 
         report.ok = True
         report.playlist_id = playlist_id

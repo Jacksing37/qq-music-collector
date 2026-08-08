@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 import nonebot
@@ -17,6 +18,33 @@ from .service import service
 from .window import WindowParseError, parse_daily
 
 JOB_PREFIX = "music_collector_"
+
+#: 榜单播报幂等窗口（秒）。APScheduler 的 misfire 补跑、summary 与 archive 撞点、
+#: 手动触发等都可能让同一份榜单在极短时间内被播报两次，这里做最后一道兜底。
+REPORT_DEDUP_SECONDS = 120
+
+# (group_id, window_key) -> 上次播报的单调时钟
+_last_report: dict[tuple[int, str], float] = {}
+
+
+def _should_report(group_id: int, window_key: str) -> bool:
+    """同一群、同一窗口在幂等期内只播报一次。"""
+    now = time.monotonic()
+    key = (group_id, window_key)
+    last = _last_report.get(key)
+    if last is not None and now - last < REPORT_DEDUP_SECONDS:
+        logger.info(
+            f"[music] 跳过重复榜单播报 group={group_id} window={window_key}"
+            f"（{int(now - last)}s 前刚发过）"
+        )
+        return False
+    _last_report[key] = now
+    return True
+
+
+def reset_report_dedup() -> None:
+    """清空播报幂等标记（配置变更 / 手动重载时调用）。"""
+    _last_report.clear()
 
 
 def _get_bot() -> Optional[Bot]:
@@ -65,9 +93,12 @@ async def job_summary() -> None:
     for group_id in await service.target_groups(state.key):
         if not service.group_enabled(group_id):
             continue
-        text, images, songs = await service.build_report(group_id, state)
+        songs = await service.store.list_songs(group_id, state.key)
         if not songs:
             continue
+        if not _should_report(group_id, state.key):
+            continue
+        text, images, _ = await service.build_report(group_id, state)
         await send_report(bot, group_id, text, images)
 
 
@@ -83,12 +114,35 @@ async def job_archive() -> None:
         songs = await service.store.list_songs(group_id, state.key)
         if not songs:
             continue
-        # 归档前先出一次最终榜单
-        text, images, _ = await service.build_report(group_id, state)
-        await send_report(bot, group_id, text, images)
+        # 归档前先出一次最终榜单（若 summary 刚播报过则跳过，避免刷屏）
+        if _should_report(group_id, state.key):
+            text, images, _ = await service.build_report(group_id, state)
+            await send_report(bot, group_id, text, images)
 
         report = await service.run_archive(group_id, state)
         await safe_send_group(bot, group_id, Message(report.summary()))
+
+
+async def job_end() -> None:
+    """结束收集：向目标群播报「收集结束」，并提示稍后归档。
+
+    仅在 ``archive_same_as_end=False`` 时由调度器注册——此时结束收集与归档是
+    两个独立时刻，需要一个专门任务在结束收集那一刻发通知并停止收录。
+    """
+    bot = _get_bot()
+    if bot is None:
+        return
+    state = service.current_window()
+    for group_id in await service.target_groups(state.key):
+        if not service.group_enabled(group_id):
+            continue
+        songs = await service.store.list_songs(group_id, state.key)
+        text = (
+            f"🛑 本期音乐收集已结束（{state.label}）\n"
+            f"共收集 {len(songs)} 首。歌单将在归档时刻自动生成，"
+            f"也可由管理员执行 /music archive 立即归档。"
+        )
+        await safe_send_group(bot, group_id, Message(text))
 
 
 async def job_clean() -> None:
@@ -114,12 +168,23 @@ async def job_prune() -> None:
         logger.info("[music] 定时清理跳过：keep_days <= 0")
 
 
+async def job_descfix() -> None:
+    """补写此前失败的歌单简介（网易云对改简介有频控，过一阵往往就能写进去）。"""
+    if service.config.playlist.desc_retry_minutes <= 0:
+        return
+    ok, failed = await service.retry_pending_desc()
+    if ok or failed:
+        logger.info(f"[music] 简介补写：成功 {ok} 个，仍失败 {failed} 个")
+
+
 _JOB_FUNCS = {
     "start": job_start,
     "summary": job_summary,
+    "end": job_end,
     "archive": job_archive,
     "clean": job_clean,
     "prune": job_prune,
+    "descfix": job_descfix,
 }
 
 
@@ -154,6 +219,14 @@ def _prune_spec() -> Optional[tuple[str, str, dict]]:
     return ("prune", "cron", {**point.cron_kwargs(), "timezone": service.resolver.tz})
 
 
+def _descfix_spec() -> Optional[tuple[str, str, dict]]:
+    """简介补写：按分钟间隔轮询待补写队列。"""
+    minutes = service.config.playlist.desc_retry_minutes
+    if minutes <= 0:
+        return None
+    return ("descfix", "interval", {"minutes": minutes})
+
+
 def reload_jobs() -> tuple[bool, str]:
     """按当前配置重建定时任务。返回 (是否成功, 提示)。"""
     try:
@@ -169,7 +242,12 @@ def reload_jobs() -> tuple[bool, str]:
     if prune_spec is not None:
         specs.append(prune_spec)
 
+    descfix_spec = _descfix_spec()
+    if descfix_spec is not None:
+        specs.append(descfix_spec)
+
     remove_jobs()
+    reset_report_dedup()
     lines: list[str] = []
     for name, trigger, kwargs in specs:
         func = _JOB_FUNCS[name]

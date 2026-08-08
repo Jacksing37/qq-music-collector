@@ -21,6 +21,7 @@ import music_collector.scheduler as sch_mod
 from music_collector.store import Store
 from music_collector.archiver import Archiver
 from music_collector.config import PlaylistConfig
+from nonebot.adapters.onebot.v11 import Message, MessageSegment
 
 
 # ---------------------------------------------------------------- 1. 未识别不入榜
@@ -54,7 +55,7 @@ def test_unidentified_skipped_but_recognized_added():
         state["unidentified"] = False
         r2 = asyncio.run(service.handle_segments(999, segments, 123, "张三"))
         assert len(r2.unidentified) == 0, r2.unidentified
-        assert len(r2.accepted) + len(r2.outside_window) == 1, (r2.accepted, r2.outside_window)
+        assert len(r2.accepted) == 1, r2.accepted
     finally:
         service.store = real_store
         service.providers.resolve = real_resolve
@@ -81,6 +82,7 @@ class _StubAPI:
 
     async def update_description(self, playlist_id, desc, name=""):
         self.calls.append(("desc", playlist_id, desc, name))
+        return True, "stub"
 
     def playlist_url(self, playlist_id):
         return f"https://music.163.com/#/playlist?id={playlist_id}"
@@ -88,6 +90,9 @@ class _StubAPI:
 
 class _StubStore:
     async def mark_matched(self, row_id, netease_id):
+        pass
+
+    async def drop_pending_desc(self, playlist_id):
         pass
 
     async def record_archive(self, *a, **k):
@@ -151,8 +156,90 @@ def test_job_start_broadcasts_to_known_groups():
     assert any("开始" in msg for _, msg in fake.calls), [m for _, m in fake.calls]
 
 
+# ---------------------------------------------------------------- 4. 非收集期静默
+
+def test_no_response_outside_window():
+    store = Store(Path(tempfile.mktemp(suffix=".db")))
+    asyncio.run(store.init())
+    real_store = service.store
+    resolve_calls = []
+    real_resolve = service.providers.resolve
+    service.store = store
+
+    async def _recording_resolve(link):
+        resolve_calls.append(link)
+        return Song(platform="netease", song_id="1", title="歌", artists="人")
+
+    service.providers.resolve = _recording_resolve
+
+    from music_collector.config import WindowConfig, OnceWindow
+
+    real_window = service.config.window
+    service.config.window = WindowConfig(
+        mode="once",
+        once=OnceWindow(
+            start="2020-01-01 00:00", summary="2020-01-02 00:00", archive="2020-01-02 00:30"
+        ),
+    )
+    try:
+        assert not service.current_window().collecting, "测试窗口应处于关闭状态"
+        segments = [{"type": "text", "data": {"text": "https://music.163.com/song?id=1"}}]
+        r = asyncio.run(service.handle_segments(999, segments, 123, "张三"))
+        assert len(r.accepted) == 0, r.accepted
+        assert len(r.unidentified) == 0, r.unidentified
+        assert resolve_calls == [], "非收集期不应解析链接"
+        songs = asyncio.run(store.list_songs(999, service.current_window().key))
+        assert len(songs) == 0, songs
+    finally:
+        service.store = real_store
+        service.providers.resolve = real_resolve
+        service.config.window = real_window
+
+
+# ---------------------------------------------------------------- 5. 被 @ 回复自我介绍
+
+def test_at_bot_self_intro():
+    from music_collector import _at_bot, handle_at
+
+    class _Event:
+        self_id = 10001
+        user_id = 123
+        group_id = 999
+        message = None
+        to_me = False
+        sender = type("Sender", (), {"card": "测试用户", "nickname": "测试昵称"})()
+
+    # 检测：@ 了 bot
+    ev = _Event()
+    ev.to_me = True
+    ev.message = Message([MessageSegment.at(10001), MessageSegment.text("你是谁")])
+    assert asyncio.run(_at_bot(ev)) is True
+
+    # 检测：@ 了别人，不算
+    ev2 = _Event()
+    ev2.message = Message([MessageSegment.at(99999), MessageSegment.text("hi")])
+    assert asyncio.run(_at_bot(ev2)) is False
+
+    # 处理：被 @ 后回自我介绍
+    sent = {}
+
+    class _Bot:
+        async def send_group_msg(self, group_id, message):
+            sent["group"] = group_id
+            sent["msg"] = message
+
+    ev3 = _Event()
+    ev3.to_me = True
+    ev3.message = Message([MessageSegment.at(10001), MessageSegment.text("？")])
+    asyncio.run(handle_at(_Bot(), ev3))
+    assert sent.get("group") == 999
+    assert "群音乐收集助手" in str(sent.get("msg"))
+
+
 if __name__ == "__main__":
     test_unidentified_skipped_but_recognized_added()
     test_unmatched_lists_sharer_in_description_and_summary()
     test_job_start_broadcasts_to_known_groups()
+    test_no_response_outside_window()
+    test_at_bot_self_intro()
     print("start_and_unmatched tests OK")

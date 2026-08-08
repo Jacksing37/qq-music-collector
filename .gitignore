@@ -1,8 +1,12 @@
 # ===== 依赖 / 构建产物 =====
 .venv/
+venv/
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
+build/
+dist/
 
 # ===== 密钥与凭证（切勿提交！） =====
 # 包含 NoneBot 配置与 OneBot 通信密钥
@@ -11,12 +15,25 @@ __pycache__/
 data/netease_session.json
 
 # ===== 运行时生成的数据（本地状态，无需入库） =====
+# 当前生效配置：含群号等本地信息，模板见 config.example.yaml
+data/config.yaml
 # 收集到的歌曲数据库
 data/collector.db
-# 封面缓存（自动回收）
+data/collector.db-journal
+data/collector.db-wal
+data/collector.db-shm
+# 封面缓存与榜单长图（自动回收）
 data/cache/
 # 测试渲染出的长图样例
 data/sample/
 
 # ===== 日志 =====
 *.log
+logs/
+
+# ===== 编辑器 / 工具 =====
+.workbuddy/
+.idea/
+.vscode/
+*.swp
+.DS_Store

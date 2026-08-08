@@ -44,6 +44,7 @@ class _StubAPI:
 
     async def update_description(self, playlist_id, desc, name=""):
         self.calls.append(("desc", playlist_id, desc, name))
+        return True, "stub"
 
     def playlist_url(self, playlist_id):
         return f"https://music.163.com/#/playlist?id={playlist_id}"
@@ -51,6 +52,9 @@ class _StubAPI:
 
 class _StubStore:
     async def mark_matched(self, row_id, netease_id):
+        pass
+
+    async def drop_pending_desc(self, playlist_id):
         pass
 
     async def record_archive(self, *a, **k):
@@ -102,28 +106,40 @@ def test_description_written_with_sharer_list_and_name():
     assert name == "群歌单 测试窗口", f"name 渲染异常: {name!r}"
 
 
-def test_description_endpoint_is_playlist_update():
-    """确保底层 API 走的是 /playlist/update（带 name），而非已下线的 /desc/update。"""
+def test_description_endpoint_is_desc_update():
+    """验证底层 API 实际走的通道：
+
+    - linuxapi ``/playlist/desc/update`` 写简介（payload 含 id + desc）
+    - 写后读回校验，防止"接口 200 其实没写进去"的假成功
+    - 歌单标题（name）在 create_playlist 时已正确设置，desc 通道不碰标题，
+      因此 update_description 成功路径不依赖 name 也能保证标题不被清空
+    """
     from music_collector.netease_api import NeteaseAPI
 
-    captured = {}
+    captured: dict[str, dict] = {}
 
     class _Fake(NeteaseAPI):
-        async def _post_checked(self, path, payload):
-            captured["path"] = path
-            captured["payload"] = payload
+        async def _linux_post(self, path, payload):
+            captured[path] = dict(payload)
             return {"code": 200}
+
+        async def playlist_description(self, playlist_id):
+            # 读回校验：返回与刚写入一致的内容
+            return captured.get("/playlist/desc/update", {}).get("desc", "")
 
     api = _Fake.__new__(_Fake)
     NeteaseAPI.__init__(api, Path(tempfile.mktemp(suffix=".json")))  # 不实际落盘
     api._cookies["MUSIC_U"] = "dummy"  # 视为已登录
-    asyncio.run(api.update_description(5, "测试简介内容", name="歌单名"))
-    assert captured.get("path") == "/playlist/update", captured
-    assert captured["payload"]["desc"] == "测试简介内容"
-    assert captured["payload"]["name"] == "歌单名"
+    ok, note = asyncio.run(api.update_description(5, "测试简介内容", name="歌单名"))
+    assert ok, note
+
+    desc_call = captured.get("/playlist/desc/update")
+    assert desc_call, "未调用 /playlist/desc/update 写简介"
+    assert desc_call.get("desc") == "测试简介内容"
+    assert desc_call.get("id") == "5"
 
 
 if __name__ == "__main__":
     test_description_written_with_sharer_list_and_name()
-    test_description_endpoint_is_playlist_update()
+    test_description_endpoint_is_desc_update()
     print("description tests OK")

@@ -36,15 +36,12 @@ class CollectResult:
     def __init__(self) -> None:
         self.accepted: list[Song] = []      # 新收录
         self.duplicated: list[Song] = []    # 重复分享
-        self.outside_window: list[Song] = []  # 不在收集期，仅回卡片
         self.unidentified: list[Song] = []  # 没认出来的链接，不入榜
         self.index_of: dict[int, int] = {}  # id(song) -> 榜单序号
 
     @property
     def any_music(self) -> bool:
-        return bool(
-            self.accepted or self.duplicated or self.outside_window or self.unidentified
-        )
+        return bool(self.accepted or self.duplicated or self.unidentified)
 
 
 class CollectorService:
@@ -79,7 +76,27 @@ class CollectorService:
         return not cfg.groups or group_id in cfg.groups
 
     def current_window(self) -> WindowState:
-        return self.resolver.resolve()
+        """当前窗口状态；手动开关（collect_override）优先于时间表。"""
+        state = self.resolver.resolve()
+        override = getattr(self.config, "collect_override", "auto")
+        if override == "on":
+            state.collecting = True
+            state.override = "手动强制开启"
+        elif override == "off":
+            state.collecting = False
+            state.override = "手动强制关闭"
+        return state
+
+    def set_collect_override(self, value: str) -> str:
+        """设置手动开关，返回人类可读说明。"""
+        if value not in ("auto", "on", "off"):
+            raise ValueError("collect_override 只能是 auto / on / off")
+        config_manager.update("collect_override", value)
+        return {
+            "auto": "已恢复按时间表自动收集",
+            "on": "已手动开启收集（无视时间窗口）",
+            "off": "已手动关闭收集（无视时间窗口）",
+        }[value]
 
     # ------------------------------------------------------------ 缓存
 
@@ -102,11 +119,15 @@ class CollectorService:
         sharer_name: str,
     ) -> CollectResult:
         result = CollectResult()
+        state = self.current_window()
+        # 不在收集期：静默处理，不解析、不回应
+        if not state.collecting:
+            return result
+
         links: list[MusicLink] = await detect_from_segments(segments)
         if not links:
             return result
 
-        state = self.current_window()
         for link in links:
             song = await self.providers.resolve(link)
             song.sharer_id = sharer_id
@@ -115,10 +136,6 @@ class CollectorService:
             # 没认出来的链接不入榜（如解析失败、非音乐页面）
             if not song.title or song.title == "未识别歌曲":
                 result.unidentified.append(song)
-                continue
-
-            if not state.collecting:
-                result.outside_window.append(song)
                 continue
 
             inserted, stored = await self.store.add_song(group_id, state.key, song)
@@ -167,11 +184,12 @@ class CollectorService:
             group_id=group_id,
             window_label=state.label,
             start_at=state.start_at,
-            end_at=state.archive_at,
+            end_at=state.end_at or state.archive_at,
             count=len(songs),
             total=len(songs),
             seq=cfg.seq,
             songs=songs,
+            emoji_style=cfg.emoji_style,
         )
         return render_template(cfg.pending_name or cfg.name_template, context)
 
@@ -187,7 +205,7 @@ class CollectorService:
         report = await self.archiver.archive(
             group_id, state.key, state.label, songs, cfg,
             start_at=state.start_at,
-            end_at=state.archive_at,
+            end_at=state.end_at or state.archive_at,
             name_override=name_override,
         )
         if report.ok:
@@ -201,6 +219,92 @@ class CollectorService:
                 removed = await self.store.delete_window(group_id, state.key)
                 logger.info(f"[music] 归档后已自动清空本期 {removed} 首")
         return report
+
+    # ------------------------------------------------------------ 简介补写
+
+    async def retry_pending_desc(
+        self, group_id: Optional[int] = None
+    ) -> tuple[int, int]:
+        """重试所有待补写的歌单简介，返回 (成功数, 失败数)。"""
+        pending = await self.store.list_pending_desc(group_id)
+        ok = failed = 0
+        for row in pending:
+            playlist_id = str(row.get("playlist_id") or "")
+            if not playlist_id.isdigit():
+                await self.store.drop_pending_desc(playlist_id)
+                continue
+            success, note = await self.netease.update_description(
+                int(playlist_id),
+                row.get("description") or "",
+                name=row.get("playlist_name") or "",
+            )
+            if success:
+                await self.store.drop_pending_desc(playlist_id)
+                ok += 1
+            else:
+                await self.store.save_pending_desc(
+                    playlist_id,
+                    row.get("playlist_name") or "",
+                    int(row.get("group_id") or 0),
+                    row.get("description") or "",
+                    note,
+                )
+                failed += 1
+        return ok, failed
+
+    async def pending_desc_list(self, group_id: Optional[int] = None) -> list[dict]:
+        return await self.store.list_pending_desc(group_id)
+
+    async def rebuild_description(
+        self, group_id: int, window: Optional[WindowState] = None
+    ) -> str:
+        """按当前配置重新生成一份简介文本（用于手动补写 / 预览）。"""
+        from .naming import (
+            build_sharer_lines,
+            build_song_lines,
+            fit_description,
+        )
+
+        state = window or self.current_window()
+        songs = await self.store.list_songs(group_id, state.key)
+        cfg = self.config.playlist
+        context = build_context(
+            group_id=group_id,
+            window_label=state.label,
+            start_at=state.start_at,
+            end_at=state.end_at or state.archive_at,
+            count=len(songs),
+            total=len(songs),
+            seq=cfg.seq,
+            songs=songs,
+            emoji_style=cfg.emoji_style,
+        )
+        header = render_template(cfg.description_template, context)
+        body: list[str] = []
+        if cfg.include_sharers and cfg.sharer_style != "none":
+            if cfg.sharer_style == "by_person":
+                body = build_sharer_lines(
+                    songs,
+                    emoji_style=cfg.emoji_style,
+                    show_artist=cfg.desc_show_artist,
+                    blank_line=cfg.desc_blank_line,
+                )
+            else:
+                body = build_song_lines(
+                    songs,
+                    emoji_style=cfg.emoji_style,
+                    show_artist=cfg.desc_show_artist,
+                )
+        return fit_description(header, body)
+
+    async def push_description(
+        self, playlist_id: int, desc: str, name: str = "", group_id: int = 0
+    ) -> tuple[bool, str]:
+        """把指定简介写到指定歌单（失败自动入队）。"""
+        return await self.archiver.write_description(
+            playlist_id, desc, name=name, group_id=group_id,
+            retries=self.config.playlist.desc_retry,
+        )
 
     # ------------------------------------------------------------ 清理收集数据
 

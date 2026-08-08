@@ -3,6 +3,12 @@
 
 enabled: true
 
+# 手动覆盖收集状态（方便测试，不改动时间表）：
+#   auto = 按时间窗口自动判断（默认）
+#   on   = 强制正在收集（无视时间窗口）
+#   off  = 强制停止收集（无视时间窗口）
+collect_override: auto
+
 # 生效群号，留空表示所有群
 groups: []
 
@@ -19,37 +25,62 @@ window:
   # weekly 每周循环 / daily 每日循环 / once 单次区间
   mode: weekly
   timezone: Asia/Shanghai
-  # 窗口关闭期间收到音乐链接是否仍然回复（只是不入榜）
-  reply_outside_window: true
+  # 归档时刻是否等于结束收集时刻：
+  #   true  = 收工那一刻顺手建歌单（只跑一个定时任务）
+  #   false = 先到 end 结束收集并播报，再到 archive 单独建歌单
+  archive_same_as_end: true
 
   # 每周模式：星期缩写 MON/TUE/WED/THU/FRI/SAT/SUN，也支持"周一"
   weekly:
     start: MON 00:00      # 开始收集
     summary: SUN 22:00    # 汇总播报（文字列表 + 长图）
+    end: SUN 22:30        # 结束收集：此后不再收录新歌
     archive: SUN 22:30    # 归档：建网易云歌单
 
   # 每日模式
   daily:
     start: '00:00'
     summary: '23:00'
+    end: '23:30'          # 结束收集
     archive: '23:30'
 
   # 单次模式
   once:
     start: 2026-08-10 00:00
     summary: 2026-08-20 22:00
+    end: 2026-08-20 22:30        # 结束收集
     archive: 2026-08-20 22:30
 
 playlist:
-  # 可用占位符：{window} {group} {count} {date}
+  # 可用占位符：{window} {group} {count} {date} {seq} {slash} {yy}{m}{d}
   name_template: 群歌单 {window}
   description_template: 由 QQ 群 {group} 在 {window} 期间收集，共 {count} 首。
+  # 简介里附上「谁分享了什么歌」清单（true/false）
+  include_sharers: true
+  # 清单样式：list=逐首列（含分享者）/ by_person=按人聚合 / none=不附
+  sharer_style: list
+  # 自增期号，每成功归档一次 +1（用于 Wk.86 这种编号）
+  seq: 1
+  seq_auto_increment: true
+  # 一次性歌单名，设置后仅下一次归档生效，用完自动清空
+  pending_name: ''
   privacy: false
   # 非网易云来源的歌曲，是否在网易云搜索匹配后加入
   cross_platform_match: true
   # 严格匹配：歌名与歌手都要对得上；关闭后命中率更高但可能加错版本
   strict_match: true
   batch_size: 100
+  # 简介写入失败时的重试次数（网易云对改简介有频控，失败会自动入队补写）
+  desc_retry: 3
+  # 定时补写待写入简介的间隔分钟数；<=0 关闭自动补写
+  desc_retry_minutes: 30
+  # 昵称 / 歌名里的表情处理：text=转中文词[音符]  strip=直接删  keep=原样
+  # 网易云简介是 utf8(3字节) 存储，emoji 是 4 字节，keep 有很大概率写不进去
+  emoji_style: text
+  # 简介清单里是否带歌手名
+  desc_show_artist: true
+  # 简介清单条目之间是否插空行（by_person 样式下按人分段）
+  desc_blank_line: false
 
 # 已收集歌曲的清理（区别于 cache：cache 清理的是榜单图片缓存）
 clear:
@@ -62,6 +93,28 @@ clear:
   # 每天执行定时清理的时刻
   prune_at: '05:00'
 
+# 音乐卡片发送策略
+# 背景：协议端（NapCat / go-cqhttp）发「原生」音乐卡片时要向外部签名服务换取
+# ArkShare 结构，那个服务经常 500 或超时，日志会刷：
+#   [音乐卡片签名失败] Unexpected status code: 500
+#   Error: 消息体无法解析, 请检查是否发送了不支持的消息类型
+# 遇到这种情况把 mode 改成 custom 即可（自定义卡片不经过签名服务）。
+card:
+  # native = 平台原生卡片（最好看，依赖签名服务）
+  # custom = 自定义卡片（自己拼标题/封面/跳转链接，不走签名服务，最稳）
+  # off    = 不发卡片，只发文字 + 封面
+  mode: native
+  # 原生卡片失败后自动再试一次自定义卡片
+  fallback_custom: true
+  # 卡片都失败时补发一条文字（歌名 / 歌手 / 可点击链接）
+  fallback_text: true
+  # 文字兜底里附上封面图
+  fallback_cover: true
+  # 同一平台连续失败几次后熔断，冷却期内直接走文字不再空等；0 = 不熔断
+  failure_threshold: 3
+  # 熔断冷却分钟数，到点自动恢复试探
+  cooldown_minutes: 10
+
 render:
   max_items_per_image: 40
   show_cover: true
@@ -69,3 +122,17 @@ render:
   font_path: null
   # light / dark
   theme: dark
+
+# 被 @ 时的自我介绍（/music intro 可改；\n 在命令行里表示换行）
+intro:
+  enabled: true
+  text: |-
+    你好 {nick}，我是群音乐收集助手 🎵
+    把网易云 / QQ音乐 / 酷狗 / 酷我 的歌曲分享到群里，我会自动收录并排序。
+    本期：{window}（{state}），已收集 {count} 首。
+    发送 /music help 查看全部命令。
+  cooldown: 10          # 同一群冷却秒数，0=不限频
+  at_sender: true       # 回复时是否 @ 提问者
+  skip_commands: true   # 消息带 /music 命令时不发自我介绍
+  skip_music: true      # 消息带音乐分享时不发自我介绍（那是分享不是提问）
+  always_reply: true    # 收集关闭 / 不在收集期时，是否仍然回应自我介绍
