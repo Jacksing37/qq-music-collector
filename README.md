@@ -79,6 +79,13 @@ qq-music-collector/
 ├── requirements.txt        # Python 依赖清单
 ├── pyproject.toml          # 项目元数据 + 依赖约束
 ├── README.md               # 本文件
+├── Dockerfile              # 运行镜像（内置中文字体 + 时区，监听 0.0.0.0）
+├── docker-compose.yml      # bot + napcat 编排（同网络，反向 WS 走容器名）
+├── .dockerignore           # 构建上下文排除（.venv / data / .env 等）
+├── deploy/                 # 服务器部署：start.sh 启动脚本 + systemd 单元 + 完整部署指南
+│   ├── start.sh                       # 自动建 venv 并启动，可被 systemd/nohup 调用
+│   ├── qq-music-collector.service     # systemd 守护单元（开机自启 + 崩溃重启）
+│   └── README.md                      # 「从零到运行」完整步骤（Docker / 裸机两条路线）
 ├── scripts/
 │   └── cleanup.py          # 一键回收运行时产物（缓存图 / 样例图 / 字节码）
 ├── src/
@@ -134,7 +141,8 @@ qq-music-collector/
 | `data/netease_session.json` | 网易云账号凭证 `MUSIC_U` | 已忽略；删除后需重新 `/music cookie` |
 | `data/config.yaml` | 当前生效配置（含群号） | 已忽略；丢了会退回 `config.example.yaml` 默认值 |
 | `data/collector.db` | 已收集的歌曲数据 | 已忽略；删除即丢失所有未归档收集 |
-| `data/cache/`、`data/sample/` | 图片产物 | 已忽略；可随时删，会自动重建 |
+| `napcat/`（Docker 起的 NapCat） | QQ 登录态与协议端配置 | 已忽略；由 docker-compose 在仓库根生成，删了需重新扫码登录 |
+| `data/cache/`、`data/sample/` | 图片产物 | 已忽略（位于 /data/ 内）；可随时删，会自动重建 |
 | `.venv/`、`__pycache__/` | 依赖与字节码 | 已忽略；重建即可 |
 
 ---
@@ -419,37 +427,65 @@ set PYTHONDONTWRITEBYTECODE=1
 
 ## 部署到服务器
 
-这个机器人吃的资源很少（常驻约 150–250MB 内存，几乎不占 CPU），**1 核 1G 的小机器足够**，
-瓶颈通常在 NapCat 那一侧（Node + QQ 协议端，建议留到 2G 更从容）。
+> 完整「从零到运行」的步骤（Docker / systemd 两条路线、NapCat 配置、验证、更新流程）
+> 见 **[`deploy/README.md`](deploy/README.md)**。仓库已自带 **`Dockerfile`**、**`docker-compose.yml`**，
+> 以及裸机用的 **`deploy/start.sh`** 与 **`deploy/qq-music-collector.service`**。
+
+这个机器人吃的资源很少（常驻约 150–250MB 内存，几乎不占 CPU），**1 核 1G 的小机器够跑，
+但建议 1 核 2G**——瓶颈在 NapCat 那一侧（Node + QQ 协议端）。
 
 要点：
 
-1. **NapCat 与机器人放同一台机器**，反向 WS 走 `127.0.0.1`，别暴露到公网。
-2. **时区**：服务器多为 UTC，务必确认 `window.timezone: Asia/Shanghai`，否则定时全错。
-3. **进程守护**：用 systemd 或 pm2 拉起，崩了自动重启。
+1. **NapCat 与机器人必须能互相访问**（同机最省事）。机器人本身**不会连 QQ**，
+   真正登录 QQ 的是 NapCat（或 Lagrange.OneBot）协议端，得单独装。别把 WS 端口暴露到公网。
+2. **时区大坑**：服务器多为 UTC，务必确认 `window.timezone: Asia/Shanghai`，否则定时全偏 8 小时。
+3. **进程守护**：Docker 用 `restart: unless-stopped`；裸机用 systemd（`deploy/qq-music-collector.service`）。
+4. **字体**：纯净 Linux 镜像常没有中文字体，长图会变方块。Docker 镜像已内置 `fonts-noto-cjk`；
+   裸机自行 `apt install fonts-noto-cjk`，或把字体路径写进 `render.font_path`。
 
-   ```ini
-   # /etc/systemd/system/qq-music-collector.service
-   [Unit]
-   Description=QQ Music Collector
-   After=network.target
+### 方式一：Docker（NapCat 也是 Docker 时首选）
 
-   [Service]
-   WorkingDirectory=/opt/qq-music-collector
-   ExecStart=/opt/qq-music-collector/.venv/bin/python bot.py
-   Restart=always
-   RestartSec=5
-   Environment=PYTHONUNBUFFERED=1
+```bash
+cp .env.example .env && nano .env      # 填 SUPERUSERS / ONEBOT_ACCESS_TOKEN
+docker compose up -d --build
+docker compose logs -f bot
+```
 
-   [Install]
-   WantedBy=multi-user.target
-   ```
+⚠️ **容器网络坑**：NapCat 容器里的 `127.0.0.1` 指向它自己。反向 WebSocket 必须填
+`ws://qq-music-bot:8080/onebot/v11/ws`（两个容器同网络时），三种网络场景的处理见
+[`deploy/README.md`](deploy/README.md)。
 
-4. **上传前先瘦身**：`python scripts/cleanup.py --yes`，别把几十兆缓存图传上去。
-5. **凭证单独配**：`.env` 与 `data/netease_session.json` 不进版本库，服务器上单独创建，
-   或部署后私聊机器人发 `/music cookie` 重新登录。
-6. **字体**：纯净的 Linux 镜像常常没有中文字体，长图会变方块。装一个即可：
-   `apt install fonts-noto-cjk`，或把字体文件路径写进 `render.font_path`。
+更新：`git pull && docker compose up -d --build`。
+
+### 方式二：裸机三步（细节见 deploy/README.md）
+
+```bash
+# 1) 装环境 + 依赖（start.sh 首次会自动建 venv）
+sudo apt install -y python3 python3-venv fonts-noto-cjk
+cp .env.example .env && nano .env          # 填 SUPERUSERS / ONEBOT_ACCESS_TOKEN
+
+# 2) 同机装好 NapCat，反向 WS 指向 ws://127.0.0.1:8080/onebot/v11/ws 并扫码登录小号
+#    NapCat 官方一键安装：
+#    bash <(curl -L https://nclatest.znin.net/NapNeko/NapCat-Installer/main/script/install.sh)
+
+# 3) 用 systemd 守护启动
+sudo cp deploy/qq-music-collector.service /etc/systemd/system/
+sudo nano /etc/systemd/system/qq-music-collector.service   # 改 User= 和路径
+sudo systemctl daemon-reload && sudo systemctl enable --now qq-music-collector
+journalctl -u qq-music-collector -f
+```
+
+### 以后更新代码
+
+```bash
+cd /opt/qq-music-collector
+git pull
+.venv/bin/python -m pip install -r requirements.txt   # 仅依赖有变时才需要
+sudo systemctl restart qq-music-collector
+```
+
+`.env`、`data/`（含 `config.yaml` / `collector.db` / `netease_session.json`）都不进版本库，
+更新不会动你的配置与数据。
 
 ---
 

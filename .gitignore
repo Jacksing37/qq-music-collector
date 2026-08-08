@@ -11,21 +11,14 @@ dist/
 # ===== 密钥与凭证（切勿提交！） =====
 # 包含 NoneBot 配置与 OneBot 通信密钥
 .env
-# 网易云登录 Cookie（MUSIC_U），等同账号凭证
-data/netease_session.json
+# QQ 协议端（NapCat / Lagrange）数据：含 QQ 登录态，docker-compose 会在仓库根生成 ./napcat
+napcat/
+# 网易云登录 Cookie（MUSIC_U）等运行时数据随 /data/ 一并忽略（见下方「运行时生成的数据」）
 
 # ===== 运行时生成的数据（本地状态，无需入库） =====
-# 当前生效配置：含群号等本地信息，模板见 config.example.yaml
-data/config.yaml
-# 收集到的歌曲数据库
-data/collector.db
-data/collector.db-journal
-data/collector.db-wal
-data/collector.db-shm
-# 封面缓存与榜单长图（自动回收）
-data/cache/
-# 测试渲染出的长图样例
-data/sample/
+# 整目录忽略：当前生效配置(config.yaml)、歌曲库(collector.db)、网易云凭证、
+# 封面缓存与榜单长图、测试样例图都在这里；模板见 config.example.yaml
+/data/
 
 # ===== 日志 =====
 *.log

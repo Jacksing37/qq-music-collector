@@ -1,0 +1,26 @@
+# QQ 音乐收集机器人 · systemd 守护单元
+# 安装：
+#   sudo cp deploy/qq-music-collector.service /etc/systemd/system/
+#   sudo nano /etc/systemd/system/qq-music-collector.service   # 改 User= 和路径
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now qq-music-collector
+# 查看：
+#   sudo systemctl status qq-music-collector
+#   journalctl -u qq-music-collector -f
+
+[Unit]
+Description=QQ Music Collector Bot
+After=network.target
+
+[Service]
+Type=simple
+# ↓↓↓ 改成你实际上传代码的路径与运行用户名 ↓↓↓
+WorkingDirectory=/opt/qq-music-collector
+ExecStart=/opt/qq-music-collector/deploy/start.sh
+User=YOUR_USER
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,60 @@
+# QQ 音乐收集机器人 · Docker 编排
+#
+# 启动：docker compose up -d --build
+# 日志：docker compose logs -f bot
+# 停止：docker compose down
+#
+# 两个容器在同一个 bridge 网络里，用容器名互相访问。
+# NapCat 的反向 WebSocket 必须填：
+#     ws://qq-music-bot:8080/onebot/v11/ws
+# 千万不要填 127.0.0.1 —— 在 NapCat 容器里那指向它自己。
+
+services:
+  bot:
+    build: .
+    image: qq-music-collector:latest
+    container_name: qq-music-bot
+    restart: unless-stopped
+    # .env 里放 SUPERUSERS / ONEBOT_ACCESS_TOKEN 等
+    env_file:
+      - .env
+    environment:
+      # 覆盖 .env 里的 HOST：容器内必须监听 0.0.0.0
+      HOST: "0.0.0.0"
+      PORT: "8080"
+      TZ: "Asia/Shanghai"
+    volumes:
+      # 配置、数据库、网易云会话、缓存图，全部持久化在宿主机
+      - ./data:/app/data
+    networks:
+      - botnet
+    # 只在需要从宿主机直连调试时才放开；正常情况下不必对外暴露
+    # ports:
+    #   - "127.0.0.1:8080:8080"
+
+  # 如果你的 NapCat 已经在单独运行，把下面整段注释掉，
+  # 改用 deploy/README.md「场景 B」的方式把它接进 botnet 网络。
+  napcat:
+    image: mlikiowa/napcat-docker:latest
+    container_name: napcat
+    restart: unless-stopped
+    environment:
+      # 首次启动看日志里的二维码扫码登录；填上机器人小号可减少一次交互
+      ACCOUNT: ""
+      NAPCAT_GID: "0"
+      NAPCAT_UID: "0"
+      TZ: "Asia/Shanghai"
+    ports:
+      # NapCat WebUI，登录 / 配置反向 WS 用；建议只绑本机再用 SSH 隧道访问
+      - "127.0.0.1:6099:6099"
+    volumes:
+      - ./napcat/config:/app/napcat/config
+      - ./napcat/qq:/app/.config/QQ
+    networks:
+      - botnet
+    depends_on:
+      - bot
+
+networks:
+  botnet:
+    driver: bridge

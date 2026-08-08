@@ -7,6 +7,7 @@ import hashlib
 import io
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -22,16 +23,60 @@ _REGULAR_CANDIDATES = [
     "C:/Windows/Fonts/msyh.ttc",
     "C:/Windows/Fonts/Deng.ttf",
     "C:/Windows/Fonts/simhei.ttf",
+    # Debian / Ubuntu：fonts-noto-cjk 在不同版本里落盘路径不一致，全列上
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-VF.otf.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
     "/System/Library/Fonts/PingFang.ttc",
 ]
 _BOLD_CANDIDATES = [
     "C:/Windows/Fonts/msyhbd.ttc",
     "C:/Windows/Fonts/simhei.ttf",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-VF.otf.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Bold.otf",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
     "/System/Library/Fonts/PingFang.ttc",
 ]
+
+# 系统字体目录（兜底扫描用）
+_FONT_DIRS = ["/usr/share/fonts", "/usr/local/share/fonts"]
+# 兜底扫描时认可的文件名关键字（小写匹配）
+_CJK_HINTS = ("cjk", "wqy", "droidsansfallback", "sourcehansans", "notosanssc")
+
+
+@lru_cache(maxsize=2)
+def _scan_cjk_font(prefer_bold: bool) -> Optional[str]:
+    """候选路径全落空时，遍历系统字体目录找一个能显示中文的字体。
+
+    容器/发行版之间 fonts-noto-cjk 的落盘路径差异很大，硬编码列表容易漏，
+    扫一遍比让用户看到一屏方块字强。
+    """
+    found: list[str] = []
+    for base in _FONT_DIRS:
+        root = Path(base)
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*"):
+            if path.suffix.lower() not in (".ttc", ".otf", ".ttf"):
+                continue
+            name = path.name.lower()
+            if any(hint in name for hint in _CJK_HINTS):
+                found.append(str(path))
+    if not found:
+        return None
+    if prefer_bold:
+        for path in found:
+            if "bold" in Path(path).name.lower():
+                return path
+    for path in found:
+        if "bold" not in Path(path).name.lower():
+            return path
+    return found[0]
 
 
 def _find_font(candidates: Sequence[str], override: Optional[str] = None) -> Optional[str]:
@@ -40,7 +85,7 @@ def _find_font(candidates: Sequence[str], override: Optional[str] = None) -> Opt
     for path in candidates:
         if Path(path).exists():
             return path
-    return None
+    return _scan_cjk_font(candidates is _BOLD_CANDIDATES)
 
 
 def _load_font(path: Optional[str], size: int) -> ImageFont.FreeTypeFont:
