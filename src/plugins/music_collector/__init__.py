@@ -18,7 +18,7 @@ require("nonebot_plugin_apscheduler")
 
 from .bot_utils import safe_send_group, send_music_card  # noqa: E402
 from .models import Song  # noqa: E402
-from .naming import build_context, render_template  # noqa: E402
+from .naming import build_context, render_template, resolve_alias  # noqa: E402
 from .scheduler import reload_jobs  # noqa: E402
 from .service import service  # noqa: E402
 
@@ -215,7 +215,7 @@ async def handle_music_share(bot: Bot, event: GroupMessageEvent) -> None:
     if cfg.notify_duplicate:
         for song in result.duplicated:
             index = result.index_of.get(id(song), 0)
-            who = song.sharer_name or str(song.sharer_id)
+            who = resolve_alias(song.sharer_name or str(song.sharer_id), cfg.playlist.sharer_aliases)
             text = f" 这首《{song.title}》已经在榜单第 {index} 位了（首发: {who}）"
             await _reply_song(bot, event, text, song, with_card=cfg.reply_card)
 

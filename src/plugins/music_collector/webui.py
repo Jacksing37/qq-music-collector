@@ -31,6 +31,7 @@ from pydantic_core import PydanticUndefined
 
 from .config import AppConfig, config_manager
 from .models import PLATFORM_NAMES
+from .naming import resolve_alias
 from .scheduler import next_runs, reload_jobs
 from .service import service
 
@@ -89,6 +90,7 @@ FIELD_META: dict[str, tuple[str, str, bool]] = {
     "playlist.emoji_style": ("表情处理", "text=转中文词 / strip=直接删 / keep=原样（keep 大概率写不进网易云）", False),
     "playlist.desc_show_artist": ("清单带歌手", "简介清单条目是否带歌手名", False),
     "playlist.desc_blank_line": ("清单空行", "简介清单条目之间是否插空行", False),
+    "playlist.sharer_aliases": ("分享者昵称映射", "每行 原昵称=显示名，如 菜老名=Jacksing；仅做展示层替换，入库仍保留原始昵称。建议在「昵称映射」独立页编辑", True),
 
     "card.mode": ("卡片模式", "native=平台原生(依赖签名服务) / custom=自定义卡片 / off=只发文字+封面", False),
     "card.fallback_custom": ("失败后转自定义卡", "原生卡片失败是否自动再试自定义卡片", False),
@@ -148,6 +150,8 @@ def _python_type(finfo) -> str:
     if origin in (list, typing.List):
         inner = typing.get_args(ann)[0] if typing.get_args(ann) else str
         return "intlist" if inner is int else "strlist"
+    if origin is dict:
+        return "map"
     if typing.get_origin(ann) is typing.Literal:
         return "enum"
     if _is_basemodel(ann):
@@ -234,6 +238,20 @@ def coerce_value(ftype: str, enum_options, raw: object) -> object:
         return [int(x) for x in items]
     if ftype == "strlist":
         return [x.strip() for x in str(raw).split(",") if x.strip() != ""]
+    if ftype == "map":
+        # 接受 dict（前端直接传对象）或「k=v」多行文本（独立编辑页用）
+        if isinstance(raw, dict):
+            return {str(k): str(v) for k, v in raw.items()}
+        out: dict[str, str] = {}
+        for line in str(raw).splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip()
+        return out
     return str(raw)
 
 
@@ -245,7 +263,11 @@ def current_values() -> dict[str, object]:
         if isinstance(node, dict):
             for k, v in node.items():
                 nk = f"{prefix}.{k}" if prefix else k
-                if isinstance(v, dict):
+                # map 类型（如分享者昵称映射）整体作为一个值，不继续下钻，
+                # 否则会把映射里每个昵称当成独立配置项拍平。
+                if nk in KEY_INDEX and KEY_INDEX[nk]["type"] == "map":
+                    out[nk] = v
+                elif isinstance(v, dict):
                     out.update(_walk(v, nk))
                 else:
                     out[nk] = v
@@ -302,6 +324,10 @@ def _token_ok(request: Request) -> bool:
 
 async def _dashboard() -> HTMLResponse:
     return HTMLResponse(DASHBOARD_HTML)
+
+
+async def _aliases_page() -> HTMLResponse:
+    return HTMLResponse(ALIASES_HTML)
 
 
 async def _api_schema(request: Request):
@@ -369,11 +395,12 @@ async def _api_status(request: Request):
 
 def _song_item(song, index: int) -> dict:
     """把一条 Song 序列化成前端展示用的字典。"""
+    aliases = service.config.playlist.sharer_aliases
     return {
         "index": index + 1,
         "title": song.title,
         "artists": song.artists,
-        "sharer_name": song.sharer_name,
+        "sharer_name": resolve_alias(song.sharer_name or "", aliases),
         "platform": song.platform,
         "platform_name": PLATFORM_NAMES.get(song.platform, song.platform),
         "netease_id": song.netease_id,
@@ -545,6 +572,7 @@ def register_webui() -> None:
         logger.warning(f"[music] 无法获取 FastAPI 应用，WebUI 未挂载: {exc}")
         return
     app.add_api_route("/music-admin", _dashboard, methods=["GET"])
+    app.add_api_route("/music-admin/aliases", _aliases_page, methods=["GET"])
     app.add_api_route("/api/music-admin/schema", _api_schema, methods=["GET"])
     app.add_api_route("/api/music-admin/config", _api_config, methods=["GET"])
     app.add_api_route("/api/music-admin/config", _api_patch, methods=["PATCH"])
@@ -683,6 +711,7 @@ textarea{resize:vertical;min-height:64px;font-family:ui-monospace,monospace;font
   <span id="statusPill" class="status-pill">—</span>
   <div class="spacer"></div>
   <button id="themeBtn" title="切换主题">🌓 主题</button>
+  <button id="aliasBtn" title="编辑分享者昵称映射">✏ 昵称映射</button>
   <button id="logoutBtn" title="清除本地令牌">退出</button>
 </div></header>
 
@@ -838,6 +867,7 @@ function renderForm(schema, values){
     const h = document.createElement("h2"); h.innerHTML = `<span class="dot"></span>${sec.title}`;
     card.appendChild(h);
     sec.fields.forEach(f => {
+      if (f.type === "map") return;   // 映射类配置走独立编辑页，不塞进大表单
       const fr = document.createElement("div");
       fr.className = "field"; fr.dataset.key = f.key;
       const lab = document.createElement("div");
@@ -899,6 +929,7 @@ $("#themeBtn").onclick = () => {
   document.documentElement.setAttribute("data-theme", next);
   localStorage.setItem("mwc_theme", next);
 };
+$("#aliasBtn").onclick = () => window.open("/music-admin/aliases", "_blank");
 // 退出
 $("#logoutBtn").onclick = () => { localStorage.removeItem(LS_KEY); TOKEN=""; csrf.Authorization="Bearer "; showToken(); };
 // token 弹窗
@@ -1088,4 +1119,201 @@ loadAll();
 loadOverview();
 </script>
 </body>
-</html>"""
+</html>
+"""
+
+# -------------------------------------------------------------------- 昵称映射独立页
+
+ALIASES_HTML = r"""<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>分享者昵称映射 · 群音乐收集</title>
+<style>
+:root{
+  --bg:#0b0f1a; --bg2:#111726; --card:rgba(255,255,255,.04); --card-bd:rgba(255,255,255,.08);
+  --txt:#e8edf6; --muted:#8b97ad; --accent:#6ea8fe; --accent2:#a78bfa; --ok:#34d399; --bad:#f87171;
+  --input:rgba(255,255,255,.06); --shadow:0 10px 30px rgba(0,0,0,.35);
+}
+[data-theme="light"]{
+  --bg:#f4f6fb; --bg2:#ffffff; --card:rgba(20,30,60,.03); --card-bd:rgba(20,30,60,.1);
+  --txt:#1a2233; --muted:#5b6678; --accent:#3b6fe0; --accent2:#7c5cf0; --ok:#0f9d63; --bad:#d8453b;
+  --input:rgba(20,30,60,.05); --shadow:0 10px 30px rgba(20,30,60,.1);
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  background:radial-gradient(1200px 600px at 80% -10%,rgba(110,168,254,.12),transparent),var(--bg);
+  color:var(--txt);line-height:1.55;min-height:100vh}
+.wrap{max-width:860px;margin:0 auto;padding:28px 20px 120px}
+header{position:sticky;top:0;z-index:20;backdrop-filter:blur(14px);
+  background:linear-gradient(var(--bg),rgba(11,15,26,.6));padding:14px 0;margin-bottom:18px;
+  border-bottom:1px solid var(--card-bd)}
+[data-theme="light"] header{background:linear-gradient(#fff,rgba(255,255,255,.7))}
+.hrow{display:flex;align-items:center;gap:14px}
+.hrow h1{font-size:19px;margin:0;font-weight:700}
+.spacer{flex:1}
+button{font:inherit;cursor:pointer;border:1px solid var(--card-bd);background:var(--input);color:var(--txt);
+  border-radius:10px;padding:8px 14px;transition:.18s}
+button:hover{border-color:var(--accent);transform:translateY(-1px)}
+.btn-primary{background:linear-gradient(135deg,var(--accent),var(--accent2));border:none;color:#fff;font-weight:600}
+a.back{color:var(--accent);text-decoration:none;font-size:14px}
+.card{background:var(--card);border:1px solid var(--card-bd);border-radius:18px;padding:18px 20px;
+  margin-bottom:16px;box-shadow:var(--shadow);backdrop-filter:blur(8px)}
+.card h2{font-size:16px;margin:0 0 12px;display:flex;align-items:center;gap:8px}
+.card h2 .dot{width:8px;height:8px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2))}
+.hint{color:var(--muted);font-size:13px;margin:0 0 12px}
+textarea{width:100%;background:var(--input);border:1px solid var(--card-bd);color:var(--txt);
+  border-radius:10px;padding:11px;font:14px/1.6 ui-monospace,monospace;resize:vertical;min-height:180px}
+textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(110,168,254,.18)}
+.pv{list-style:none;margin:0;padding:0}
+.pv li{display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--input);
+  border:1px solid var(--card-bd);border-radius:10px;margin-bottom:8px;font-size:14px}
+.pv .from{font-weight:600}
+.pv .arrow{color:var(--accent2)}
+.pv .to{font-weight:700;color:var(--accent)}
+.pv .empty{color:var(--muted);background:none;border:none;padding:4px 0}
+.footbar{position:fixed;left:0;right:0;bottom:0;z-index:30;display:flex;align-items:center;gap:14px;
+  justify-content:center;padding:14px;background:linear-gradient(transparent,var(--bg) 40%)}
+.footbar .msg{font-size:13px;color:var(--muted)}
+.footbar .msg.ok{color:var(--ok)}
+.footbar .msg.bad{color:var(--bad)}
+.modal{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;
+  background:rgba(0,0,0,.55);backdrop-filter:blur(4px)}
+.modal .box{background:var(--bg2);border:1px solid var(--card-bd);border-radius:18px;padding:26px;width:min(420px,92vw);box-shadow:var(--shadow)}
+.modal h3{margin:0 0 6px}
+.modal p{color:var(--muted);font-size:13px;margin:0 0 14px}
+.modal input{width:100%;background:var(--input);border:1px solid var(--card-bd);color:var(--txt);border-radius:10px;padding:10px;font:inherit;margin-bottom:14px}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+<header><div class="wrap hrow" style="padding-bottom:0;margin-bottom:0">
+  <h1>✏ 分享者昵称映射</h1>
+  <div class="spacer"></div>
+  <button id="themeBtn" title="切换主题">🌓 主题</button>
+  <a class="back" href="/music-admin">← 返回面板</a>
+</div></header>
+
+<div class="wrap">
+  <div class="card">
+    <h2><span class="dot"></span>映射规则</h2>
+    <p class="hint">每行写一条 <code>原昵称=显示名</code>，例如 <code>菜老名=Jacksing</code>。
+    保存后，<b>网易云简介 / 群内文字榜单 / WebUI 表格</b> 里对应的分享者名字都会替换成显示名，
+    但数据库里仍保留原始昵称不变。空行和以 <code>#</code> 开头的注释会被忽略。</p>
+    <textarea id="aliasInput" placeholder="菜老名=Jacksing&#10;星仔=Star&#10;# 一行一条，原昵称=显示名"></textarea>
+  </div>
+
+  <div class="card">
+    <h2><span class="dot"></span>实时预览</h2>
+    <ul class="pv" id="previewList"><li class="empty">（暂无映射）</li></ul>
+  </div>
+</div>
+
+<div class="footbar">
+  <span class="msg" id="saveMsg"></span>
+  <button id="saveBtn" class="btn-primary">保存映射</button>
+</div>
+
+<div class="modal hidden" id="tokenModal">
+  <div class="box">
+    <h3>需要访问令牌</h3>
+    <p>与主配置面板共用同一令牌（服务器 .env 里的 <code>MUSIC_WEBUI_TOKEN</code>，未设置时打印在启动日志）。</p>
+    <input id="tokenInput" placeholder="粘贴令牌…" autocomplete="off">
+    <button class="btn-primary" id="tokenOk" style="width:100%">进入</button>
+  </div>
+</div>
+
+<script>
+const LS_KEY = "mwc_token";
+let TOKEN = localStorage.getItem(LS_KEY) || "";
+const $ = (s, r=document) => r.querySelector(s);
+const csrf = {"Authorization": "Bearer " + TOKEN};
+
+async function api(path, opts={}){
+  opts.headers = Object.assign({}, (opts.headers||{}), csrf);
+  const r = await fetch(path, opts);
+  if (r.status === 401){ showToken(); throw new Error("unauthorized"); }
+  return r;
+}
+function showToken(){ $("#tokenModal").classList.remove("hidden"); $("#tokenInput").focus(); }
+function esc(t){ return (t==null?"":String(t)).replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+function dictToLines(m){
+  return Object.keys(m||{}).map(k => k + "=" + m[k]).join("\n");
+}
+function linesToDict(text){
+  const out = {};
+  (text||"").split(/\r?\n/).forEach(line=>{
+    line = line.trim();
+    if (!line || line.startsWith("#")) return;
+    const i = line.indexOf("=");
+    if (i < 0) return;
+    const k = line.slice(0, i).trim(), v = line.slice(i+1).trim();
+    if (k) out[k] = v;
+  });
+  return out;
+}
+function renderPreview(m){
+  const ul = $("#previewList");
+  const keys = Object.keys(m||{});
+  if (!keys.length){ ul.innerHTML = `<li class="empty">（暂无映射）</li>`; return; }
+  ul.innerHTML = keys.map(k =>
+    `<li><span class="from">${esc(k)}</span><span class="arrow">→</span><span class="to">${esc(m[k])}</span></li>`
+  ).join("");
+}
+
+function setMsg(t, kind=""){ const m=$("#saveMsg"); m.textContent=t; m.className="msg"+(kind?(" "+kind):""); }
+
+async function load(){
+  try{
+    const r = await api("/api/music-admin/config");
+    const cj = await r.json();
+    const m = (cj.values && cj.values["playlist.sharer_aliases"]) || {};
+    $("#aliasInput").value = dictToLines(m);
+    renderPreview(m);
+    setMsg("");
+  }catch(e){ if (e.message!=="unauthorized") setMsg("加载失败: "+e.message, "bad"); }
+}
+
+async function save(){
+  const m = linesToDict($("#aliasInput").value);
+  setMsg("保存中…");
+  try{
+    const r = await api("/api/music-admin/config", {method:"PATCH",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify({values:{"playlist.sharer_aliases": m}})});
+    const j = await r.json();
+    if (!j.ok){
+      const msgs = Object.entries(j.errors||{}).map(([k,v])=>`${k}: ${v}`).join("；");
+      setMsg("保存失败 — "+msgs, "bad");
+      return;
+    }
+    setMsg("已保存 ✓ 共 "+Object.keys(m).length+" 条映射", "ok");
+    renderPreview(m);
+  }catch(e){ setMsg("保存失败: "+e.message, "bad"); }
+}
+
+const savedTheme = localStorage.getItem("mwc_theme");
+if (savedTheme) document.documentElement.setAttribute("data-theme", savedTheme);
+$("#themeBtn").onclick = () => {
+  const cur = document.documentElement.getAttribute("data-theme");
+  const next = cur==="dark"?"light":"dark";
+  document.documentElement.setAttribute("data-theme", next);
+  localStorage.setItem("mwc_theme", next);
+};
+$("#aliasInput").addEventListener("input", () => renderPreview(linesToDict($("#aliasInput").value)));
+$("#saveBtn").onclick = save;
+$("#tokenOk").onclick = () => {
+  const v = $("#tokenInput").value.trim();
+  if (!v) return;
+  TOKEN = v; localStorage.setItem(LS_KEY, v); csrf.Authorization = "Bearer "+v;
+  $("#tokenModal").classList.add("hidden");
+  load();
+};
+$("#tokenInput").addEventListener("keydown", e=>{ if(e.key==="Enter") $("#tokenOk").click(); });
+
+load();
+</script>
+</body>
+</html>
+"""

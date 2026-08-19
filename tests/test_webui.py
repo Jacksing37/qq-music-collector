@@ -23,7 +23,7 @@ def _all_keys():
 def test_build_schema_covers_known_keys():
     keys = _all_keys()
     for expected in ("enabled", "collect_override", "window.mode",
-                     "window.weekly.start", "playlist.sharer_style",
+                     "window.weekly", "playlist.sharer_style",
                      "playlist.name_template", "card.mode", "intro.text",
                      "cache.keep_days", "clear.keep_days"):
         assert expected in keys, f"schema 缺少 {expected}"
@@ -70,3 +70,52 @@ def test_apply_updates_atomic(tmp_path: Path):
 
     config_manager.path = orig_path
     config_manager.load()
+
+
+def test_coerce_value_map():
+    assert W.coerce_value("map", None, {"菜老名": "Jacksing"}) == {"菜老名": "Jacksing"}
+    assert W.coerce_value("map", None, "菜老名=Jacksing\n# 注释\n星仔=Star") == {
+        "菜老名": "Jacksing", "星仔": "Star"
+    }
+    assert W.coerce_value("map", None, "") == {}
+
+
+def test_sharer_aliases_map_type():
+    f = W.KEY_INDEX["playlist.sharer_aliases"]
+    assert f["type"] == "map"
+    # 仍出现在 schema 里（前端 form 渲染时再跳过 map 类型，走独立编辑页）
+    assert any(x["key"] == "playlist.sharer_aliases" for s in W.SCHEMA for x in s["fields"])
+
+
+def test_current_values_map_whole_dict():
+    vals = W.current_values()
+    assert "playlist.sharer_aliases" in vals
+    assert isinstance(vals["playlist.sharer_aliases"], dict)
+    # 不应把映射里的每个昵称拍平成独立配置项
+    assert "playlist.sharer_aliases.菜老名" not in vals
+
+
+def test_apply_updates_map(tmp_path: Path):
+    orig_path = config_manager.path
+    config_manager.path = tmp_path / "config.yaml"
+    config_manager.load()
+    ok, errs = W.apply_updates({"playlist.sharer_aliases": {"菜老名": "Jacksing"}})
+    assert ok, errs
+    assert config_manager.config.playlist.sharer_aliases == {"菜老名": "Jacksing"}
+    config_manager.path = orig_path
+    config_manager.load()
+
+
+if __name__ == "__main__":
+    import tempfile
+
+    _tmp = Path(tempfile.mkdtemp())
+    test_build_schema_covers_known_keys()
+    test_enum_options_detected()
+    test_coerce_value_types()
+    test_apply_updates_atomic(_tmp)
+    test_coerce_value_map()
+    test_sharer_aliases_map_type()
+    test_current_values_map_whole_dict()
+    test_apply_updates_map(_tmp)
+    print("webui tests OK")

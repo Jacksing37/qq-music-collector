@@ -19,7 +19,7 @@ from nonebot.permission import SUPERUSER
 from . import detector
 from .bot_utils import card_breaker, send_report, split_text
 from .config import config_manager
-from .naming import build_context, render_template, unknown_placeholders
+from .naming import build_context, render_template, unknown_placeholders, resolve_alias
 from .scheduler import next_runs, reload_jobs
 from .service import service
 from .window import WindowParseError, parse_daily, parse_once, parse_weekly
@@ -741,7 +741,7 @@ async def _cmd_archive(
     tip = f"（本次歌单名: {override}）" if override else ""
     await bot.send(event, Message(f"开始归档{tip}，正在匹配网易云曲库，请稍候…"))
     report = await service.run_archive(group_id, name_override=override)
-    for chunk in split_text(report.summary()):
+    for chunk in split_text(report.summary(service.config.playlist.sharer_aliases)):
         await bot.send(event, Message(chunk))
 
 
@@ -893,7 +893,7 @@ async def _cmd_export(bot: Bot, event: MessageEvent, group_id: Optional[int]) ->
     ]
     for idx, song in enumerate(songs, start=1):
         artist = song.artists or "未知歌手"
-        sharer = song.sharer_name or "匿名"
+        sharer = resolve_alias(song.sharer_name or "匿名", service.config.playlist.sharer_aliases)
         lines.append(f"{idx}. {song.title} - {artist}（{sharer} 分享）")
     text = "\n".join(lines)
     for chunk in split_text(text):

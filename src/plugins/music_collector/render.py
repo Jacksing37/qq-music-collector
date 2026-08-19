@@ -16,6 +16,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .config import CACHE_DIR, RenderConfig
 from .models import Song
+from .naming import resolve_alias
 
 # ---------------------------------------------------------------- 字体
 
@@ -135,14 +136,21 @@ FOOTER_H = 56
 # ---------------------------------------------------------------- 文字列表
 
 
-def build_text_list(songs: Sequence[Song], title: str, limit: int = 60) -> str:
-    """生成纯文字榜单。超过 limit 条只列前 limit 条，避免消息被风控截断。"""
+def build_text_list(
+    songs: Sequence[Song], title: str, limit: int = 60,
+    aliases: Optional[dict[str, str]] = None,
+) -> str:
+    """生成纯文字榜单。超过 limit 条只列前 limit 条，避免消息被风控截断。
+
+    ``aliases`` 为分享者昵称映射，命中后展示映射名（仅展示层，不改数据）。
+    """
     if not songs:
         return f"{title}\n当前还没有收集到任何歌曲。"
     lines = [title, f"共 {len(songs)} 首", "─" * 16]
     for idx, song in enumerate(songs[:limit], start=1):
         artist = song.artists or "未知歌手"
-        sharer = song.sharer_name or str(song.sharer_id or "")
+        raw = song.sharer_name or str(song.sharer_id or "")
+        sharer = resolve_alias(raw, aliases)
         line = f"{idx}. {song.title} - {artist}"
         if sharer:
             line += f"（{sharer}）"
@@ -242,6 +250,7 @@ def _render_page(
     cfg: RenderConfig,
     page_info: str,
     start_index: int,
+    aliases: Optional[dict[str, str]] = None,
 ) -> Image.Image:
     regular = _find_font(_REGULAR_CANDIDATES, cfg.font_path)
     bold = _find_font(_BOLD_CANDIDATES, cfg.font_path)
@@ -312,7 +321,7 @@ def _render_page(
         )
         draw.text((WIDTH - PADDING - 32 - tag_w, top + 21), tag, font=f_small, fill=theme.accent)
 
-        sharer = song.sharer_name or (str(song.sharer_id) if song.sharer_id else "")
+        sharer = resolve_alias(song.sharer_name or str(song.sharer_id or ""), aliases)
         if sharer:
             sharer_text = _ellipsize(draw, f"by {sharer}", f_small, 168)
             sw = draw.textlength(sharer_text, font=f_small)
@@ -331,6 +340,7 @@ def _render_sync(
     subtitle: str,
     cfg: RenderConfig,
     out_dir: Path,
+    aliases: Optional[dict[str, str]] = None,
 ) -> list[Path]:
     theme = THEMES.get(cfg.theme, THEMES["dark"])
     per_page = max(5, cfg.max_items_per_image)
@@ -342,7 +352,8 @@ def _render_sync(
     for idx, chunk in enumerate(pages):
         page_info = f"{idx + 1}/{len(pages)}" if len(pages) > 1 else ""
         image = _render_page(
-            chunk, covers, title, subtitle, theme, cfg, page_info, idx * per_page + 1
+            chunk, covers, title, subtitle, theme, cfg, page_info,
+            idx * per_page + 1, aliases,
         )
         path = out_dir / f"list_{stamp}_{idx + 1}.png"
         image.save(path, format="PNG", optimize=True)
@@ -356,10 +367,11 @@ async def render_song_list(
     subtitle: str,
     cfg: RenderConfig,
     out_dir: Optional[Path] = None,
+    aliases: Optional[dict[str, str]] = None,
 ) -> list[Path]:
-    """渲染榜单长图，返回图片路径列表（可能分页）。"""
+    """渲染榜单长图，返回图片路径列表（可能分页）。``aliases`` 用于映射分享者名。"""
     out_dir = out_dir or (CACHE_DIR / "render")
     covers = await fetch_covers(songs) if cfg.show_cover else {}
     return await asyncio.to_thread(
-        _render_sync, list(songs), covers, title, subtitle, cfg, out_dir
+        _render_sync, list(songs), covers, title, subtitle, cfg, out_dir, aliases
     )

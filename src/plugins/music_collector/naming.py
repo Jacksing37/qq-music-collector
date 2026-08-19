@@ -46,12 +46,13 @@ def build_context(
     seq: int,
     songs: Sequence[Song] = (),
     emoji_style: str = "text",
+    aliases: Optional[dict[str, str]] = None,
 ) -> dict[str, str]:
     """组装占位符表。"""
     ref = end_at or start_at or datetime.now()
     sharer_names = []
     for song in songs:
-        name = sharer_of(song, emoji_style)
+        name = sharer_of(song, emoji_style, aliases)
         if name and name not in sharer_names:
             sharer_names.append(name)
 
@@ -101,14 +102,32 @@ def unknown_placeholders(template: str, context: dict[str, str]) -> list[str]:
 # ---------------------------------------------------------------- 清单文案
 
 
-def sharer_of(song: Song, emoji_style: str = "text") -> str:
-    """取分享者展示名，顺手把昵称里的表情转成文字。
+def resolve_alias(name: str, aliases: Optional[dict[str, str]] = None) -> str:
+    """显示层昵称映射：命中映射表返回映射名，否则原样返回。
 
-    昵称里的 emoji 是 4 字节字符，网易云简介写不进去，必须先转掉。
+    兼容昵称里带表情符号的情况：先按原样匹配，再去掉表情后匹配一次，
+    这样 ``菜老名`` 这种 key 也能命中 QQ 里实际带 emoji 的昵称。
+    """
+    if not aliases or not name:
+        return name
+    if name in aliases:
+        return aliases[name]
+    plain = sanitize_name(name, "strip")
+    return aliases.get(plain, name)
+
+
+def sharer_of(song: Song, emoji_style: str = "text", aliases: Optional[dict[str, str]] = None) -> str:
+    """取分享者展示名，先套用昵称映射，再把昵称里的表情转成文字。
+
+    先映射再清洗的原因：QQ 昵称可能带 emoji（如 ``菜老名🎵``），映射 key 是
+    ``菜老名`` 这种纯文本。若先转成 ``菜老名[音符]`` 就匹配不上了，所以先在
+    原始昵称上做映射，映射命中后再过一遍 emoji 清洗。
+    ``aliases`` 为 ``{原昵称: 显示名}``，仅影响展示，不改变入库数据。
     """
     raw = song.sharer_name or ""
     fallback = str(song.sharer_id) if song.sharer_id else "匿名"
-    return sanitize_name(raw, emoji_style, fallback)
+    mapped = resolve_alias(raw, aliases)
+    return sanitize_name(mapped, emoji_style, fallback)
 
 
 def build_song_lines(
@@ -116,11 +135,12 @@ def build_song_lines(
     with_platform: bool = False,
     emoji_style: str = "text",
     show_artist: bool = True,
+    aliases: Optional[dict[str, str]] = None,
 ) -> list[str]:
     """「1. 张三 分享《歌名》- 歌手」逐首一行的清单。"""
     lines: list[str] = []
     for idx, song in enumerate(songs, start=1):
-        sharer = sharer_of(song, emoji_style)
+        sharer = sharer_of(song, emoji_style, aliases)
         title = sanitize(song.title, emoji_style) or song.title
         line = f"{idx}. {sharer} 分享《{title}》"
         if show_artist:
@@ -137,6 +157,7 @@ def build_sharer_lines(
     emoji_style: str = "text",
     show_artist: bool = True,
     blank_line: bool = False,
+    aliases: Optional[dict[str, str]] = None,
 ) -> list[str]:
     """按人聚合，但**每首歌独占一行**，看起来整齐：
 
@@ -148,7 +169,7 @@ def build_sharer_lines(
     """
     grouped: dict[str, list[Song]] = {}
     for song in songs:
-        grouped.setdefault(sharer_of(song, emoji_style), []).append(song)
+        grouped.setdefault(sharer_of(song, emoji_style, aliases), []).append(song)
 
     lines: list[str] = []
     for i, (name, items) in enumerate(grouped.items()):
@@ -168,6 +189,7 @@ def build_sharer_lines(
 def build_name_lines(
     songs: Sequence[Song],
     emoji_style: str = "text",
+    aliases: Optional[dict[str, str]] = None,
 ) -> list[str]:
     """极简清单：每行只列分享者名字，按歌曲顺序编号。
 
@@ -178,7 +200,7 @@ def build_name_lines(
 
     用于只关心「谁分享了」而不需要歌名/歌手的场景。
     """
-    return [f"{idx}.{sharer_of(song, emoji_style)}" for idx, song in enumerate(songs, start=1)]
+    return [f"{idx}.{sharer_of(song, emoji_style, aliases)}" for idx, song in enumerate(songs, start=1)]
 
 
 def fit_description(

@@ -22,6 +22,8 @@ from music_collector.naming import (  # noqa: E402
     build_sharer_lines,
     build_song_lines,
     fit_description,
+    resolve_alias,
+    sharer_of,
 )
 
 
@@ -125,6 +127,56 @@ def test_fit_description_no_blank_when_disabled() -> None:
     assert out == "头部说明\na\nb"
 
 
+# ----------------------------------------------------------------- 昵称映射
+
+def test_resolve_alias_basic() -> None:
+    aliases = {"菜老名": "Jacksing"}
+    assert resolve_alias("菜老名", aliases) == "Jacksing"
+    assert resolve_alias("别人", aliases) == "别人"
+    assert resolve_alias("菜老名", None) == "菜老名"
+
+
+def test_resolve_alias_emoji_nickname() -> None:
+    # QQ 昵称带 emoji 时，映射 key 用纯文本也能命中
+    aliases = {"菜老名": "Jacksing"}
+    assert resolve_alias("菜老名🎵", aliases) == "Jacksing"
+    assert resolve_alias("菜老名[音符]", aliases) == "菜老名[音符]"  # 已是文本则不再强匹配
+
+
+def test_sharer_of_applies_alias() -> None:
+    aliases = {"菜老名": "Jacksing"}
+    s = _song("晴天", "周杰伦", "菜老名", 1)
+    assert sharer_of(s, "text", aliases) == "Jacksing"
+    # emoji 昵称同样命中
+    s2 = _song("晴天", "周杰伦", "菜老名🎵", 1)
+    assert sharer_of(s2, "text", aliases) == "Jacksing"
+
+
+def test_build_song_lines_applies_alias() -> None:
+    aliases = {"菜老名": "Jacksing"}
+    songs = [_song("晴天", "周杰伦", "菜老名", 1)]
+    lines = build_song_lines(songs, emoji_style="text", show_artist=True, aliases=aliases)
+    assert lines[0] == "1. Jacksing 分享《晴天》 - 周杰伦"
+
+
+def test_build_name_lines_applies_alias() -> None:
+    aliases = {"菜老名": "Jacksing", "李四": "Lee"}
+    songs = [_song("孤勇者", "陈奕迅", "菜老名", 1), _song("晴天", "周杰伦", "李四", 2)]
+    lines = build_name_lines(songs, emoji_style="text", aliases=aliases)
+    assert lines == ["1.Jacksing", "2.Lee"]
+
+
+def test_build_sharer_lines_groups_by_alias() -> None:
+    aliases = {"菜老名": "Jacksing"}
+    songs = [
+        _song("A", "a", "菜老名", 1),
+        _song("B", "b", "菜老名🎵", 2),
+    ]
+    # 两个原始昵称（一个带 emoji）都映射到 Jacksing，应聚合到同一人
+    lines = build_sharer_lines(songs, emoji_style="text", show_artist=True, blank_line=False, aliases=aliases)
+    assert lines[0] == "Jacksing（2首）"
+
+
 if __name__ == "__main__":
     test_build_song_lines_one_per_line()
     test_build_song_lines_hide_artist()
@@ -136,4 +188,10 @@ if __name__ == "__main__":
     test_build_sharer_lines_no_blank_when_disabled()
     test_fit_description_blank_after_header()
     test_fit_description_no_blank_when_disabled()
+    test_resolve_alias_basic()
+    test_resolve_alias_emoji_nickname()
+    test_sharer_of_applies_alias()
+    test_build_song_lines_applies_alias()
+    test_build_name_lines_applies_alias()
+    test_build_sharer_lines_groups_by_alias()
     print("naming tests OK")

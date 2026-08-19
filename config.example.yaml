@@ -81,6 +81,9 @@ playlist:
   desc_show_artist: true
   # 简介清单条目之间是否插空行（by_person 样式下按人分段）
   desc_blank_line: false
+  # 分享者昵称映射：仅做展示层替换，入库仍保留原始昵称。例：{菜老名: Jacksing}
+  # 设置后网易云简介 / 群内文字榜单 / WebUI 表格里的「菜老名」都会显示成「Jacksing」
+  sharer_aliases: {}
 
 # 已收集歌曲的清理（区别于 cache：cache 清理的是榜单图片缓存）
 clear:

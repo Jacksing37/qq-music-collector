@@ -120,7 +120,9 @@ async def job_archive() -> None:
             await send_report(bot, group_id, text, images)
 
         report = await service.run_archive(group_id, state)
-        await safe_send_group(bot, group_id, Message(report.summary()))
+        await safe_send_group(
+            bot, group_id, Message(report.summary(service.config.playlist.sharer_aliases))
+        )
 
 
 async def job_end() -> None:

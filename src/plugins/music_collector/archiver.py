@@ -21,6 +21,7 @@ from .naming import (
     build_song_lines,
     fit_description,
     render_template,
+    resolve_alias,
 )
 from .netease_api import NeteaseAPI, NeteaseError
 from .store import Store
@@ -145,7 +146,7 @@ class ArchiveReport:
     #: 实际生成的简介文本，失败时可用于手动补写
     description: str = ""
 
-    def summary(self) -> str:
+    def summary(self, aliases: Optional[dict[str, str]] = None) -> str:
         if not self.ok:
             return f"归档失败：{self.message}"
         lines = [
@@ -163,7 +164,8 @@ class ArchiveReport:
         if self.unmatched:
             lines.append(f"以下 {len(self.unmatched)} 首在网易云没匹配到，需要手动处理：")
             for s in self.unmatched[:15]:
-                sharer = s.sharer_name or (str(s.sharer_id) if s.sharer_id else "匿名")
+                raw = s.sharer_name or (str(s.sharer_id) if s.sharer_id else "匿名")
+                sharer = resolve_alias(raw, aliases)
                 artist = s.artists or "未知歌手"
                 lines.append(
                     f"  · {sharer} 分享《{s.title}》- {artist}（{s.platform_name}）"
@@ -292,6 +294,7 @@ class Archiver:
             seq=cfg.seq,
             songs=songs,
             emoji_style=cfg.emoji_style,
+            aliases=cfg.sharer_aliases,
         )
         name = (name_override or cfg.pending_name or cfg.name_template).strip()
         name = render_template(name, context) or f"群歌单 {window_label}"
@@ -332,14 +335,18 @@ class Archiver:
                     emoji_style=cfg.emoji_style,
                     show_artist=cfg.desc_show_artist,
                     blank_line=cfg.desc_blank_line,
+                    aliases=cfg.sharer_aliases,
                 )
             elif cfg.sharer_style == "by_name":
-                body_lines = build_name_lines(listed, emoji_style=cfg.emoji_style)
+                body_lines = build_name_lines(
+                    listed, emoji_style=cfg.emoji_style, aliases=cfg.sharer_aliases
+                )
             else:
                 body_lines = build_song_lines(
                     listed,
                     emoji_style=cfg.emoji_style,
                     show_artist=cfg.desc_show_artist,
+                    aliases=cfg.sharer_aliases,
                 )
         if report.unmatched:
             body_lines.append("以下歌曲在网易云未匹配到，未收录（含分享者方便查找）：")
@@ -348,6 +355,7 @@ class Archiver:
                 with_platform=True,
                 emoji_style=cfg.emoji_style,
                 show_artist=cfg.desc_show_artist,
+                aliases=cfg.sharer_aliases,
             )
         desc = fit_description(header, body_lines)
         report.description = desc

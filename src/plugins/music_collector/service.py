@@ -159,12 +159,13 @@ class CollectorService:
         state = window or self.current_window()
         songs = await self.store.list_songs(group_id, state.key)
         title = f"群音乐收藏榜 · {state.label}"
-        text = build_text_list(songs, title)
+        text = build_text_list(songs, title, aliases=self.config.playlist.sharer_aliases)
         images: list[Path] = []
         if songs:
             subtitle = f"共 {len(songs)} 首 · 窗口 {state.label}"
             images = await render_song_list(
-                songs, title, subtitle, self.config.render, CACHE_DIR / "render"
+                songs, title, subtitle, self.config.render, CACHE_DIR / "render",
+                aliases=self.config.playlist.sharer_aliases,
             )
             cache_cfg = self.config.cache
             if cache_cfg.enabled and cache_cfg.clean_after_render:
@@ -190,6 +191,7 @@ class CollectorService:
             seq=cfg.seq,
             songs=songs,
             emoji_style=cfg.emoji_style,
+            aliases=cfg.sharer_aliases,
         )
         return render_template(cfg.pending_name or cfg.name_template, context)
 
@@ -279,6 +281,7 @@ class CollectorService:
             seq=cfg.seq,
             songs=songs,
             emoji_style=cfg.emoji_style,
+            aliases=cfg.sharer_aliases,
         )
         header = render_template(cfg.description_template, context)
         body: list[str] = []
@@ -289,14 +292,18 @@ class CollectorService:
                     emoji_style=cfg.emoji_style,
                     show_artist=cfg.desc_show_artist,
                     blank_line=cfg.desc_blank_line,
+                    aliases=cfg.sharer_aliases,
                 )
             elif cfg.sharer_style == "by_name":
-                body = build_name_lines(songs, emoji_style=cfg.emoji_style)
+                body = build_name_lines(
+                    songs, emoji_style=cfg.emoji_style, aliases=cfg.sharer_aliases
+                )
             else:
                 body = build_song_lines(
                     songs,
                     emoji_style=cfg.emoji_style,
                     show_artist=cfg.desc_show_artist,
+                    aliases=cfg.sharer_aliases,
                 )
         return fit_description(header, body)
 

@@ -116,6 +116,10 @@ class PlaylistConfig(BaseModel):
     desc_show_artist: bool = True
     #: 简介清单条目之间是否插空行（by_person 样式下按人分段）
     desc_blank_line: bool = False
+    #: 分享者昵称映射（显示层替换，入库仍存原始昵称）。键为原始昵称，值为展示名。
+    #: 例：{"菜老名": "Jacksing"} —— 网易云简介 / 群内文字榜单 / WebUI 表格里
+    #: 「菜老名」都会显示成「Jacksing」，但数据库里保留原始昵称不变。
+    sharer_aliases: dict[str, str] = Field(default_factory=dict)
 
 
 #: 自我介绍默认文案。占位符见 naming.py，另有 {nick} {count} {state} {playlist}
