@@ -224,7 +224,7 @@ class AppConfig(BaseModel):
     collect_override: Literal["auto", "on", "off"] = "auto"
     #: 生效群号，留空表示所有群
     groups: list[int] = Field(default_factory=list)
-    #: 识别到音乐后是否 @ 分享者并回发卡片
+    #: 识别到音乐后是否回发音乐卡片；@+文字提示始终发送，本项只控制卡片
     reply_card: bool = True
     #: 同一首歌被重复分享时是否提示
     notify_duplicate: bool = True

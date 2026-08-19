@@ -17,7 +17,7 @@ from music_collector.webui import build_overview, dispatch_action  # noqa: E402
 
 
 class _Song:
-    def __init__(self, title, artists="", sharer_name="", platform="163",
+    def __init__(self, title, artists="", sharer_name="", platform="netease",
                  netease_id=None, matched=False):
         self.title = title
         self.artists = artists
@@ -109,7 +109,7 @@ def test_build_overview_structure():
     assert g["group_id"] == 123
     assert g["count"] == 2
     assert g["songs"][0]["title"] == "晴天"
-    assert g["songs"][0]["platform_name"] == "网易云"
+    assert g["songs"][0]["platform_name"] == "网易云音乐"
     assert g["songs"][0]["index"] == 1
 
 
@@ -165,6 +165,36 @@ def test_build_overview_includes_current_window_when_empty():
     keys = [w["key"] for w in ov["windows"]]
     assert "2026-W33" in keys, "当前窗口必须出现在 windows 列表"
     assert keys[0] == "2026-W33"
+
+
+def test_dispatch_preview_combined():
+    # 合并预览：一次返回歌单名 + 简介 + 歌曲列表
+    svc = _FakeService(); _patch(svc)
+    import asyncio
+    r = asyncio.get_event_loop().run_until_complete(
+        dispatch_action({"action": "preview", "group_id": 123}))
+    assert r["ok"]
+    assert r["data"]["name"] == "Wk.1歌单"
+    assert "晴天" in r["data"]["description"]
+    assert len(r["data"]["songs"]) == 2
+    assert r["data"]["songs"][0]["title"] == "晴天"
+    assert r["data"]["songs"][0]["index"] == 1
+    assert r["data"]["window_key"] == "2026-W33"
+
+
+def test_dispatch_aliases_from_old_frontend():
+    # 旧版前端按钮发的简写必须映射到规范操作名
+    svc = _FakeService(); _patch(svc)
+    import asyncio
+    r = asyncio.get_event_loop().run_until_complete(
+        dispatch_action({"action": "pname", "group_id": 123}))
+    assert r["ok"] and r["data"]["name"] == "Wk.1歌单"
+    r = asyncio.get_event_loop().run_until_complete(
+        dispatch_action({"action": "pdesc", "group_id": 123}))
+    assert r["ok"] and "晴天" in r["data"]["description"]
+    r = asyncio.get_event_loop().run_until_complete(
+        dispatch_action({"action": "del", "group_id": 123, "window_key": "2026-W33", "indices": [1]}))
+    assert r["ok"] and svc.clear_idx_calls == [(123, "2026-W33", [1])]
 
 
 def test_dispatch_unknown_and_bad_param():

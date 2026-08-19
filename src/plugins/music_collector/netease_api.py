@@ -296,10 +296,13 @@ class NeteaseAPI:
 
     # ------------------------------------------------------------ linuxapi
 
-    async def _linux_post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _linux_post(
+        self, path: str, payload: dict[str, Any], *, os_name: str = "linux"
+    ) -> dict[str, Any]:
         """通过 linux 客户端转发接口调用 ``/api{path}``。
 
-        这是当前环境下唯一能改歌单简介的通道。
+        实测（2026-08）：desc/update 用 os=linux 会被拒（301 系统错误），
+        改用 os=pc 能通过认证 —— 故简介写入优先 os=pc，其余维持 os=linux。
         """
         headers = {
             "User-Agent": _LINUX_UA,
@@ -313,7 +316,7 @@ class NeteaseAPI:
             resp = await client.post(
                 f"{self.BASE}/api/linux/forward",
                 data=linuxapi_encrypt(f"{self.BASE}/api{path}", params),
-                cookies=self._cookies_for("linux"),
+                cookies=self._cookies_for(os_name),
             )
         if not resp.content:
             raise NeteaseError(-1, "linuxapi 返回空响应")
@@ -359,6 +362,18 @@ class NeteaseAPI:
             if isinstance(profile, dict) and profile.get("userId"):
                 return profile
         return {"nickname": "已提供登录凭证（状态未实时校验）", "userId": 0}
+
+    async def session_valid(self) -> bool:
+        """真实校验登录态是否有效（cookie 存在 ≠ 未过期）。
+
+        ``logged_in`` 只检查 MUSIC_U 是否存在；网易云 cookie 会过期/被风控，
+        失效后 linuxapi 等通道统一返回 code=301「需要登录」。
+        """
+        try:
+            profile = await self.login_status()
+        except Exception:
+            return False
+        return bool(profile and profile.get("userId"))
 
     async def user_id(self) -> Optional[int]:
         profile = await self.login_status()
@@ -453,6 +468,9 @@ class NeteaseAPI:
 
         pid = str(playlist_id)
         attempts = [
+            # os=linux 的 desc/update 会被拒 301，os=pc 能通过认证（实测 2026-08）
+            ("linuxapi(pc)", lambda: self._linux_post(
+                "/playlist/desc/update", {"id": pid, "desc": desc}, os_name="pc")),
             ("linuxapi", lambda: self._linux_post(
                 "/playlist/desc/update", {"id": pid, "desc": desc})),
             ("linuxapi-batch", lambda: self._linux_post("/batch", {
@@ -468,7 +486,10 @@ class NeteaseAPI:
         ]
 
         errors: list[str] = []
-        for label, call in attempts:
+        for i, (label, call) in enumerate(attempts):
+            if i:
+                # 各通道紧挨着连发容易触发 406「操作频繁」频控，错开一秒
+                await asyncio.sleep(1.0)
             try:
                 data = await call()
             except Exception as exc:
@@ -492,6 +513,20 @@ class NeteaseAPI:
                 logger.info(f"[netease] 简介写入成功（{label}）playlist={playlist_id}")
                 return True, label
             errors.append(f"{label}:接口返回 200 但读回不一致")
+
+        # linuxapi 返回 301 = 需要登录，多半是 MUSIC_U 过期/被风控。
+        # 此时不再罗列一堆频控错误，直接给用户明确下一步。
+        if any("code=301" in e for e in errors):
+            try:
+                valid = await self.session_valid()
+            except Exception:
+                valid = False
+            if not valid:
+                return (
+                    False,
+                    "网易云登录态已失效（MUSIC_U 过期或被风控），"
+                    "请私聊机器人重新执行 /music cookie <MUSIC_U>",
+                )
 
         # 顺带把名字补一次（改名通道和简介不同，不影响成败判定）
         if name:

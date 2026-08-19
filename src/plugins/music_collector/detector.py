@@ -86,6 +86,11 @@ _PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
     # ---- 酷我 ----
     ("kuwo", "song_id", re.compile(r"kuwo\.cn/(?:newh5app/)?play_detail/(\d+)", re.I)),
     ("kuwo", "song_id", re.compile(r"kuwo\.cn/yinyue/(\d+)", re.I)),
+    # ---- Apple Music（song/xx/<id> 或 album?i=<track_id>；纯专辑链接无 i= 不命中）----
+    ("apple", "song_id", re.compile(
+        r"music\.apple\.com/(?:[a-z]{2}/)?song/[^/?#]+/(\d{6,12})", re.I)),
+    ("apple", "song_id", re.compile(
+        r"music\.apple\.com/(?:[a-z]{2}/)?album/[^/?#]+/\d{6,12}[^#\s]*\bi=(\d{6,12})", re.I)),
     # ---- 汽水音乐 ----
     ("qishui", "song_id", re.compile(r"qishui\.douyin\.com/s/([0-9A-Za-z_-]+)", re.I)),
 ]
@@ -100,6 +105,7 @@ _HOST_HINTS: list[tuple[str, str]] = [
     ("i.y.qq.com", "qq"),
     ("kugou.com", "kugou"),
     ("kuwo.cn", "kuwo"),
+    ("music.apple.com", "apple"),
     ("qishui.douyin.com", "qishui"),
 ]
 
@@ -131,6 +137,18 @@ def _is_meaningful(url: str) -> bool:
     return parsed.path.rstrip("/") not in _IGNORE_PATHS
 
 
+# Apple 的整张专辑 / 歌单 / 艺人 / 榜单页不是单曲（album?i= 已有精确规则可命中）
+_APPLE_COLLECTION_RE = re.compile(
+    r"music\.apple\.com/(?:[a-z]{2}/)?(?:playlist|artist|station|charts|album)(?:/|$)", re.I
+)
+
+
+def _is_apple_collection(url: str) -> bool:
+    if not re.search(r"music\.apple\.com", url, re.I):
+        return False
+    return bool(_APPLE_COLLECTION_RE.search(url)) and not re.search(r"[?#&]i=\d+", url)
+
+
 def _platform_of_host(host: str) -> Optional[str]:
     for host_frag, platform in _HOST_HINTS:
         if host == host_frag or host.endswith("." + host_frag):
@@ -157,7 +175,7 @@ def match_url(url: str) -> Optional[MusicLink]:
                 setattr(link, field, m.group(1))
                 return link
     host_platform = _platform_of_host(_host_of(url))
-    if host_platform and _is_meaningful(url):
+    if host_platform and _is_meaningful(url) and not _is_apple_collection(url):
         return MusicLink(platform=host_platform, raw=url)
     return None
 

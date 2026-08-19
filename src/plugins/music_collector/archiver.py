@@ -88,8 +88,44 @@ def is_acceptable(song: Song, candidate: dict, strict: bool) -> bool:
             a.get("name", "") for a in (candidate.get("ar") or candidate.get("artists") or [])
         )
         dst_a = artist_set(cand_artists)
+        if not dst_a:
+            # 搜索接口没带回歌手信息时无法核对，标题已精确相等即接受
+            return True
         return bool(src_a & dst_a) or any(a in b or b in a for a in src_a for b in dst_a)
     return src_t == dst_t or src_t in dst_t or dst_t in src_t
+
+
+def _pick_best(
+    candidates: list[dict], song: Song, *, strict: Optional[bool]
+) -> tuple[Optional[dict], int]:
+    """从搜索结果里挑分数最高的候选。
+
+    strict=True   歌名精确相等 + 歌手有交集（配置默认）
+    strict=False  歌名相等或互相包含（宽松）
+    strict=None   只要求歌名精确相等 —— 跨语言歌手名（Apple 英文名 vs
+                  网易云中文名）或歌手信息缺失时的兜底，靠 score 的
+                  时长加分偏向原版。
+    """
+    src_t = normalize_title(song.title)
+    best: Optional[dict] = None
+    best_score = -1
+    for cand in candidates:
+        dst_t = normalize_title(str(cand.get("name", "")))
+        if not dst_t:
+            continue
+        if strict is True:
+            if not is_acceptable(song, cand, True):
+                continue
+        elif strict is False:
+            if not is_acceptable(song, cand, False):
+                continue
+        else:  # strict is None：只认歌名完全一致
+            if dst_t != src_t:
+                continue
+        s = score_candidate(song, cand)
+        if s > best_score:
+            best, best_score = cand, s
+    return best, best_score
 
 
 @dataclass
@@ -166,7 +202,12 @@ class Archiver:
         return False, note
 
     async def match_netease_id(self, song: Song, cfg: PlaylistConfig) -> Optional[str]:
-        """为一首歌找到对应的网易云歌曲 id。"""
+        """为一首歌找到对应的网易云歌曲 id。
+
+        两级匹配：先按配置的严格/宽松规则选（歌名+歌手都吻合）；
+        仍无结果时降级为「歌名完全一致」里分数最高的——覆盖 Apple Music
+        歌手名跨语言（Kenshi Yonezu ↔ 米津玄師）等场景。
+        """
         if song.platform == "netease" and song.song_id.isdigit():
             return song.song_id
         if song.netease_id:
@@ -178,23 +219,20 @@ class Archiver:
         if not keyword or song.title == "未识别歌曲":
             return None
         try:
-            candidates = await self.api.search_songs(keyword, limit=10)
+            candidates = await self.api.search_songs(keyword, limit=20)
         except Exception:
             return None
         if not candidates:
             return None
 
-        best: Optional[dict] = None
-        best_score = -1
-        for cand in candidates:
-            if not is_acceptable(song, cand, cfg.strict_match):
-                continue
-            s = score_candidate(song, cand)
-            if s > best_score:
-                best, best_score = cand, s
+        # 第一级：按配置的严格/宽松规则选（歌名+歌手都吻合）
+        best, _ = _pick_best(candidates, song, strict=cfg.strict_match)
         if best is None:
-            return None
-        return str(best.get("id"))
+            # 第二级兜底：只按歌名完全一致选。解决 Apple Music 歌手名是
+            # 英文（Kenshi Yonezu）而网易云是中文（米津玄師）等跨语言差异，
+            # 以及候选没带回歌手信息导致第一级全被拒的场景。
+            best, _ = _pick_best(candidates, song, strict=None)
+        return str(best.get("id")) if best else None
 
     async def archive(
         self,

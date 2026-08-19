@@ -206,19 +206,18 @@ async def handle_music_share(bot: Bot, event: GroupMessageEvent) -> None:
         return
 
     cfg = service.config
-    if not cfg.reply_card:
-        return
 
+    # 文字 @+提示始终发送；卡片是否回发由 reply_card 单独控制
     for song in result.accepted:
         index = result.index_of.get(id(song), 0)
-        await _reply_song(bot, event, _format_accept(song, index), song)
+        await _reply_song(bot, event, _format_accept(song, index), song, with_card=cfg.reply_card)
 
     if cfg.notify_duplicate:
         for song in result.duplicated:
             index = result.index_of.get(id(song), 0)
             who = song.sharer_name or str(song.sharer_id)
             text = f" 这首《{song.title}》已经在榜单第 {index} 位了（首发: {who}）"
-            await _reply_song(bot, event, text, song)
+            await _reply_song(bot, event, text, song, with_card=cfg.reply_card)
 
     if result.unidentified:
         tip = " 这条分享没识别成音乐，已跳过收录（若确实是音乐链接，换种方式再发一次试试）"

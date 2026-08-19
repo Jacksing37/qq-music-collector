@@ -60,11 +60,17 @@ def test_detector() -> None:
         ("https://i.y.qq.com/v8/playsong.html?songmid=003OUlho2HcRHC", "qq", "003OUlho2HcRHC"),
         ("https://www.kuwo.cn/play_detail/158605450", "kuwo", "158605450"),
         ("https://qishui.douyin.com/s/iL9kbQ7M/", "qishui", "iL9kbQ7M"),
+        ("https://music.apple.com/cn/song/%E8%B5%B7%E9%A3%8E%E4%BA%86/1751602451", "apple", "1751602451"),
+        ("https://music.apple.com/us/album/albums/1751602450?i=1751602451", "apple", "1751602451"),
     ]
     for url, platform, key in cases:
         link = match_url(url)
         ok = link is not None and link.platform == platform and link.key == key
         check(f"{platform:8s} {url[:52]}", ok, "" if ok else f"-> {link}")
+
+    # 纯 Apple Music 专辑链接（无 ?i=）不是单曲，不应误伤
+    check("忽略 Apple 纯专辑链接", match_url(
+        "https://music.apple.com/cn/album/albums/1751602450") is None)
 
     # 非音乐链接不应误伤
     check("忽略普通链接", match_url("https://www.example.com/news/123") is None)

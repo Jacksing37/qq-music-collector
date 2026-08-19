@@ -6,6 +6,7 @@ from typing import Optional
 
 from ..models import MusicLink, Song
 from ..netease_api import NeteaseAPI
+from .apple import AppleProvider
 from .base import Provider, fallback_song
 from .generic import KugouProvider, KuwoProvider, PageProvider
 from .netease import NeteaseProvider, song_from_payload
@@ -27,6 +28,7 @@ class ProviderRegistry:
             "qq": QQMusicProvider(),
             "kugou": KugouProvider(),
             "kuwo": KuwoProvider(),
+            "apple": AppleProvider(),
             "qishui": page,
             "unknown": page,
         }

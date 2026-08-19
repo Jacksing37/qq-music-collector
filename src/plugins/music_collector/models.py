@@ -13,6 +13,7 @@ PLATFORM_NAMES: dict[str, str] = {
     "kugou": "酷狗音乐",
     "kuwo": "酷我音乐",
     "qishui": "汽水音乐",
+    "apple": "Apple Music",
     "bilibili": "哔哩哔哩",
     "unknown": "未知平台",
 }

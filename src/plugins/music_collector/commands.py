@@ -55,6 +55,7 @@ HELP_TEXT = """音乐收集机器人 · 命令一览（每条命令不带参数�
 【收集控制】管理员
 /music on|off                 开关收集
 /music collect auto|on|off    临时覆盖收集状态（测试用，不改时间表）
+/music replycard on|off       是否回发音乐卡片（@+文字提示始终发送）
 /music archive [歌单名]       立即归档建歌单
 /music descfix                补写失败的歌单简介
 
@@ -228,6 +229,8 @@ async def handle_command(bot: Bot, event: MessageEvent, args: Message = CommandA
         await _cmd_toggle(bot, event, action)
     elif action in ("collect", "收集"):
         await _cmd_collect(bot, event, rest)
+    elif action in ("replycard", "回卡", "卡片回复"):
+        await _cmd_replycard(bot, event, rest)
     elif action in ("emoji", "表情"):
         await _cmd_emoji(bot, event, rest)
     elif action in ("artist", "歌手"):
@@ -284,7 +287,12 @@ async def _cmd_status() -> None:
     cfg = service.config
     state = service.current_window()
     profile = await service.netease.login_status()
-    account = f"已登录（{profile.get('nickname')}）" if profile else "未登录"
+    if profile and profile.get("userId"):
+        account = f"已登录（{profile.get('nickname')}）"
+    elif profile:
+        account = "已提供凭证，但实时校验失败（可能已过期，建议重新 /music cookie）"
+    else:
+        account = "未登录"
     groups = "、".join(str(g) for g in cfg.groups) if cfg.groups else "全部群"
     text = (
         f"收集开关: {'开启' if cfg.enabled else '关闭'}\n"
@@ -562,6 +570,25 @@ async def _cmd_collect(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
     )
     note = service.set_collect_override(value)
     await cmd.finish(Message(f"收集模式已切换：{note}"))
+
+
+async def _cmd_replycard(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
+    """识别到音乐后是否回发音乐卡片（@+文字提示始终发送，本项只控制卡片）。"""
+    if not await _is_admin(bot, event):
+        await cmd.finish(Message("只有管理员可以修改配置"))
+    if not rest or rest[0].lower() not in ("on", "off", "开", "关"):
+        cur = service.config.reply_card
+        await cmd.finish(Message(
+            f"当前回发音乐卡片: {'开启' if cur else '关闭'}\n"
+            "用法: /music replycard on|off\n"
+            "  on    识别到音乐后 @+文字提示，并回发音乐卡片（默认）\n"
+            "  off   只发 @+文字提示，不发卡片（签名服务不稳时可关）"
+        ))
+    enabled = rest[0].lower() in ("on", "开")
+    config_manager.update("reply_card", enabled)
+    await cmd.finish(Message(
+        f"音乐卡片回发已{'开启' if enabled else '关闭'}（@+文字提示不受影响）"
+    ))
 
 
 async def _cmd_card(bot: Bot, event: MessageEvent, rest: list[str]) -> None:

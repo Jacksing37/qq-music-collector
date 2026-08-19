@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from pydantic_core import PydanticUndefined
 
 from .config import AppConfig, config_manager
+from .models import PLATFORM_NAMES
 from .scheduler import next_runs, reload_jobs
 from .service import service
 
@@ -365,7 +366,19 @@ async def _api_status(request: Request):
 
 # -------------------------------------------------------------------- 预览 / 操作
 
-PLATFORM_NAMES = {"163": "网易云", "qq": "QQ音乐", "migu": "咪咕", "kugou": "酷狗", "kuwo": "酷我"}
+
+def _song_item(song, index: int) -> dict:
+    """把一条 Song 序列化成前端展示用的字典。"""
+    return {
+        "index": index + 1,
+        "title": song.title,
+        "artists": song.artists,
+        "sharer_name": song.sharer_name,
+        "platform": song.platform,
+        "platform_name": PLATFORM_NAMES.get(song.platform, song.platform),
+        "netease_id": song.netease_id,
+        "matched": song.matched,
+    }
 
 
 async def build_overview(window_key: typing.Optional[str] = None) -> dict:
@@ -390,19 +403,7 @@ async def build_overview(window_key: typing.Optional[str] = None) -> dict:
         groups.append({
             "group_id": gid,
             "count": len(songs),
-            "songs": [
-                {
-                    "index": i + 1,
-                    "title": s.title,
-                    "artists": s.artists,
-                    "sharer_name": s.sharer_name,
-                    "platform": s.platform,
-                    "platform_name": PLATFORM_NAMES.get(s.platform, s.platform),
-                    "netease_id": s.netease_id,
-                    "matched": s.matched,
-                }
-                for i, s in enumerate(songs)
-            ],
+            "songs": [_song_item(s, i) for i, s in enumerate(songs)],
         })
     return {
         "window": {"key": state.key, "label": state.label, "collecting": state.collecting},
@@ -419,6 +420,12 @@ async def dispatch_action(body: dict) -> dict:
     所有写库 / 调网易云的操作都从这里进出，便于单测时塞入假 service。
     """
     action = body.get("action")
+    # 兼容旧前端按钮的简写（pname/pdesc/del），统一映射到规范名
+    action = {
+        "pname": "preview_name",
+        "pdesc": "preview_desc",
+        "del": "delete",
+    }.get(action, action)
     try:
         if action in ("start", "stop", "auto"):
             value = {"start": "on", "stop": "off", "auto": "auto"}[action]
@@ -462,6 +469,24 @@ async def dispatch_action(body: dict) -> dict:
             wk = (body.get("window_key") or service.current_window().key)
             n = await service.clear_window(gid, wk)
             return {"ok": True, "message": f"已清空 {n} 首"}
+
+        if action == "preview":
+            gid = int(body.get("group_id"))
+            state = service.current_window()
+            name = await service.preview_playlist_name(gid)
+            desc = await service.rebuild_description(gid)
+            songs = await service.store.list_songs(gid, state.key)
+            return {
+                "ok": True,
+                "message": "预览已生成",
+                "data": {
+                    "window_key": state.key,
+                    "window_label": state.label,
+                    "name": name,
+                    "description": desc,
+                    "songs": [_song_item(s, i) for i, s in enumerate(songs)],
+                },
+            }
 
         if action == "preview_name":
             gid = int(body.get("group_id"))
@@ -621,9 +646,35 @@ textarea{resize:vertical;min-height:64px;font-family:ui-monospace,monospace;font
   .gtbl .plat{font-size:11px;color:var(--muted);width:64px}
   .gtbl .mt{color:var(--ok);font-size:12px}
   .gtbl .un{color:var(--muted);font-size:12px}
-  .gprev{margin-top:10px}
-  .gprev textarea{width:100%;min-height:70px;background:var(--input);border:1px solid var(--card-bd);color:var(--txt);border-radius:10px;padding:9px;font:13px/1.5 ui-monospace,monospace;resize:vertical}
   .empty{color:var(--muted);font-size:13px;padding:8px 2px}
+  /* ---- 预览侧边栏 ---- */
+  .pv-mask{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.5);backdrop-filter:blur(3px)}
+  .pv-drawer{position:fixed;top:0;right:0;bottom:0;z-index:61;width:min(560px,94vw);
+    background:var(--bg2);border-left:1px solid var(--card-bd);box-shadow:var(--shadow);
+    display:flex;flex-direction:column;transform:translateX(105%);transition:transform .26s cubic-bezier(.16,1,.3,1)}
+  .pv-drawer.open{transform:none}
+  .pv-head{display:flex;align-items:center;gap:10px;padding:15px 18px;border-bottom:1px solid var(--card-bd)}
+  .pv-head h3{margin:0;font-size:16px;flex:1}
+  .pv-head .pv-win{font-size:12px;color:var(--muted);font-weight:400}
+  .pv-head button{width:32px;height:32px;padding:0;border-radius:9px;font-size:14px;line-height:1}
+  .pv-body{flex:1;overflow:auto;padding:16px 18px 30px}
+  .pv-sec{margin-bottom:18px}
+  .pv-sec .pv-tag{font-size:11px;color:var(--muted);letter-spacing:.5px;margin-bottom:6px;text-transform:uppercase}
+  .pv-name{font-size:18px;font-weight:700;padding:11px 13px;background:var(--input);
+    border:1px solid var(--card-bd);border-radius:12px;word-break:break-all}
+  .pv-desc{white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:13px;line-height:1.65;
+    background:var(--input);border:1px solid var(--card-bd);border-radius:12px;padding:11px 13px;
+    max-height:300px;overflow:auto;margin:0}
+  .pv-desc.empty{font-style:italic}
+  .pv-actions{display:flex;gap:8px;margin-top:8px}
+  .pv-actions button{padding:6px 12px;font-size:12px}
+  .pv-tbl{width:100%;border-collapse:collapse;font-size:13px}
+  .pv-tbl th,.pv-tbl td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--card-bd)}
+  .pv-tbl th{color:var(--muted);font-weight:500;font-size:12px}
+  .pv-tbl .idx{color:var(--accent2);font-weight:600;width:28px}
+  .pv-tbl .plat{font-size:11px;color:var(--muted)}
+  .pv-tbl .mt{color:var(--ok);font-size:12px}
+  .pv-tbl .un{color:var(--muted);font-size:12px}
 </style>
 </head>
 <body>
@@ -672,6 +723,15 @@ textarea{resize:vertical;min-height:64px;font-family:ui-monospace,monospace;font
   <button id="resetBtn">重置改动</button>
   <button id="saveBtn" class="btn-primary">保存更改</button>
 </div>
+
+<div class="pv-mask hidden" id="pvMask"></div>
+<aside class="pv-drawer" id="pvDrawer" aria-hidden="true">
+  <div class="pv-head">
+    <h3>🎵 本期预览 <span class="pv-win" id="pvWin"></span></h3>
+    <button id="pvClose" title="关闭">✕</button>
+  </div>
+  <div class="pv-body" id="pvBody">加载中…</div>
+</aside>
 
 <div class="modal hidden" id="tokenModal">
   <div class="box">
@@ -895,11 +955,10 @@ function renderOverview(o){
     const card = document.createElement("div");
     card.className = "gcard";
     const ops = `<div class="ops">
+      <button data-act="preview" data-gid="${g.group_id}">👁 预览</button>
       <button data-act="archive" data-gid="${g.group_id}">📦 归档本群</button>
       <button data-act="clear" data-gid="${g.group_id}">🗑 清空本窗口</button>
       <button data-act="del" data-gid="${g.group_id}" class="danger">删除选中</button>
-      <button data-act="pname" data-gid="${g.group_id}">预览歌单名</button>
-      <button data-act="pdesc" data-gid="${g.group_id}">预览简介</button>
     </div>`;
     let rows = "";
     if (!g.songs.length){
@@ -920,7 +979,7 @@ function renderOverview(o){
     const tbl = `<table class="gtbl"><thead><tr>
       <th></th><th>#</th><th>歌曲 / 歌手</th><th>分享者</th><th>平台</th><th>匹配</th>
     </tr></thead><tbody>${rows}</tbody></table>`;
-    card.innerHTML = `<div class="grow"><div class="gtitle">群 ${g.group_id}<span class="cnt">${g.count} 首</span></div></div>${ops}${tbl}<div class="gprev" id="prev_${g.group_id}"></div>`;
+    card.innerHTML = `<div class="grow"><div class="gtitle">群 ${g.group_id}<span class="cnt">${g.count} 首</span></div></div>${ops}${tbl}`;
     gl.appendChild(card);
   });
   gl.querySelectorAll("button[data-act]").forEach(b=>{ b.onclick = ()=>groupAction(b.dataset.act, b.dataset.gid); });
@@ -928,6 +987,9 @@ function renderOverview(o){
 
 async function groupAction(act, gid){
   gid = parseInt(gid,10);
+  // 按钮简写 → 后端规范操作名
+  const ACT_MAP = {del:"delete", pname:"preview_name", pdesc:"preview_desc"};
+  act = ACT_MAP[act] || act;
   const wk = (OV && OV.selected_window) || "";
   let body = {action: act, group_id: gid, window_key: wk};
   if (act === "del"){
@@ -943,17 +1005,71 @@ async function doAction(body){
   try{
     const r = await api("/api/music-admin/action", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
     const j = await r.json();
-    flashOp(j.message || (j.ok?"操作成功":"操作失败"), j.ok?"ok":"bad");
-    if (j.ok && j.data && (body.action==="preview_name"||body.action==="preview_desc") && body.group_id){
-      const box = document.getElementById("prev_"+body.group_id);
-      if (box){
-        if (body.action==="preview_name") box.innerHTML = `<div style="font-size:12px;color:var(--muted)">歌单名预览：</div><div style="font-weight:600;margin-top:4px">${esc(j.data.name)}</div>`;
-        else box.innerHTML = `<textarea readonly>${esc(j.data.description)}</textarea>`;
-      }
+    if (body.action === "preview" && j.ok && j.data){
+      openPreview(j.data);           // 预览走侧边栏，不闪提示也不刷新列表
+      return;
     }
+    flashOp(j.message || (j.ok?"操作成功":"操作失败"), j.ok?"ok":"bad");
     if (j.ok) await loadOverview();
   }catch(e){ flashOp("操作失败: "+e.message, "bad"); }
 }
+
+function openPreview(d){
+  $("#pvWin").textContent = "· " + (d.window_label || d.window_key || "");
+  const songs = d.songs || [];
+  let rows = "";
+  if (!songs.length){
+    rows = `<tr><td colspan="5" class="empty">该窗口暂无歌曲</td></tr>`;
+  } else {
+    songs.forEach(s=>{
+      const mt = s.matched ? `<span class="mt">✓</span>` : `<span class="un">·</span>`;
+      rows += `<tr>
+        <td class="idx">${s.index}</td>
+        <td><b>${esc(s.title)}</b><br><span style="color:var(--muted);font-size:12px">${esc(s.artists||"")}</span></td>
+        <td>${esc(s.sharer_name||"")}</td>
+        <td class="plat">${esc(s.platform_name||s.platform)}</td>
+        <td>${mt}</td>
+      </tr>`;
+    });
+  }
+  $("#pvBody").innerHTML = `
+    <div class="pv-sec">
+      <div class="pv-tag">歌单名</div>
+      <div class="pv-name">${esc(d.name || "(未生成)")}</div>
+    </div>
+    <div class="pv-sec">
+      <div class="pv-tag">简介</div>
+      <pre class="pv-desc${(d.description ? "" : " empty")}">${esc(d.description || "（简介为空）")}</pre>
+      <div class="pv-actions"><button id="pvCopyDesc">📋 复制简介</button></div>
+    </div>
+    <div class="pv-sec">
+      <div class="pv-tag">歌曲清单（${songs.length} 首）</div>
+      <table class="pv-tbl"><thead><tr>
+        <th>#</th><th>歌曲 / 歌手</th><th>分享者</th><th>平台</th><th>匹配</th>
+      </tr></thead><tbody>${rows}</tbody></table>
+    </div>`;
+  const copyBtn = $("#pvCopyDesc");
+  if (copyBtn){
+    copyBtn.onclick = () => {
+      navigator.clipboard.writeText(d.description || "").then(
+        () => flashOp("简介已复制", "ok"),
+        () => flashOp("复制失败，请手动选择文本", "bad"));
+    };
+  }
+  $("#pvDrawer").classList.add("open");
+  $("#pvDrawer").setAttribute("aria-hidden", "false");
+  $("#pvMask").classList.remove("hidden");
+}
+
+function closePreview(){
+  $("#pvDrawer").classList.remove("open");
+  $("#pvDrawer").setAttribute("aria-hidden", "true");
+  $("#pvMask").classList.add("hidden");
+}
+
+$("#pvClose").onclick = closePreview;
+$("#pvMask").onclick = closePreview;
+document.addEventListener("keydown", e=>{ if (e.key === "Escape") closePreview(); });
 
 function flashOp(msg, kind=""){
   const m = $("#saveMsg");
