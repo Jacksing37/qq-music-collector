@@ -23,6 +23,7 @@ from .scheduler import reload_jobs  # noqa: E402
 from .service import service  # noqa: E402
 
 from . import commands as _commands  # noqa: E402,F401  仅为注册命令
+from . import webui as _webui  # noqa: E402,F401  配置管理 Web UI
 
 __plugin_meta__ = PluginMetadata(
     name="群音乐收集",
@@ -38,6 +39,7 @@ async def _startup() -> None:
     await service.setup()
     ok, info = reload_jobs()
     logger.info(f"[music] 插件初始化完成，定时任务{'已注册' if ok else '注册失败'}\n{info}")
+    _webui.register_webui()
 
 
 # ---------------------------------------------------------------- 消息监听
