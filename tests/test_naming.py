@@ -18,6 +18,7 @@ nonebot.init(driver="~fastapi")
 
 from music_collector.models import Song  # noqa: E402
 from music_collector.naming import (  # noqa: E402
+    build_name_lines,
     build_sharer_lines,
     build_song_lines,
     fit_description,
@@ -57,6 +58,25 @@ def test_build_song_lines_hide_artist() -> None:
 def test_build_song_lines_emoji_cleaned() -> None:
     songs = [_song("歌A", "歌手A", "🌟星", 1)]
     lines = build_song_lines(songs, emoji_style="text", show_artist=False)
+    assert "🌟" not in lines[0], "emoji 应被转成文字"
+    assert "星" in lines[0]
+
+
+def test_build_name_lines_only_sharer() -> None:
+    songs = [
+        _song("孤勇者", "陈奕迅", "Jacksing", 1),
+        _song("晴天", "周杰伦", "自巾", 2),
+    ]
+    lines = build_name_lines(songs, emoji_style="text")
+    assert lines == ["1.Jacksing", "2.自巾"]
+    # 只列分享者名字，不应出现歌名/歌手
+    assert "孤勇者" not in "\n".join(lines)
+    assert "周杰伦" not in "\n".join(lines)
+
+
+def test_build_name_lines_emoji_cleaned() -> None:
+    songs = [_song("歌A", "歌手A", "🌟星", 1)]
+    lines = build_name_lines(songs, emoji_style="text")
     assert "🌟" not in lines[0], "emoji 应被转成文字"
     assert "星" in lines[0]
 
@@ -109,6 +129,8 @@ if __name__ == "__main__":
     test_build_song_lines_one_per_line()
     test_build_song_lines_hide_artist()
     test_build_song_lines_emoji_cleaned()
+    test_build_name_lines_only_sharer()
+    test_build_name_lines_emoji_cleaned()
     test_build_sharer_lines_one_song_per_line()
     test_build_sharer_lines_blank_between_people()
     test_build_sharer_lines_no_blank_when_disabled()

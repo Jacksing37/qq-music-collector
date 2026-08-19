@@ -190,12 +190,19 @@ git pull && docker compose up -d --build
 ## 1. 环境
 
 ```bash
+# Debian/Ubuntu:
 sudo apt update
 sudo apt install -y python3 python3-venv python3-pip git curl fonts-noto-cjk
+
+# RHEL / CentOS / Rocky / Alma（dnf 系）:
+sudo dnf install -y python3 python3-pip git curl google-noto-sans-cjk-ttc-fonts
+# 备选：sudo dnf install -y wqy-zenhei
+
 cd /opt/qq-music-collector
 ```
 
-`fonts-noto-cjk` 是为了长图里的中文不变方块。
+中文字体（`fonts-noto-cjk` / `google-noto-sans-cjk-ttc-fonts` / `wqy-zenhei` 任一即可）是为了
+长图里的中文不变方块。`render.py` 会自动扫描系统字体目录兜底，实在找不到再配 `render.font_path`。
 
 ## 2. 配置
 
@@ -249,7 +256,7 @@ sudo systemctl restart qq-music-collector
 | 连上又立刻断开 | token 不一致，`.env` 的 `ONEBOT_ACCESS_TOKEN` 和 NapCat 里必须一模一样 |
 | 容器起来但没日志输出 | `docker compose logs bot`；若卡在装依赖是首次构建，等它 |
 | 定时全错乱（差 8 小时） | 容器已设 `TZ=Asia/Shanghai`；再确认 `data/config.yaml` 的 `window.timezone` |
-| 长图中文变方块 | 镜像已内置 fonts-noto-cjk；裸机需 `apt install fonts-noto-cjk`，或配 `render.font_path` |
+| 长图中文变方块 | 镜像已内置中文字体；裸机 Debian/Ubuntu `apt install fonts-noto-cjk`，dnf 系 `dnf install google-noto-sans-cjk-ttc-fonts`（或 `wqy-zenhei`），或配 `render.font_path` |
 | 卡片签名服务 500 | `/music card custom` 一劳永逸 |
 | 群里丢链接没反应 | NapCat 没连上 / 没 @ 机器人 / 不在收集窗口 |
 | 收不到「开始收录」广播 | 在 `data/config.yaml` 的 `groups` 填上目标群号 |

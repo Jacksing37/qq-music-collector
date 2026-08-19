@@ -165,6 +165,22 @@ def build_sharer_lines(
     return lines
 
 
+def build_name_lines(
+    songs: Sequence[Song],
+    emoji_style: str = "text",
+) -> list[str]:
+    """极简清单：每行只列分享者名字，按歌曲顺序编号。
+
+    ::
+
+        1.张三
+        2.李四
+
+    用于只关心「谁分享了」而不需要歌名/歌手的场景。
+    """
+    return [f"{idx}.{sharer_of(song, emoji_style)}" for idx, song in enumerate(songs, start=1)]
+
+
 def fit_description(
     header: str,
     body_lines: Sequence[str],

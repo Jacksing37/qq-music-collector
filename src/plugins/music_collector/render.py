@@ -44,9 +44,10 @@ _BOLD_CANDIDATES = [
 ]
 
 # 系统字体目录（兜底扫描用）
-_FONT_DIRS = ["/usr/share/fonts", "/usr/local/share/fonts"]
-# 兜底扫描时认可的文件名关键字（小写匹配）
-_CJK_HINTS = ("cjk", "wqy", "droidsansfallback", "sourcehansans", "notosanssc")
+_FONT_DIRS = ["/usr/share/fonts", "/usr/local/share/fonts", "/usr/share/X11/fonts"]
+# 兜底扫描时认可的文件/目录名关键字（小写匹配）。
+# 同时匹配「文件名」和「所在目录名」——dnf 系字体常落在 google-noto-cjk 目录里。
+_CJK_HINTS = ("cjk", "wqy", "droidsansfallback", "sourcehansans", "notosanssc", "noto-sans-cjk", "han")
 
 
 @lru_cache(maxsize=2)
@@ -64,8 +65,8 @@ def _scan_cjk_font(prefer_bold: bool) -> Optional[str]:
         for path in root.rglob("*"):
             if path.suffix.lower() not in (".ttc", ".otf", ".ttf"):
                 continue
-            name = path.name.lower()
-            if any(hint in name for hint in _CJK_HINTS):
+            haystack = path.name.lower() + "/" + path.parent.name.lower()
+            if any(hint in haystack for hint in _CJK_HINTS):
                 found.append(str(path))
     if not found:
         return None

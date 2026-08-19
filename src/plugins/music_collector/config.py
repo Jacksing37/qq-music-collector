@@ -89,8 +89,8 @@ class PlaylistConfig(BaseModel):
     description_template: str = "由 QQ 群 {group} 在 {window} 期间收集，共 {count} 首。"
     #: 简介里附上分享清单
     include_sharers: bool = True
-    #: 清单样式：list=逐首列（含分享者）  by_person=按人聚合  none=不附
-    sharer_style: Literal["list", "by_person", "none"] = "list"
+    #: 清单样式：list=逐首列（含分享者）  by_person=按人聚合  by_name=只列分享者名  none=不附
+    sharer_style: Literal["list", "by_person", "by_name", "none"] = "list"
     #: 自增期号，每成功归档一次 +1（用于 Wk.86 这种编号）
     seq: int = 1
     #: 归档成功后是否自动递增 seq

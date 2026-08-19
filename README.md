@@ -171,7 +171,7 @@ qq-music-collector/
 /music title <名称>                仅本次归档生效的歌单名，用完自动清空
 /music seq <数字>                  期号（/music seq auto on|off 开自动递增）
 /music desc <模板>                 简介开头模板
-/music sharer list|by_person|none  简介分享清单样式
+/music sharer list|by_person|by_name|none  简介分享清单样式
 
 【管理员 · 简介排版】
 /music emoji text|strip|keep   昵称/歌名表情处理（text=转中文词，推荐）
@@ -255,7 +255,7 @@ Wk.86 线上学习歌单，共 12 首。
 李四 分享《海阔天空》- Beyond
 ```
 
-`sharer_style` 可选 `list`（逐首列，默认）/ `by_person`（按人聚合）/ `none`（不附）。
+`sharer_style` 可选 `list`（逐首列，默认）/ `by_person`（按人聚合）/ `by_name`（只列分享者名，每行形如 `1.张三`）/ `none`（不附）。
 
 ---
 
@@ -354,7 +354,7 @@ playlist:
   name_template: "群歌单 {window}"
   description_template: "由 QQ 群 {group} 在 {window} 期间收集，共 {count} 首。"
   include_sharers: true
-  sharer_style: list       # list / by_person / none
+  sharer_style: list       # list / by_person / by_name / none
   seq: 1
   seq_auto_increment: true
   pending_name: ''         # 一次性歌单名，用完自动清空
@@ -440,8 +440,10 @@ set PYTHONDONTWRITEBYTECODE=1
    真正登录 QQ 的是 NapCat（或 Lagrange.OneBot）协议端，得单独装。别把 WS 端口暴露到公网。
 2. **时区大坑**：服务器多为 UTC，务必确认 `window.timezone: Asia/Shanghai`，否则定时全偏 8 小时。
 3. **进程守护**：Docker 用 `restart: unless-stopped`；裸机用 systemd（`deploy/qq-music-collector.service`）。
-4. **字体**：纯净 Linux 镜像常没有中文字体，长图会变方块。Docker 镜像已内置 `fonts-noto-cjk`；
-   裸机自行 `apt install fonts-noto-cjk`，或把字体路径写进 `render.font_path`。
+4. **字体**：纯净 Linux 镜像常没有中文字体，长图会变方块。Docker 镜像已内置中文字体；
+   裸机 Debian/Ubuntu 用 `apt install fonts-noto-cjk`；RHEL/CentOS/Rocky/Alma（dnf 系）用
+   `dnf install google-noto-sans-cjk-ttc-fonts`（或 `dnf install wqy-zenhei`）；
+   找不到也可把字体路径写进 `render.font_path`（`render.py` 会自动扫描系统字体目录兜底）。
 
 ### 方式一：Docker（NapCat 也是 Docker 时首选）
 
@@ -461,6 +463,8 @@ docker compose logs -f bot
 
 ```bash
 # 1) 装环境 + 依赖（start.sh 首次会自动建 venv）
+#    Debian/Ubuntu:   sudo apt install -y python3 python3-venv fonts-noto-cjk
+#    RHEL/CentOS/Rocky/Alma (dnf):  sudo dnf install -y python3 python3-pip google-noto-sans-cjk-ttc-fonts
 sudo apt install -y python3 python3-venv fonts-noto-cjk
 cp .env.example .env && nano .env          # 填 SUPERUSERS / ONEBOT_ACCESS_TOKEN
 

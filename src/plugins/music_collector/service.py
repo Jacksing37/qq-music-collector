@@ -260,6 +260,7 @@ class CollectorService:
     ) -> str:
         """按当前配置重新生成一份简介文本（用于手动补写 / 预览）。"""
         from .naming import (
+            build_name_lines,
             build_sharer_lines,
             build_song_lines,
             fit_description,
@@ -289,6 +290,8 @@ class CollectorService:
                     show_artist=cfg.desc_show_artist,
                     blank_line=cfg.desc_blank_line,
                 )
+            elif cfg.sharer_style == "by_name":
+                body = build_name_lines(songs, emoji_style=cfg.emoji_style)
             else:
                 body = build_song_lines(
                     songs,

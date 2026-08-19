@@ -16,6 +16,7 @@ from .config import PlaylistConfig
 from .models import Song
 from .naming import (
     build_context,
+    build_name_lines,
     build_sharer_lines,
     build_song_lines,
     fit_description,
@@ -267,9 +268,12 @@ class Archiver:
             return report
 
         # 3. 分批加歌
+        # 网易云 add 接口会把整批歌曲「倒序」插到歌单顶部，直接按原序提交会导致
+        # 最终歌单顺序和简介清单相反。所以这里把顺序整体反转后再提交，抵消它的倒序。
+        add_order = list(reversed(ordered_unique))
         added = 0
-        for i in range(0, len(ordered_unique), cfg.batch_size):
-            batch = ordered_unique[i:i + cfg.batch_size]
+        for i in range(0, len(add_order), cfg.batch_size):
+            batch = add_order[i:i + cfg.batch_size]
             try:
                 await self.api.add_tracks(playlist_id, batch)
                 added += len(batch)
@@ -291,6 +295,8 @@ class Archiver:
                     show_artist=cfg.desc_show_artist,
                     blank_line=cfg.desc_blank_line,
                 )
+            elif cfg.sharer_style == "by_name":
+                body_lines = build_name_lines(listed, emoji_style=cfg.emoji_style)
             else:
                 body_lines = build_song_lines(
                     listed,

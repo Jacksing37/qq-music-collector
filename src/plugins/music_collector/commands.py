@@ -45,7 +45,7 @@ HELP_TEXT = """音乐收集机器人 · 命令一览（每条命令不带参数�
 /music title <名称>                仅本次归档生效的歌单名
 /music seq <数字>                 期号（可 seq auto on|off 开自动递增）
 /music desc <模板>                 简介开头模板
-/music sharer list|by_person|none  简介分享清单样式
+/music sharer list|by_person|by_name|none  简介分享清单样式
 
 【简介样式】管理员
 /music emoji text|strip|keep   昵称/歌名表情处理（text=转中文词，推荐）
@@ -510,14 +510,16 @@ async def _cmd_desc(
 async def _cmd_sharer(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
     if not await _is_admin(bot, event):
         await cmd.finish(Message("只有管理员可以修改配置"))
-    styles = {"list": "逐首列出（含分享者）", "by_person": "按人聚合", "none": "不附清单"}
+    styles = {"list": "逐首列出（含分享者）", "by_person": "按人聚合",
+              "by_name": "只列分享者名", "none": "不附清单"}
     if not rest or rest[0] not in styles:
         current = service.config.playlist.sharer_style
         await cmd.finish(Message(
             f"当前样式: {current}（{styles.get(current, '')}）\n"
-            "用法: /music sharer list|by_person|none\n"
+            "用法: /music sharer list|by_person|by_name|none\n"
             "  list      1. 张三 分享《晴天》- 周杰伦\n"
             "  by_person 张三（3首）：晴天、七里香、稻香\n"
+            "  by_name   1.张三 / 2.李四（只列分享者名字）\n"
             "  none      简介只保留开头文案"
         ))
     style = rest[0]

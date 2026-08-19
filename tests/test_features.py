@@ -204,6 +204,8 @@ async def test_archive_naming() -> None:
         check("歌单名渲染正确", report.playlist_name == "Wk.1线上学习26/8/7", f"-> {report.playlist_name!r}")
         check("简介写入", len(api.descriptions) == 1 and "张三 分享《晴天》" in api.descriptions[0])
         check("加歌被调用", api.added_ids and set(api.added_ids[0]) == {"111", "222"})
+        # 网易云会把整批倒序插到歌单顶部，archive 需反转提交，最终歌单顺序才与简介一致
+        check("加歌顺序为原序反转", api.added_ids[0] == ["222", "111"], f"-> {api.added_ids}")
 
 
 async def main() -> int:
