@@ -215,7 +215,7 @@ async def handle_music_share(bot: Bot, event: GroupMessageEvent) -> None:
     if cfg.notify_duplicate:
         for song in result.duplicated:
             index = result.index_of.get(id(song), 0)
-            who = resolve_alias(song.sharer_name or str(song.sharer_id), cfg.playlist.sharer_aliases)
+            who = resolve_alias(song.sharer_name or str(song.sharer_id), song.sharer_id, cfg.playlist.sharer_aliases)
             text = f" 这首《{song.title}》已经在榜单第 {index} 位了（首发: {who}）"
             await _reply_song(bot, event, text, song, with_card=cfg.reply_card)
 

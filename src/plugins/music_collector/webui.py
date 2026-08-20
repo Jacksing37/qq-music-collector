@@ -90,7 +90,7 @@ FIELD_META: dict[str, tuple[str, str, bool]] = {
     "playlist.emoji_style": ("表情处理", "text=转中文词 / strip=直接删 / keep=原样（keep 大概率写不进网易云）", False),
     "playlist.desc_show_artist": ("清单带歌手", "简介清单条目是否带歌手名", False),
     "playlist.desc_blank_line": ("清单空行", "简介清单条目之间是否插空行", False),
-    "playlist.sharer_aliases": ("分享者昵称映射", "每行 原昵称=显示名，如 菜老名=Jacksing；仅做展示层替换，入库仍保留原始昵称。建议在「昵称映射」独立页编辑", True),
+    "playlist.sharer_aliases": ("分享者昵称映射", "每行 原昵称或QQ号码=显示名，如 菜老名=Jacksing 或 123456789=Jacksing；仅做展示层替换，入库仍保留原始昵称。建议在「昵称映射」独立页编辑", True),
 
     "card.mode": ("卡片模式", "native=平台原生(依赖签名服务) / custom=自定义卡片 / off=只发文字+封面", False),
     "card.fallback_custom": ("失败后转自定义卡", "原生卡片失败是否自动再试自定义卡片", False),
@@ -400,7 +400,7 @@ def _song_item(song, index: int) -> dict:
         "index": index + 1,
         "title": song.title,
         "artists": song.artists,
-        "sharer_name": resolve_alias(song.sharer_name or "", aliases),
+        "sharer_name": resolve_alias(song.sharer_name or "", song.sharer_id, aliases),
         "platform": song.platform,
         "platform_name": PLATFORM_NAMES.get(song.platform, song.platform),
         "netease_id": song.netease_id,
@@ -1198,10 +1198,10 @@ textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba
 <div class="wrap">
   <div class="card">
     <h2><span class="dot"></span>映射规则</h2>
-    <p class="hint">每行写一条 <code>原昵称=显示名</code>，例如 <code>菜老名=Jacksing</code>。
+    <p class="hint">每行写一条 <code>原昵称=显示名</code> 或 <code>QQ号码=显示名</code>，例如 <code>菜老名=Jacksing</code> 或 <code>123456789=Jacksing</code>。
     保存后，<b>网易云简介 / 群内文字榜单 / WebUI 表格</b> 里对应的分享者名字都会替换成显示名，
-    但数据库里仍保留原始昵称不变。空行和以 <code>#</code> 开头的注释会被忽略。</p>
-    <textarea id="aliasInput" placeholder="菜老名=Jacksing&#10;星仔=Star&#10;# 一行一条，原昵称=显示名"></textarea>
+    但数据库里仍保留原始昵称不变。昵称优先于 QQ 号码匹配；空行和以 <code>#</code> 开头的注释会被忽略。</p>
+    <textarea id="aliasInput" placeholder="菜老名=Jacksing&#10;123456789=Jacksing&#10;# 一行一条，原昵称或QQ号码=显示名"></textarea>
   </div>
 
   <div class="card">

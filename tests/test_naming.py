@@ -131,16 +131,32 @@ def test_fit_description_no_blank_when_disabled() -> None:
 
 def test_resolve_alias_basic() -> None:
     aliases = {"菜老名": "Jacksing"}
-    assert resolve_alias("菜老名", aliases) == "Jacksing"
-    assert resolve_alias("别人", aliases) == "别人"
-    assert resolve_alias("菜老名", None) == "菜老名"
+    assert resolve_alias("菜老名", None, aliases) == "Jacksing"
+    assert resolve_alias("别人", None, aliases) == "别人"
+    assert resolve_alias("菜老名", None, None) == "菜老名"
+
+
+def test_resolve_alias_by_qq() -> None:
+    # 映射 key 可以是 QQ 号码（昵称没命中时按 QQ 兜底）
+    aliases = {"123456789": "Jacksing"}
+    assert resolve_alias("菜老板", 123456789, aliases) == "Jacksing"
+    # 无昵称（昵称为空）时直接按 QQ 匹配
+    assert resolve_alias("", 123456789, aliases) == "Jacksing"
+    # QQ 不在表里则原样返回
+    assert resolve_alias("菜老板", 999, aliases) == "菜老板"
+
+
+def test_resolve_alias_nickname_priority_over_qq() -> None:
+    # 昵称与 QQ 同时命中时，昵称优先
+    aliases = {"菜老名": "Jacksing", "123456789": "OldName"}
+    assert resolve_alias("菜老名", 123456789, aliases) == "Jacksing"
 
 
 def test_resolve_alias_emoji_nickname() -> None:
     # QQ 昵称带 emoji 时，映射 key 用纯文本也能命中
     aliases = {"菜老名": "Jacksing"}
-    assert resolve_alias("菜老名🎵", aliases) == "Jacksing"
-    assert resolve_alias("菜老名[音符]", aliases) == "菜老名[音符]"  # 已是文本则不再强匹配
+    assert resolve_alias("菜老名🎵", None, aliases) == "Jacksing"
+    assert resolve_alias("菜老名[音符]", None, aliases) == "菜老名[音符]"  # 已是文本则不再强匹配
 
 
 def test_sharer_of_applies_alias() -> None:
@@ -149,6 +165,18 @@ def test_sharer_of_applies_alias() -> None:
     assert sharer_of(s, "text", aliases) == "Jacksing"
     # emoji 昵称同样命中
     s2 = _song("晴天", "周杰伦", "菜老名🎵", 1)
+    assert sharer_of(s2, "text", aliases) == "Jacksing"
+
+
+def test_sharer_of_applies_alias_by_qq() -> None:
+    # 没有昵称映射、只有 QQ 映射时，按 QQ 号码生效
+    aliases = {"123456789": "Jacksing"}
+    s = Song(platform="netease", song_id="1", title="晴天", artists="周杰伦",
+             sharer_id=123456789, sharer_name="菜老板", netease_id="1", matched=True)
+    assert sharer_of(s, "text", aliases) == "Jacksing"
+    # 昵称带 emoji 也不影响 QQ 匹配
+    s2 = Song(platform="netease", song_id="2", title="晴天", artists="周杰伦",
+              sharer_id=123456789, sharer_name="菜老名🎵", netease_id="2", matched=True)
     assert sharer_of(s2, "text", aliases) == "Jacksing"
 
 
@@ -177,6 +205,19 @@ def test_build_sharer_lines_groups_by_alias() -> None:
     assert lines[0] == "Jacksing（2首）"
 
 
+def test_build_sharer_lines_groups_by_qq_alias() -> None:
+    # 同一 QQ 号码、不同昵称，按 QQ 映射聚合到同一显示名
+    aliases = {"123456789": "Jacksing"}
+    songs = [
+        Song(platform="netease", song_id="1", title="A", artists="a",
+             sharer_id=123456789, sharer_name="菜老板", netease_id="1", matched=True),
+        Song(platform="netease", song_id="2", title="B", artists="b",
+             sharer_id=123456789, sharer_name="菜老名🎵", netease_id="2", matched=True),
+    ]
+    lines = build_sharer_lines(songs, emoji_style="text", show_artist=True, blank_line=False, aliases=aliases)
+    assert lines[0] == "Jacksing（2首）"
+
+
 if __name__ == "__main__":
     test_build_song_lines_one_per_line()
     test_build_song_lines_hide_artist()
@@ -189,9 +230,13 @@ if __name__ == "__main__":
     test_fit_description_blank_after_header()
     test_fit_description_no_blank_when_disabled()
     test_resolve_alias_basic()
+    test_resolve_alias_by_qq()
+    test_resolve_alias_nickname_priority_over_qq()
     test_resolve_alias_emoji_nickname()
     test_sharer_of_applies_alias()
+    test_sharer_of_applies_alias_by_qq()
     test_build_song_lines_applies_alias()
     test_build_name_lines_applies_alias()
     test_build_sharer_lines_groups_by_alias()
+    test_build_sharer_lines_groups_by_qq_alias()
     print("naming tests OK")

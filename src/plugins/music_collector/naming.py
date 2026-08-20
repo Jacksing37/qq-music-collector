@@ -102,31 +102,44 @@ def unknown_placeholders(template: str, context: dict[str, str]) -> list[str]:
 # ---------------------------------------------------------------- 清单文案
 
 
-def resolve_alias(name: str, aliases: Optional[dict[str, str]] = None) -> str:
+def resolve_alias(name: str, qq_id: Optional[int] = None, aliases: Optional[dict[str, str]] = None) -> str:
     """显示层昵称映射：命中映射表返回映射名，否则原样返回。
+
+    映射表的 key **既可以是昵称、也可以是 QQ 号码**，两种都支持：
+      - 昵称优先：用户显式设置的昵称映射立即生效；
+      - 昵称没命中时，再按 QQ 号码兜底（昵称会变、或带 emoji 难以匹配时更稳）。
 
     兼容昵称里带表情符号的情况：先按原样匹配，再去掉表情后匹配一次，
     这样 ``菜老名`` 这种 key 也能命中 QQ 里实际带 emoji 的昵称。
     """
-    if not aliases or not name:
+    if not aliases:
         return name
-    if name in aliases:
-        return aliases[name]
-    plain = sanitize_name(name, "strip")
-    return aliases.get(plain, name)
+    # 1) 昵称优先
+    if name:
+        if name in aliases:
+            return aliases[name]
+        plain = sanitize_name(name, "strip")
+        if plain in aliases:
+            return aliases[plain]
+    # 2) QQ 号码兜底
+    if qq_id is not None:
+        q = str(qq_id)
+        if q in aliases:
+            return aliases[q]
+    return name
 
 
 def sharer_of(song: Song, emoji_style: str = "text", aliases: Optional[dict[str, str]] = None) -> str:
-    """取分享者展示名，先套用昵称映射，再把昵称里的表情转成文字。
+    """取分享者展示名，先套用昵称/QQ 映射，再把昵称里的表情转成文字。
 
     先映射再清洗的原因：QQ 昵称可能带 emoji（如 ``菜老名🎵``），映射 key 是
     ``菜老名`` 这种纯文本。若先转成 ``菜老名[音符]`` 就匹配不上了，所以先在
     原始昵称上做映射，映射命中后再过一遍 emoji 清洗。
-    ``aliases`` 为 ``{原昵称: 显示名}``，仅影响展示，不改变入库数据。
+    ``aliases`` 为 ``{原昵称 或 QQ号码: 显示名}``，仅影响展示，不改变入库数据。
     """
     raw = song.sharer_name or ""
     fallback = str(song.sharer_id) if song.sharer_id else "匿名"
-    mapped = resolve_alias(raw, aliases)
+    mapped = resolve_alias(raw, song.sharer_id, aliases)
     return sanitize_name(mapped, emoji_style, fallback)
 
 

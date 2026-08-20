@@ -165,7 +165,7 @@ class ArchiveReport:
             lines.append(f"以下 {len(self.unmatched)} 首在网易云没匹配到，需要手动处理：")
             for s in self.unmatched[:15]:
                 raw = s.sharer_name or (str(s.sharer_id) if s.sharer_id else "匿名")
-                sharer = resolve_alias(raw, aliases)
+                sharer = resolve_alias(raw, s.sharer_id, aliases)
                 artist = s.artists or "未知歌手"
                 lines.append(
                     f"  · {sharer} 分享《{s.title}》- {artist}（{s.platform_name}）"

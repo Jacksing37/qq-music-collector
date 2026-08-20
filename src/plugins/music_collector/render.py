@@ -150,7 +150,7 @@ def build_text_list(
     for idx, song in enumerate(songs[:limit], start=1):
         artist = song.artists or "未知歌手"
         raw = song.sharer_name or str(song.sharer_id or "")
-        sharer = resolve_alias(raw, aliases)
+        sharer = resolve_alias(raw, song.sharer_id, aliases)
         line = f"{idx}. {song.title} - {artist}"
         if sharer:
             line += f"（{sharer}）"
@@ -321,7 +321,7 @@ def _render_page(
         )
         draw.text((WIDTH - PADDING - 32 - tag_w, top + 21), tag, font=f_small, fill=theme.accent)
 
-        sharer = resolve_alias(song.sharer_name or str(song.sharer_id or ""), aliases)
+        sharer = resolve_alias(song.sharer_name or "", song.sharer_id, aliases)
         if sharer:
             sharer_text = _ellipsize(draw, f"by {sharer}", f_small, 168)
             sw = draw.textlength(sharer_text, font=f_small)

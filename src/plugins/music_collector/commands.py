@@ -893,7 +893,7 @@ async def _cmd_export(bot: Bot, event: MessageEvent, group_id: Optional[int]) ->
     ]
     for idx, song in enumerate(songs, start=1):
         artist = song.artists or "未知歌手"
-        sharer = resolve_alias(song.sharer_name or "匿名", service.config.playlist.sharer_aliases)
+        sharer = resolve_alias(song.sharer_name or "匿名", song.sharer_id, service.config.playlist.sharer_aliases)
         lines.append(f"{idx}. {song.title} - {artist}（{sharer} 分享）")
     text = "\n".join(lines)
     for chunk in split_text(text):
