@@ -291,9 +291,13 @@ def apply_updates(values: dict[str, object]) -> tuple[bool, dict[str, str]]:
         except Exception as exc:  # noqa: BLE001 — 配置写入失败需反馈给用户
             errors[key] = str(exc)
     if errors:
-        # 回滚到更新前的状态
+        # 回滚到更新前的状态（回滚写盘失败也不能抛 500，否则用户只会看到
+        # 「Internal Server Error」而看不到真实的错误原因）
         config_manager._config = AppConfig.model_validate(snapshot)
-        config_manager.save()
+        try:
+            config_manager.save()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[music] 配置回滚写盘失败（配置已还原内存态）: {exc}")
         return False, errors
 
     if any(k.startswith("window") for k in values):

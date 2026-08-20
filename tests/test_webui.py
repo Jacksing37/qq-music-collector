@@ -106,6 +106,30 @@ def test_apply_updates_map(tmp_path: Path):
     config_manager.load()
 
 
+def test_apply_updates_rollback_save_failure_no_500(tmp_path: Path):
+    """回滚时写盘失败（文件被锁/只读）也不能抛异常变成 500。"""
+    import os
+    import stat
+
+    orig_path = config_manager.path
+    cfg_file = tmp_path / "config.yaml"
+    config_manager.path = cfg_file
+    config_manager.load()
+
+    os.chmod(cfg_file, stat.S_IREAD)  # 只读 -> save() 抛 PermissionError
+    try:
+        ok, errs = W.apply_updates({"playlist.sharer_style": "bogus"})
+    finally:
+        os.chmod(cfg_file, stat.S_IWRITE)
+    assert not ok
+    assert "playlist.sharer_style" in errs
+    # 内存态已回滚，不残留
+    assert config_manager.config.playlist.sharer_style == "list"
+
+    config_manager.path = orig_path
+    config_manager.load()
+
+
 if __name__ == "__main__":
     import tempfile
 
@@ -118,4 +142,5 @@ if __name__ == "__main__":
     test_sharer_aliases_map_type()
     test_current_values_map_whole_dict()
     test_apply_updates_map(_tmp)
+    test_apply_updates_rollback_save_failure_no_500(_tmp)
     print("webui tests OK")

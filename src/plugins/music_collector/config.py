@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import shutil
+import time
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -273,12 +274,20 @@ class ConfigManager:
         return self._config
 
     def save(self) -> None:
+        """落盘配置。Windows 下文件可能被编辑器/杀软瞬时锁住，做几次短重试。"""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         data = self._config.model_dump(mode="json")
-        self.path.write_text(
-            yaml.safe_dump(data, allow_unicode=True, sort_keys=False, indent=2),
-            encoding="utf-8",
-        )
+        text = yaml.safe_dump(data, allow_unicode=True, sort_keys=False, indent=2)
+        last_err: Optional[Exception] = None
+        for attempt in range(5):
+            try:
+                self.path.write_text(text, encoding="utf-8")
+                return
+            except PermissionError as exc:
+                last_err = exc
+                time.sleep(0.2 * (attempt + 1))
+        if last_err is not None:
+            raise last_err
 
     def update(self, dotted_key: str, value: object) -> None:
         """按 `window.weekly.start` 这样的点分路径更新并落盘。"""
