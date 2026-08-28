@@ -5,11 +5,13 @@
 
 from __future__ import annotations
 
+import json
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Sequence
 
-from .archiver import Archiver, ArchiveReport
+from .archiver import Archiver, ArchiveReport, songs_from_snapshot
 from .cache import CleanResult, clean_caches
 from .config import CACHE_DIR, DB_PATH, NETEASE_SESSION_PATH, AppConfig, config_manager
 from . import detector
@@ -261,7 +263,11 @@ class CollectorService:
     async def retry_pending_desc(
         self, group_id: Optional[int] = None
     ) -> tuple[int, int]:
-        """重试所有待补写的歌单简介，返回 (成功数, 失败数)。"""
+        """重试所有待补写的歌单简介，返回 (成功数, 失败数)。
+
+        补写时**重新生成**简介而不是重推存档的旧文本，否则期间删歌 / 改昵称
+        映射 / 歌单又追加了新歌，都会让补写上去的清单与歌单内容对不上。
+        """
         pending = await self.store.list_pending_desc(group_id)
         ok = failed = 0
         for row in pending:
@@ -269,9 +275,10 @@ class CollectorService:
             if not playlist_id.isdigit():
                 await self.store.drop_pending_desc(playlist_id)
                 continue
+            desc = await self._description_for_pending(row, playlist_id)
             success, note = await self.netease.update_description(
                 int(playlist_id),
-                row.get("description") or "",
+                desc,
                 name=row.get("playlist_name") or "",
             )
             if success:
@@ -282,19 +289,84 @@ class CollectorService:
                     playlist_id,
                     row.get("playlist_name") or "",
                     int(row.get("group_id") or 0),
-                    row.get("description") or "",
+                    desc,
                     note,
                 )
                 failed += 1
         return ok, failed
 
-    async def pending_desc_list(self, group_id: Optional[int] = None) -> list[dict]:
-        return await self.store.list_pending_desc(group_id)
+    async def _description_for_pending(self, row: dict, playlist_id: str) -> str:
+        """为一条待补写记录生成简介文本。
 
-    async def rebuild_description(
-        self, group_id: int, window: Optional[WindowState] = None
+        数据优先级：
+        1. 该窗口当前的收集记录（反映删歌 / 改昵称映射等后续变更）
+        2. 归档当时存的快照（窗口数据被清空时用它兜底）
+        3. 存档的旧文本（两者都没有时的最后退路）
+        """
+        group_id = int(row.get("group_id") or 0)
+        window_key = str(row.get("window_key") or "")
+        try:
+            snapshot = json.loads(row.get("snapshot") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            snapshot = {}
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+
+        songs: list[Song] = []
+        if group_id and window_key:
+            songs = await self.store.list_songs(group_id, window_key)
+        if not songs:
+            songs = songs_from_snapshot(snapshot)
+        if not songs:
+            return str(row.get("description") or "")
+
+        # 收录数对齐歌单实际内容，保证「共 N 首」与实际一致
+        count = len(songs)
+        try:
+            arch = await self.store.get_archive_by_playlist(playlist_id)
+        except Exception:
+            arch = None
+        if arch and arch.get("added_ids"):
+            count = len(arch["added_ids"])
+
+        tz = self.resolver.tz
+        start_at = self._ts_to_dt(snapshot.get("start_at"), tz)
+        end_at = self._ts_to_dt(snapshot.get("end_at"), tz)
+        return await self._render_description(
+            songs,
+            group_id,
+            str(snapshot.get("label") or window_key or ""),
+            self.config.playlist,
+            start_at=start_at,
+            end_at=end_at,
+            count=count,
+        )
+
+    @staticmethod
+    def _ts_to_dt(value: object, tz):
+        """快照里的时间戳还原成带时区的 datetime。"""
+        if not value:
+            return None
+        try:
+            return datetime.fromtimestamp(float(value), tz)
+        except (TypeError, ValueError):
+            return None
+
+    async def _render_description(
+        self,
+        songs: list[Song],
+        group_id: int,
+        window_label: str,
+        cfg,
+        *,
+        start_at=None,
+        end_at=None,
+        count: Optional[int] = None,
     ) -> str:
-        """按当前配置重新生成一份简介文本（用于手动补写 / 预览）。"""
+        """按当前配置渲染一份简介（歌单名 + 分享清单）。
+
+        ``count`` 用于「共 N 首」；缺省时按歌曲条数。
+        """
         from .naming import (
             build_name_lines,
             build_sharer_lines,
@@ -302,15 +374,12 @@ class CollectorService:
             fit_description,
         )
 
-        state = window or self.current_window()
-        songs = await self.store.list_songs(group_id, state.key)
-        cfg = self.config.playlist
         context = build_context(
             group_id=group_id,
-            window_label=state.label,
-            start_at=state.start_at,
-            end_at=state.end_at or state.archive_at,
-            count=len(songs),
+            window_label=window_label,
+            start_at=start_at,
+            end_at=end_at,
+            count=count if count is not None else len(songs),
             total=len(songs),
             seq=cfg.seq,
             songs=songs,
@@ -340,6 +409,24 @@ class CollectorService:
                     aliases=cfg.sharer_aliases,
                 )
         return fit_description(header, body)
+
+    async def pending_desc_list(self, group_id: Optional[int] = None) -> list[dict]:
+        return await self.store.list_pending_desc(group_id)
+
+    async def rebuild_description(
+        self, group_id: int, window: Optional[WindowState] = None
+    ) -> str:
+        """按当前配置重新生成一份简介文本（用于手动补写 / 预览）。"""
+        state = window or self.current_window()
+        songs = await self.store.list_songs(group_id, state.key)
+        return await self._render_description(
+            songs,
+            group_id,
+            state.label,
+            self.config.playlist,
+            start_at=state.start_at,
+            end_at=state.end_at or state.archive_at,
+        )
 
     async def push_description(
         self, playlist_id: int, desc: str, name: str = "", group_id: int = 0

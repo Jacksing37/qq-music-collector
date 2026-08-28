@@ -136,6 +136,37 @@ DEFAULT_INTRO = (
 )
 
 
+#: 收录回复默认文案。占位符见 ReplyConfig 注释。
+DEFAULT_ACCEPT = (
+    " 已收录 · 本期第 {index} 首\n"
+    "{title}\n"
+    "{artists_line}{album_line}来源: {platform}"
+)
+
+
+class ReplyConfig(BaseModel):
+    """收录回复文案（识别到新歌并入库后回发的那条消息）。"""
+
+    #: 是否启用自定义模板；关闭时用内置格式（等同于默认模板）
+    enabled: bool = False
+    #: 收录回复模板，支持占位符：
+    #:   {index}        本期序号
+    #:   {nick}         分享者（已套昵称映射）
+    #:   {title}        歌名          {artists}   歌手
+    #:   {album}        专辑          {platform}  来源平台名
+    #:   {url}          歌曲链接      {duration}  时长 mm:ss
+    #:   {artists_line} 整行「歌手: xxx」，无歌手时整行消失
+    #:   {album_line}   整行「专辑: xxx」，无专辑时整行消失
+    #:   {song}         歌曲详情块（歌名 + 歌手 / 专辑 / 来源 / 时长）
+    #:   {playlist}     当前群当前窗口的网易云歌单（名称 + 链接），
+    #:                  本期还没归档时用 playlist_empty_text 代替
+    #:   {count}        本期已收录首数   {window}  窗口文案
+    #: 命令行里用 \n 表示换行
+    accept_text: str = DEFAULT_ACCEPT
+    #: {playlist} 在本期尚未归档时的替代文案
+    playlist_empty_text: str = "（本期歌单还没生成）"
+
+
 class IntroConfig(BaseModel):
     """被 @ 时的自我介绍。"""
 
@@ -248,6 +279,7 @@ class AppConfig(BaseModel):
     cache: CacheConfig = Field(default_factory=CacheConfig)
     clear: ClearConfig = Field(default_factory=ClearConfig)
     intro: IntroConfig = Field(default_factory=IntroConfig)
+    reply: ReplyConfig = Field(default_factory=ReplyConfig)
 
 
 class ConfigManager:

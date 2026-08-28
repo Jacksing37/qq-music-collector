@@ -69,6 +69,12 @@ HELP_TEXT = """音乐收集机器人 · 命令一览（每条命令不带参数�
 /music intro [on|off|text|cooldown|at|always|skipcmd|skipmusic]
        不带参数 = 查看当前配置与预览；text 后接自定义文案（\\n 换行）
 
+【收录回复】识别到新歌后的那条消息
+/music reply [on|off|text|empty]     不带参数 = 查看当前模板
+       text 后接自定义模板（\\n 换行）；empty = 未归档时 {playlist} 的替代文案
+       占位符: {index}{nick}{title}{artists}{album}{platform}{url}{duration}
+               {artists_line}{album_line}{song}{playlist}{count}{window}
+
 【清理 / 维护】管理员
 /music del <序号|范围|all|window>   删除收集（del window 看历史窗口）
 /music delauto on|off               归档后自动清空本期
@@ -251,6 +257,8 @@ async def handle_command(bot: Bot, event: MessageEvent, args: Message = CommandA
         await _cmd_card(bot, event, rest)
     elif action in ("intro", "介绍", "自我介绍"):
         await _cmd_intro(bot, event, rest, group_id)
+    elif action in ("reply", "回复", "收录回复"):
+        await _cmd_reply(bot, event, rest)
     elif action in ("descfix", "补写", "补简介"):
         await _cmd_descfix(bot, event, group_id)
     else:
@@ -1038,6 +1046,52 @@ async def _cmd_intro(
         await cmd.finish(Message(f"遇到音乐分享时跳过自我介绍已{'开启' if v else '关闭'}"))
 
     await cmd.finish(Message("用法见 /music intro"))
+
+
+async def _cmd_reply(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
+    """收录回复文案：自定义模板与占位符。"""
+    cfg = service.config.reply
+    if not rest:
+        await cmd.finish(Message(
+            f"收录回复自定义: {'开启' if cfg.enabled else '关闭（用内置格式）'}\n"
+            f"当前模板:\n{cfg.accept_text}\n"
+            "— — — — —\n"
+            "用法:\n"
+            "  /music reply on|off           开关自定义模板\n"
+            "  /music reply text <模板>      设置模板（\\n 换行）\n"
+            "  /music reply empty <文案>     未归档时 {playlist} 的替代文案\n"
+            "占位符: {index}{nick}{title}{artists}{album}{platform}{url}{duration}\n"
+            "        {artists_line}{album_line}{song}{playlist}{count}{window}"
+        ))
+
+    sub = rest[0].lower()
+
+    if sub in ("on", "off", "开", "关"):
+        if not await _is_admin(bot, event):
+            await cmd.finish(Message("只有管理员可以修改配置"))
+        v = sub in ("on", "开")
+        config_manager.update("reply.enabled", v)
+        await cmd.finish(Message(f"收录回复自定义模板已{'开启' if v else '关闭'}"))
+
+    if sub in ("text", "文案", "模板"):
+        if not await _is_admin(bot, event):
+            await cmd.finish(Message("只有管理员可以修改配置"))
+        if len(rest) < 2:
+            await cmd.finish(Message("用法: /music reply text 已收录第{index}首《{title}》"))
+        text = " ".join(rest[1:]).replace("\\n", "\n")
+        config_manager.update("reply.accept_text", text)
+        await cmd.finish(Message(f"收录回复模板已更新:\n{text}"))
+
+    if sub in ("empty", "空", "未归档"):
+        if not await _is_admin(bot, event):
+            await cmd.finish(Message("只有管理员可以修改配置"))
+        if len(rest) < 2:
+            await cmd.finish(Message("用法: /music reply empty 本期歌单还没生成"))
+        text = " ".join(rest[1:]).replace("\\n", "\n")
+        config_manager.update("reply.playlist_empty_text", text)
+        await cmd.finish(Message(f"未归档时的 {{playlist}} 文案已更新: {text}"))
+
+    await cmd.finish(Message("用法见 /music reply"))
 
 
 async def _cmd_descfix(

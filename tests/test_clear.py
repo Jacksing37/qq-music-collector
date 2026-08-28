@@ -18,6 +18,7 @@ import nonebot  # noqa: E402
 nonebot.init(driver="~fastapi")  # 触发插件加载（require apscheduler)
 
 
+from music_collector.archiver import Archiver
 from music_collector.commands import _parse_indices
 from music_collector.service import CollectorService as _CollectorService
 from music_collector.config import config_manager
@@ -58,14 +59,14 @@ async def _seed(store: Store, gid: int, wkey: str, n: int, base_ts: float | None
 class _StubNetease:
     logged_in = True
 
-    def create_playlist(self, name, privacy):
+    async def create_playlist(self, name, privacy):
         return 999
 
-    def add_tracks(self, pid, batch):
+    async def add_tracks(self, pid, batch):
         return None
 
-    def update_description(self, pid, desc):
-        return None
+    async def update_description(self, pid, desc, name=""):
+        return True, "stub"
 
     def playlist_url(self, pid):
         return f"https://music.163.com/playlist/{pid}"
@@ -121,6 +122,8 @@ async def test_service_after_archive() -> None:
     svc = _CollectorService()
     svc.store = store
     svc.netease = _StubNetease()
+    # Archiver 持有构造时的 store 引用，必须一起换掉，否则归档会写到真实库
+    svc.archiver = Archiver(svc.netease, store)
 
     gid = 2002
     state = svc.current_window()

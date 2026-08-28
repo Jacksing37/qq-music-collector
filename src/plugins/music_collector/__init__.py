@@ -161,6 +161,7 @@ async def handle_at(bot: Bot, event: GroupMessageEvent) -> None:
 
 
 def _format_accept(song: Song, index: int) -> str:
+    """内置（默认）收录回复格式。自定义模板关闭时用它。"""
     lines = [f" 已收录 · 本期第 {index} 首", song.title]
     if song.artists:
         lines.append(f"歌手: {song.artists}")
@@ -168,6 +169,73 @@ def _format_accept(song: Song, index: int) -> str:
         lines.append(f"专辑: {song.album}")
     lines.append(f"来源: {song.platform_name}")
     return "\n".join(lines)
+
+
+def _song_detail_block(song: Song) -> str:
+    """{song} 占位符：歌曲详情块。"""
+    lines = [song.title]
+    if song.artists:
+        lines.append(f"歌手: {song.artists}")
+    if song.album:
+        lines.append(f"专辑: {song.album}")
+    lines.append(f"来源: {song.platform_name}")
+    if song.duration > 0:
+        lines.append(f"时长: {song.duration_text}")
+    return "\n".join(lines)
+
+
+async def _playlist_placeholder(group_id: int, window_key: str) -> str:
+    """{playlist} 占位符：当前群当前窗口的网易云歌单（名称 + 链接）。
+
+    本期还没归档时用 ``reply.playlist_empty_text`` 代替。
+    """
+    cfg = service.config.reply
+    try:
+        arch = await service.store.get_archive(group_id, window_key)
+    except Exception as exc:  # 查库异常不该打断回复
+        logger.warning(f"[music] 读取本期歌单失败: {exc}")
+        arch = None
+    url = str((arch or {}).get("playlist_url") or "")
+    pid = str((arch or {}).get("playlist_id") or "")
+    if not url and pid.isdigit():
+        url = service.netease.playlist_url(int(pid))
+    if not url:
+        return cfg.playlist_empty_text
+    return url
+
+
+async def build_accept_text(song: Song, index: int, group_id: int) -> str:
+    """生成收录回复文案（自定义模板开启时走模板，否则用内置格式）。"""
+    cfg = service.config.reply
+    if not cfg.enabled:
+        return _format_accept(song, index)
+
+    state = service.current_window()
+    try:
+        count = await service.store.count(group_id, state.key)
+    except Exception:
+        count = index
+    nick = resolve_alias(
+        song.sharer_name or str(song.sharer_id), song.sharer_id,
+        service.config.playlist.sharer_aliases,
+    )
+    context = {
+        "index": str(index),
+        "nick": nick,
+        "title": song.title,
+        "artists": song.artists,
+        "album": song.album,
+        "platform": song.platform_name,
+        "url": song.url,
+        "duration": song.duration_text,
+        "artists_line": f"歌手: {song.artists}\n" if song.artists else "",
+        "album_line": f"专辑: {song.album}\n" if song.album else "",
+        "song": _song_detail_block(song),
+        "playlist": await _playlist_placeholder(group_id, state.key),
+        "count": str(count),
+        "window": state.label,
+    }
+    return render_template(cfg.accept_text, context)
 
 
 async def _reply_song(
@@ -210,7 +278,12 @@ async def handle_music_share(bot: Bot, event: GroupMessageEvent) -> None:
     # 文字 @+提示始终发送；卡片是否回发由 reply_card 单独控制
     for song in result.accepted:
         index = result.index_of.get(id(song), 0)
-        await _reply_song(bot, event, _format_accept(song, index), song, with_card=cfg.reply_card)
+        try:
+            text = await build_accept_text(song, index, group_id)
+        except Exception as exc:
+            logger.warning(f"[music] 收录回复渲染失败，回退内置格式: {exc}")
+            text = _format_accept(song, index)
+        await _reply_song(bot, event, text, song, with_card=cfg.reply_card)
 
     if cfg.notify_duplicate:
         for song in result.duplicated:

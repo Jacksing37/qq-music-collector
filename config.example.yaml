@@ -131,6 +131,27 @@ render:
   # light / dark
   theme: dark
 
+# 收录回复：识别到新歌并入库后回发的那条消息
+reply:
+  # 是否启用自定义模板；关闭时用内置格式（等同于下面的默认模板）
+  enabled: false
+  # 可用占位符：
+  #   {index} 本期序号    {nick} 分享者（已套昵称映射）
+  #   {title} 歌名        {artists} 歌手       {album} 专辑
+  #   {platform} 来源平台 {url} 链接           {duration} 时长
+  #   {artists_line} 整行「歌手: xxx」，无歌手时整行消失
+  #   {album_line}   整行「专辑: xxx」，无专辑时整行消失
+  #   {song}     歌曲详情块（歌名 + 歌手 / 专辑 / 来源 / 时长）
+  #   {playlist} 当前群当前窗口的网易云歌单（名称 + 链接），
+  #              本期还没归档时用下面的 playlist_empty_text 代替
+  #   {count} 本期已收录首数   {window} 窗口文案
+  accept_text: |-
+    已收录 · 本期第 {index} 首
+    {title}
+    {artists_line}{album_line}来源: {platform}
+  # {playlist} 在本期尚未归档时的替代文案
+  playlist_empty_text: （本期歌单还没生成）
+
 # 被 @ 时的自我介绍（/music intro 可改；\n 在命令行里表示换行）
 intro:
   enabled: true

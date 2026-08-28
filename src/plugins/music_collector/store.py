@@ -61,7 +61,12 @@ CREATE TABLE IF NOT EXISTS pending_desc (
     last_error    TEXT    NOT NULL DEFAULT '',
     tries         INTEGER NOT NULL DEFAULT 0,
     created_at    REAL    NOT NULL,
-    updated_at    REAL    NOT NULL
+    updated_at    REAL    NOT NULL,
+    -- 所属窗口：补写时据此取当前歌曲重新生成简介，避免用旧文本硬推
+    window_key    TEXT    NOT NULL DEFAULT '',
+    -- 归档当时的上下文快照（JSON）：{label, start_at, end_at, songs:[...]}
+    -- 歌曲已被清空时用它重建，保证补写的清单与歌单内容一致
+    snapshot      TEXT    NOT NULL DEFAULT '{}'
 );
 """
 
@@ -104,6 +109,17 @@ class Store:
             if "added_ids" not in cols:
                 await db.execute(
                     "ALTER TABLE archives ADD COLUMN added_ids TEXT NOT NULL DEFAULT '[]'"
+                )
+            # 老库迁移：pending_desc 表补 window_key / snapshot 列（补写简介重建用）
+            async with db.execute("PRAGMA table_info(pending_desc)") as cur:
+                pcols = [row[1] for row in await cur.fetchall()]
+            if "window_key" not in pcols:
+                await db.execute(
+                    "ALTER TABLE pending_desc ADD COLUMN window_key TEXT NOT NULL DEFAULT ''"
+                )
+            if "snapshot" not in pcols:
+                await db.execute(
+                    "ALTER TABLE pending_desc ADD COLUMN snapshot TEXT NOT NULL DEFAULT '{}'"
                 )
             await db.commit()
 
@@ -202,26 +218,72 @@ class Store:
         group_id: int,
         description: str,
         last_error: str,
+        window_key: Optional[str] = None,
+        snapshot: Optional[dict] = None,
     ) -> None:
-        """简介写入失败时入队，等后续自动 / 手动补写。"""
+        """简介写入失败时入队，等后续自动 / 手动补写。
+
+        ``window_key`` / ``snapshot`` 为 None 时保留库中已有值（重试失败时
+        不要把首次存档的上下文冲掉）。
+        """
         now = time.time()
+        prev = await self.get_pending_desc(playlist_id)
+        if window_key is None:
+            window_key = (prev or {}).get("window_key") or ""
+        if snapshot is None:
+            raw_snap = (prev or {}).get("snapshot") or "{}"
+            try:
+                snapshot = json.loads(raw_snap) if isinstance(raw_snap, str) else dict(raw_snap)
+            except json.JSONDecodeError:
+                snapshot = {}
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """
                 INSERT INTO pending_desc
                     (playlist_id, playlist_name, group_id, description,
-                     last_error, tries, created_at, updated_at)
-                VALUES (?,?,?,?,?,1,?,?)
+                     last_error, tries, created_at, updated_at, window_key, snapshot)
+                VALUES (?,?,?,?,?,1,?,?,?,?)
                 ON CONFLICT(playlist_id) DO UPDATE SET
                     playlist_name=excluded.playlist_name,
                     description=excluded.description,
                     last_error=excluded.last_error,
                     tries=pending_desc.tries + 1,
-                    updated_at=excluded.updated_at
+                    updated_at=excluded.updated_at,
+                    window_key=excluded.window_key,
+                    snapshot=excluded.snapshot
                 """,
-                (playlist_id, playlist_name, group_id, description, last_error, now, now),
+                (
+                    playlist_id, playlist_name, group_id, description, last_error,
+                    now, now, window_key, json.dumps(snapshot, ensure_ascii=False),
+                ),
             )
             await db.commit()
+
+    async def get_pending_desc(self, playlist_id: str) -> Optional[dict]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM pending_desc WHERE playlist_id=?", (playlist_id,)
+            ) as cur:
+                row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def get_archive_by_playlist(self, playlist_id: str) -> Optional[dict]:
+        """按歌单 id 反查归档记录（补写简介时用它对齐实际收录数）。"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM archives WHERE playlist_id=?", (playlist_id,)
+            ) as cur:
+                row = await cur.fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        try:
+            result["added_ids"] = set(json.loads(result.get("added_ids") or "[]"))
+        except (TypeError, json.JSONDecodeError):
+            result["added_ids"] = set()
+        return result
 
     async def list_pending_desc(self, group_id: Optional[int] = None) -> list[dict]:
         sql = "SELECT * FROM pending_desc"

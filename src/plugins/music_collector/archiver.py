@@ -129,6 +129,46 @@ def _pick_best(
     return best, best_score
 
 
+_SNAPSHOT_FIELDS = (
+    "platform", "song_id", "title", "artists", "album", "duration",
+    "sharer_id", "sharer_name", "netease_id", "created_at",
+)
+
+
+def snapshot_payload(
+    window_key: str,
+    window_label: str,
+    start_at: Optional[datetime],
+    end_at: Optional[datetime],
+    songs: Sequence[Song],
+) -> dict:
+    """归档当时的上下文快照，用于简介补写时按同一批歌曲重建。"""
+    return {
+        "window_key": window_key,
+        "label": window_label,
+        "start_at": start_at.timestamp() if start_at else None,
+        "end_at": end_at.timestamp() if end_at else None,
+        "songs": [
+            {f: getattr(s, f) for f in _SNAPSHOT_FIELDS} for s in songs
+        ],
+    }
+
+
+def songs_from_snapshot(payload: object) -> list[Song]:
+    """把快照里的歌曲还原成 Song（字段缺失/多余都容错）。"""
+    if not isinstance(payload, dict):
+        return []
+    out: list[Song] = []
+    for raw in payload.get("songs") or []:
+        if not isinstance(raw, dict):
+            continue
+        data = {k: v for k, v in raw.items() if k in _SNAPSHOT_FIELDS}
+        if not data.get("title"):
+            continue
+        out.append(Song(**data))
+    return out
+
+
 @dataclass
 class ArchiveReport:
     ok: bool = False
@@ -197,8 +237,14 @@ class Archiver:
         name: str = "",
         group_id: int = 0,
         retries: int = 3,
+        window_key: Optional[str] = None,
+        snapshot: Optional[dict] = None,
     ) -> tuple[bool, str]:
-        """写简介 + 退避重试；仍失败则入队等待补写。"""
+        """写简介 + 退避重试；仍失败则入队等待补写。
+
+        ``window_key`` / ``snapshot`` 会随队列一起存下来，让补写时能按当前数据
+        （或归档时的快照）重新生成简介，而不是直接重推这段旧文本。
+        """
         note = "未尝试"
         for attempt in range(1, max(1, retries) + 1):
             ok, note = await self.api.update_description(playlist_id, desc, name=name)
@@ -208,7 +254,8 @@ class Archiver:
             if attempt < max(1, retries):
                 await asyncio.sleep(min(3 * attempt, 10))
         await self.store.save_pending_desc(
-            str(playlist_id), name, group_id, desc, note
+            str(playlist_id), name, group_id, desc, note,
+            window_key=window_key, snapshot=snapshot,
         )
         return False, note
 
@@ -482,4 +529,6 @@ class Archiver:
         report.desc_ok, report.desc_note = await self.write_description(
             playlist_id, desc, name=report.playlist_name, group_id=group_id,
             retries=cfg.desc_retry,
+            window_key=window_key,
+            snapshot=snapshot_payload(window_key, window_label, start_at, end_at, listed),
         )
