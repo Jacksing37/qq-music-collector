@@ -336,7 +336,7 @@ class Store:
     # 允许通过 update_song_meta 修改的字段白名单
     _EDITABLE = (
         "title", "artists", "album", "sharer_name", "sharer_id",
-        "netease_id", "matched",
+        "netease_id", "matched", "url",
     )
 
     async def update_song_meta(self, row_id: int, **fields: object) -> bool:

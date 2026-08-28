@@ -532,7 +532,12 @@ class CollectorService:
     async def edit_song(
         self, group_id: int, window_key: str, index: int, payload: dict
     ) -> dict:
-        """网页端编辑一条已收集歌曲的歌名 / 歌手 / 分享者。"""
+        """网页端编辑一条已收集歌曲：歌名 / 歌手 / 分享者 / 原链接 / 匹配链接。
+
+        - ``url``：原平台链接（如 QQ音乐分享链接），直接存文本。
+        - ``netease_link``：网易云歌曲链接；仅当提供有效链接时才重新匹配，
+          并把歌名/歌手/专辑覆盖为匹配结果（与手动匹配语义一致）。
+        """
         song = await self.store.get_song_by_index(group_id, window_key, index)
         if song is None or song.row_id is None:
             return {"ok": False, "message": "序号无效或歌曲不存在"}
@@ -548,31 +553,47 @@ class CollectorService:
                 upd["sharer_id"] = int(payload["sharer_id"])
             except (TypeError, ValueError):
                 pass
+        if payload.get("url") is not None:
+            upd["url"] = str(payload["url"]).strip()
+        # 匹配链接：仅在提供了有效链接时才重新匹配
+        netease_link = payload.get("netease_link")
+        if netease_link is not None and str(netease_link).strip():
+            try:
+                sid, title, artists, album = await self._resolve_netease_link(
+                    netease_link,
+                    fallback_title=song.title,
+                    fallback_artists=song.artists,
+                    fallback_album=song.album,
+                )
+            except ValueError as exc:
+                return {"ok": False, "message": str(exc)}
+            upd["netease_id"] = sid
+            upd["matched"] = 1
+            upd["title"] = title
+            upd["artists"] = artists
+            upd["album"] = album
         if not upd:
             return {"ok": False, "message": "没有可修改的字段"}
         await self.store.update_song_meta(song.row_id, **upd)
         return {"ok": True, "message": "已保存修改"}
 
-    async def match_song(
-        self, group_id: int, window_key: str, index: int, netease_link: str
-    ) -> dict:
-        """网页端手动匹配：把一条已收集歌曲绑定到粘贴的网易云链接（正确的歌）。
+    async def _resolve_netease_link(
+        self, link: str, *, fallback_title: str = "", fallback_artists: str = "",
+        fallback_album: str = "",
+    ) -> tuple[str, str, str, str]:
+        """解析网易云链接 -> (song_id, title, artists, album)。
 
-        解析链接 → 取 song_id → 拉详情补全标题/歌手 → 写 netease_id + matched。
+        解析不到 id 抛 ValueError；拿到 id 后拉详情补全标题/歌手/专辑，
+        拉不到详情时回退到传入的 fallback（保持原值）。match_song 与 edit_song 共用。
         """
-        song = await self.store.get_song_by_index(group_id, window_key, index)
-        if song is None or song.row_id is None:
-            return {"ok": False, "message": "序号无效或歌曲不存在"}
-
-        sid = self._extract_netease_id(netease_link)
-        if not sid and "http" in (netease_link or ""):
-            expanded = await self._expand_short_link(netease_link)
+        sid = self._extract_netease_id(link)
+        if not sid and "http" in (link or ""):
+            expanded = await self._expand_short_link(link)
             if expanded:
                 sid = self._extract_netease_id(expanded)
         if not sid:
-            return {"ok": False, "message": "无法从链接解析出网易云歌曲 id"}
-
-        title, artists, album = song.title, song.artists, song.album
+            raise ValueError("无法从链接解析出网易云歌曲 id")
+        title, artists, album = fallback_title, fallback_artists, fallback_album
         try:
             details = await self.netease.song_detail([sid])
         except Exception:
@@ -585,6 +606,28 @@ class CollectorService:
             if arts:
                 artists = " / ".join(a.get("name", "") for a in arts)
             album = (d.get("album") or {}).get("name", "") or album
+        return sid, title, artists, album
+
+    async def match_song(
+        self, group_id: int, window_key: str, index: int, netease_link: str
+    ) -> dict:
+        """网页端手动匹配：把一条已收集歌曲绑定到粘贴的网易云链接（正确的歌）。
+
+        解析链接 → 取 song_id → 拉详情补全标题/歌手 → 写 netease_id + matched。
+        """
+        song = await self.store.get_song_by_index(group_id, window_key, index)
+        if song is None or song.row_id is None:
+            return {"ok": False, "message": "序号无效或歌曲不存在"}
+
+        try:
+            sid, title, artists, album = await self._resolve_netease_link(
+                netease_link,
+                fallback_title=song.title,
+                fallback_artists=song.artists,
+                fallback_album=song.album,
+            )
+        except ValueError as exc:
+            return {"ok": False, "message": str(exc)}
 
         await self.store.update_song_meta(
             song.row_id,

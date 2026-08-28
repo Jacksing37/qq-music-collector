@@ -18,7 +18,7 @@ from music_collector.webui import build_overview, dispatch_action  # noqa: E402
 
 class _Song:
     def __init__(self, title, artists="", sharer_name="", platform="netease",
-                 netease_id=None, matched=False, sharer_id=0):
+                 netease_id=None, matched=False, sharer_id=0, url=""):
         self.title = title
         self.artists = artists
         self.sharer_name = sharer_name
@@ -26,6 +26,7 @@ class _Song:
         self.platform = platform
         self.netease_id = netease_id
         self.matched = matched
+        self.url = url
 
 
 class _Playlist:
@@ -83,6 +84,7 @@ class _FakeService:
         def __init__(self, parent): self._p = parent
         async def groups_in_window(self, wk): return list(self._p._songs.keys())
         async def list_songs(self, gid, wk): return self._p._songs.get(gid, [])
+        async def get_archive(self, gid, wk): return getattr(self._p, "_archives", {}).get((gid, wk))
     @property
     def store(self): return self._Store(self)
     def set_collect_override(self, value):

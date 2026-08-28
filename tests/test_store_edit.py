@@ -47,6 +47,12 @@ async def main() -> None:
     lst3 = await store.list_songs(123, "W1")
     assert lst3[0].netease_id == "999" and lst3[0].matched is True
 
+    # url 进白名单：可改原链接；非白名单字段（song_id）必须被忽略
+    await store.update_song_meta(lst3[0].row_id, url="https://y.qq.com/x", song_id="hack")
+    lst3b = await store.list_songs(123, "W1")
+    assert lst3b[0].url == "https://y.qq.com/x", lst3b[0].url
+    assert lst3b[0].song_id == "3", lst3b[0].song_id  # 非白名单被忽略，主键不变
+
     # 清空后重新添加，排序无关但插入顺序正确
     await store.delete_window(123, "W1")
     await store.add_song(123, "W1", Song(platform="netease", song_id="a", title="A"))

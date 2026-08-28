@@ -63,6 +63,15 @@ async def main() -> None:
     r = await dispatch_action({"action": "edit_song", "group_id": 123, "index": 2, "fields": {"title": "改"}})
     assert r["ok"] and svc.calls[-1][0] == "edit" and svc.calls[-1][3] == 2
 
+    # edit_song 转发原链接与匹配链接（前端编辑弹窗新增字段）
+    r = await dispatch_action({"action": "edit_song", "group_id": 123, "index": 4,
+                               "fields": {"title": "改2", "url": "https://y.qq.com/x",
+                                          "netease_link": "https://music.163.com/song?id=991"}})
+    assert r["ok"] and svc.calls[-1][0] == "edit"
+    f = svc.calls[-1][4]
+    assert f.get("url") == "https://y.qq.com/x", f
+    assert f.get("netease_link") == "https://music.163.com/song?id=991", f
+
     r = await dispatch_action({"action": "match", "group_id": 123, "index": 1,
                                "link": "https://music.163.com/song?id=2692690431"})
     assert r["ok"] and svc.calls[-1][0] == "match" and svc.calls[-1][3] == 1

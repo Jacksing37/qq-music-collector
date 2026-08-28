@@ -47,6 +47,7 @@ SECTION_TITLES = {
     "cache": "缓存清理",
     "clear": "歌曲记录清理",
     "intro": "自我介绍",
+    "reply": "收录回复模板",
 }
 
 # dotted_key -> (label, hint, multiline?)
@@ -119,12 +120,19 @@ FIELD_META: dict[str, tuple[str, str, bool]] = {
     "clear.prune_at": ("每日清理时刻", "如 05:00", False),
 
     "intro.enabled": ("自我介绍开关", "被 @ 时是否回发自我介绍", False),
-    "intro.text": ("自我介绍文案", "支持占位符 {nick}{count}{state}{playlist}，用 \\n 换行", True),
+    "intro.text": ("自我介绍文案", "支持占位符：{nick}分享者 {count}已收集数 {state}收集状态 {playlist}歌单(名+链接) {window}窗口文案，用 \\n 换行", True),
     "intro.cooldown": ("冷却(秒)", "同群多久内不再重复发，0=不限", False),
     "intro.at_sender": ("@提问者", "回复时是否 @ 对方", False),
     "intro.skip_commands": ("跳过命令", "消息带 /music 命令时不发自我介绍", False),
     "intro.skip_music": ("跳过音乐分享", "消息带音乐链接时不发（那是分享不是提问）", False),
     "intro.always_reply": ("始终回应", "收集关闭/不在收集期时也仍回自我介绍", False),
+
+    "reply.enabled": ("启用自定义回复", "关闭则用内置格式（等同默认模板）", False),
+    "reply.accept_text": ("收录回复文案", "识别到新歌入库后回发的消息。占位符：{index}本期序号 {nick}分享者 {title}歌名 {artists}歌手 {album}专辑 {platform}来源 {url}歌曲链接 {duration}时长 {artists_line}整行歌手(无则消失) {album_line}整行专辑(无则消失) {song}详情块 {playlist}歌单(名+链接) {count}已收录数 {window}窗口文案；用 \\n 换行", True),
+    "reply.playlist_empty_text": ("歌单未生成替代文案", "{playlist} 在本期还没归档时显示的替代文字", False),
+
+    "playlist.name_template": ("歌单名模板", "占位符：{seq}期号 {slash}如26/8/7 {y}{yy}年 {m}{mm}月 {d}{dd}日 {ymd}{date}日期 {week}周数 {weekday}星期 {start}起始日 {end}结束日 {window}窗口文案 {count}收录数 {total}分享数 {sharers}人数 {group}群号", True),
+    "playlist.description_template": ("简介开头模板", "后续自动接「谁分享了什么歌」清单。占位符同歌单名，另可用 {songlist}歌曲清单 {sharerlist}按人聚合清单；{group}群号 {window}窗口 {count}数", True),
 }
 
 
@@ -514,6 +522,7 @@ def _song_item(song, index: int) -> dict:
         "sharer_name": resolve_alias(song.sharer_name or "", song.sharer_id, aliases),
         "platform": song.platform,
         "platform_name": PLATFORM_NAMES.get(song.platform, song.platform),
+        "url": song.url,
         "netease_id": song.netease_id,
         "matched": song.matched,
     }
@@ -538,9 +547,11 @@ async def build_overview(window_key: typing.Optional[str] = None) -> dict:
     groups: list[dict] = []
     for gid in gids:
         songs = await service.store.list_songs(gid, wk)
+        arch = await service.store.get_archive(gid, wk)
         groups.append({
             "group_id": gid,
             "count": len(songs),
+            "playlist_url": (arch or {}).get("playlist_url"),
             "songs": [_song_item(s, i) for i, s in enumerate(songs)],
         })
     return {
