@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 import secrets
 import typing
@@ -324,6 +325,60 @@ def _token_ok(request: Request) -> bool:
     return False
 
 
+# -------------------------------------------------------------------- 管理员 / 网易云账号
+
+def read_superusers() -> list[str]:
+    """从 .env 读取 SUPERUSERS（nonebot 启动时读取，改完需重启生效）。"""
+    if not _ENV_PATH.is_file():
+        return []
+    for line in _ENV_PATH.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if s.startswith("SUPERUSERS") and "=" in s:
+            raw = s.split("=", 1)[1].strip()
+            try:
+                val = ast.literal_eval(raw)
+            except Exception:
+                return []
+            return [str(x) for x in val]
+    return []
+
+
+def write_superusers(ids: list[str]) -> None:
+    """把 SUPERUSERS 写回 .env（仅替换该行，保留其它配置）；不存在则追加。"""
+    ids = [str(x).strip() for x in ids if str(x).strip()]
+    line = "SUPERUSERS=[" + ",".join(ids) + "]"
+    text = _ENV_PATH.read_text(encoding="utf-8") if _ENV_PATH.is_file() else ""
+    lines = text.splitlines()
+    for i, l in enumerate(lines):
+        if l.strip().startswith("SUPERUSERS"):
+            lines[i] = line
+            break
+    else:
+        lines.append(line)
+    _ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+async def netease_account_status() -> dict:
+    """网易云登录态快照：是否已登录 / 凭证是否有效 / 昵称与 userId。"""
+    valid = False
+    try:
+        valid = await service.netease.session_valid()
+    except Exception:
+        valid = False
+    profile = None
+    if valid:
+        try:
+            profile = await service.netease.login_status()
+        except Exception:
+            profile = None
+    return {
+        "logged_in": service.netease.logged_in,
+        "valid": valid,
+        "nickname": (profile or {}).get("nickname") if profile else None,
+        "userId": (profile or {}).get("userId") if profile else None,
+    }
+
+
 # -------------------------------------------------------------------- 路由
 
 async def _dashboard() -> HTMLResponse:
@@ -392,6 +447,58 @@ async def _api_status(request: Request):
         "collect_override": service.config.collect_override,
         "next_runs": next_runs(),
     })
+
+
+async def _api_admin(request: Request):
+    """读取 / 修改管理员（SUPERUSERS）。改完需重启 bot 生效。"""
+    if not _token_ok(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    if request.method == "GET":
+        return JSONResponse({
+            "superusers": read_superusers(),
+            "note": "修改后需重启 bot 才能生效（nonebot 在启动时读取 SUPERUSERS）",
+        })
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "message": "请求体不是合法 JSON"}, status_code=400)
+    ids = body.get("superusers")
+    if not isinstance(ids, list):
+        return JSONResponse({"ok": False, "message": "superusers 必须是数组"}, status_code=400)
+    try:
+        write_superusers(ids)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"ok": False, "message": f"写入失败: {exc}"}, status_code=400)
+    return JSONResponse({
+        "ok": True,
+        "superusers": read_superusers(),
+        "note": "已写入 .env，需重启 bot 生效",
+    })
+
+
+async def _api_account(request: Request):
+    """网易云账号：GET 查登录态，POST {action:login|logout} 登录/退出。"""
+    if not _token_ok(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    if request.method == "GET":
+        return JSONResponse(await netease_account_status())
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "message": "请求体不是合法 JSON"}, status_code=400)
+    action = body.get("action")
+    if action == "login":
+        cookie = (body.get("cookie") or "").strip()
+        if not cookie:
+            return JSONResponse({"ok": False, "message": "未提供 MUSIC_U"}, status_code=400)
+        if "MUSIC_U" not in cookie:
+            cookie = f"MUSIC_U={cookie}"
+        service.netease.set_cookie_string(cookie)
+        return JSONResponse({"ok": True, **await netease_account_status()})
+    if action == "logout":
+        service.netease.clear_session()
+        return JSONResponse({"ok": True, **await netease_account_status()})
+    return JSONResponse({"ok": False, "message": f"未知操作: {action}"}, status_code=400)
 
 
 # -------------------------------------------------------------------- 预览 / 操作
@@ -529,6 +636,34 @@ async def dispatch_action(body: dict) -> dict:
             desc = await service.rebuild_description(gid)
             return {"ok": True, "message": "简介预览已生成", "data": {"description": desc}}
 
+        # ---- 网页端收集管理（需求 1）----
+        if action == "add_song":
+            gid = int(body.get("group_id"))
+            wk = (body.get("window_key") or service.current_window().key)
+            return await service.manual_add_song(gid, wk, body.get("song", {}))
+
+        if action == "edit_song":
+            gid = int(body.get("group_id"))
+            wk = (body.get("window_key") or service.current_window().key)
+            idx = int(body.get("index"))
+            return await service.edit_song(gid, wk, idx, body.get("fields", {}))
+
+        if action == "match":
+            gid = int(body.get("group_id"))
+            wk = (body.get("window_key") or service.current_window().key)
+            idx = int(body.get("index"))
+            return await service.match_song(gid, wk, idx, body.get("link") or "")
+
+        if action == "reorder":
+            gid = int(body.get("group_id"))
+            wk = (body.get("window_key") or service.current_window().key)
+            indices = [int(x) for x in body.get("ordered_indices", [])]
+            return await service.reorder_songs(gid, wk, indices)
+
+        if action == "sync":
+            gid = int(body.get("group_id"))
+            return await service.sync_playlist(gid)
+
         return {"ok": False, "message": f"未知操作: {action}"}
     except (ValueError, TypeError) as exc:
         return {"ok": False, "message": f"参数错误: {exc}"}
@@ -583,741 +718,11 @@ def register_webui() -> None:
     app.add_api_route("/api/music-admin/status", _api_status, methods=["GET"])
     app.add_api_route("/api/music-admin/overview", _api_overview, methods=["GET"])
     app.add_api_route("/api/music-admin/action", _api_action, methods=["POST"])
+    app.add_api_route("/api/music-admin/admin", _api_admin, methods=["GET", "POST"])
+    app.add_api_route("/api/music-admin/account", _api_account, methods=["GET", "POST"])
     logger.info("[music] WebUI 已挂载: http://<本机IP>:8080/music-admin  (需 token 访问)")
 
 
 # -------------------------------------------------------------------- 前端
 
-DASHBOARD_HTML = r"""<!DOCTYPE html>
-<html lang="zh-CN" data-theme="dark">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>群音乐收集 · 配置面板</title>
-<style>
-:root{
-  --bg:#0b0f1a; --bg2:#111726; --card:rgba(255,255,255,.04); --card-bd:rgba(255,255,255,.08);
-  --txt:#e8edf6; --muted:#8b97ad; --accent:#6ea8fe; --accent2:#a78bfa; --ok:#34d399; --bad:#f87171;
-  --input:rgba(255,255,255,.06); --shadow:0 10px 30px rgba(0,0,0,.35);
-}
-[data-theme="light"]{
-  --bg:#f4f6fb; --bg2:#ffffff; --card:rgba(20,30,60,.03); --card-bd:rgba(20,30,60,.1);
-  --txt:#1a2233; --muted:#5b6678; --accent:#3b6fe0; --accent2:#7c5cf0; --ok:#0f9d63; --bad:#d8453b;
-  --input:rgba(20,30,60,.05); --shadow:0 10px 30px rgba(20,30,60,.1);
-}
-*{box-sizing:border-box}
-body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
-  background:radial-gradient(1200px 600px at 80% -10%,rgba(110,168,254,.12),transparent),var(--bg);
-  color:var(--txt);line-height:1.55;min-height:100vh}
-.wrap{max-width:960px;margin:0 auto;padding:28px 20px 120px}
-header{position:sticky;top:0;z-index:20;backdrop-filter:blur(14px);
-  background:linear-gradient(var(--bg),rgba(11,15,26,.6));padding:14px 0;margin-bottom:18px;
-  border-bottom:1px solid var(--card-bd)}
-[data-theme="light"] header{background:linear-gradient(#fff,rgba(255,255,255,.7))}
-.hrow{display:flex;align-items:center;gap:14px}
-.hrow h1{font-size:19px;margin:0;font-weight:700;letter-spacing:.3px}
-.spacer{flex:1}
-button{font:inherit;cursor:pointer;border:1px solid var(--card-bd);background:var(--input);color:var(--txt);
-  border-radius:10px;padding:8px 14px;transition:.18s}
-button:hover{border-color:var(--accent);transform:translateY(-1px)}
-.btn-primary{background:linear-gradient(135deg,var(--accent),var(--accent2));border:none;color:#fff;font-weight:600}
-.status-pill{font-size:12px;padding:4px 10px;border-radius:999px;border:1px solid var(--card-bd);color:var(--muted)}
-.status-pill.on{color:var(--ok);border-color:var(--ok)}
-.card{background:var(--card);border:1px solid var(--card-bd);border-radius:18px;padding:18px 20px;
-  margin-bottom:16px;box-shadow:var(--shadow);backdrop-filter:blur(8px)}
-.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
-.stat{background:var(--input);border:1px solid var(--card-bd);border-radius:14px;padding:12px 14px}
-.stat .k{font-size:12px;color:var(--muted)}
-.stat .v{font-size:17px;font-weight:600;margin-top:2px}
-pre.runs{margin:10px 0 0;font-size:12px;color:var(--muted);white-space:pre-wrap;font-family:ui-monospace,monospace}
-section.card h2{font-size:16px;margin:0 0 14px;display:flex;align-items:center;gap:8px}
-section.card h2 .dot{width:8px;height:8px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2))}
-.field{display:grid;grid-template-columns:230px 1fr;gap:14px;padding:10px 0;border-top:1px dashed var(--card-bd)}
-.field:first-of-type{border-top:none}
-.flabel{font-size:14px}
-.flabel .hint{display:block;font-size:12px;color:var(--muted);margin-top:2px}
-.fctrl input[type=text],.fctrl input[type=number],.fctrl select,textarea{
-  width:100%;background:var(--input);border:1px solid var(--card-bd);color:var(--txt);
-  border-radius:10px;padding:9px 11px;font:inherit;transition:.18s}
-.fctrl input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(110,168,254,.18)}
-textarea{resize:vertical;min-height:64px;font-family:ui-monospace,monospace;font-size:13px}
-.fctrl.dirty input,.fctrl.dirty select,.fctrl.dirty textarea{border-color:var(--accent2)}
-.fctrl label.chk{display:inline-flex;align-items:center;gap:10px;cursor:pointer;font-size:15px}
-.fctrl input[type=checkbox]{width:20px;height:20px;accent-color:var(--accent)}
-.footbar{position:fixed;left:0;right:0;bottom:0;z-index:30;display:flex;align-items:center;gap:14px;
-  justify-content:center;padding:14px;background:linear-gradient(transparent,var(--bg) 40%);}
-.footbar .msg{font-size:13px;color:var(--muted)}
-.footbar .msg.ok{color:var(--ok)}
-.footbar .msg.bad{color:var(--bad)}
-.footbar .count{font-size:13px;color:var(--accent2);font-weight:600}
-.modal{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;
-  background:rgba(0,0,0,.55);backdrop-filter:blur(4px)}
-.modal .box{background:var(--bg2);border:1px solid var(--card-bd);border-radius:18px;padding:26px;width:min(420px,92vw);box-shadow:var(--shadow)}
-.modal h3{margin:0 0 6px}
-.modal p{color:var(--muted);font-size:13px;margin:0 0 14px}
-  .modal input{width:100%;background:var(--input);border:1px solid var(--card-bd);color:var(--txt);border-radius:10px;padding:10px;font:inherit;margin-bottom:14px}
-  .hidden{display:none!important}
-  .ops{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 14px}
-  .ops .danger{border-color:rgba(248,113,113,.5);color:var(--bad)}
-  .ops button{padding:7px 12px;font-size:13px}
-  .winrow{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:6px}
-  .winrow select{background:var(--input);border:1px solid var(--card-bd);color:var(--txt);border-radius:10px;padding:7px 10px;font:inherit}
-  .badge{font-size:12px;padding:3px 10px;border-radius:999px;border:1px solid var(--card-bd)}
-  .badge.ok{color:var(--ok);border-color:var(--ok)}
-  .badge.bad{color:var(--bad);border-color:var(--bad)}
-  .gcard{background:var(--input);border:1px solid var(--card-bd);border-radius:14px;padding:14px 16px;margin-bottom:12px}
-  .grow{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px}
-  .gtitle{font-size:15px;font-weight:600}
-  .gtitle .cnt{font-size:12px;color:var(--muted);font-weight:400;margin-left:8px}
-  .gtbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:4px}
-  .gtbl th,.gtbl td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--card-bd)}
-  .gtbl th{color:var(--muted);font-weight:500;font-size:12px}
-  .gtbl tr:hover td{background:rgba(110,168,254,.06)}
-  .gtbl input[type=checkbox]{width:16px;height:16px;accent-color:var(--accent)}
-  .gtbl .idx{color:var(--accent2);font-weight:600;width:28px}
-  .gtbl .plat{font-size:11px;color:var(--muted);width:64px}
-  .gtbl .mt{color:var(--ok);font-size:12px}
-  .gtbl .un{color:var(--muted);font-size:12px}
-  .empty{color:var(--muted);font-size:13px;padding:8px 2px}
-  /* ---- 预览侧边栏 ---- */
-  .pv-mask{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.5);backdrop-filter:blur(3px)}
-  .pv-drawer{position:fixed;top:0;right:0;bottom:0;z-index:61;width:min(560px,94vw);
-    background:var(--bg2);border-left:1px solid var(--card-bd);box-shadow:var(--shadow);
-    display:flex;flex-direction:column;transform:translateX(105%);transition:transform .26s cubic-bezier(.16,1,.3,1)}
-  .pv-drawer.open{transform:none}
-  .pv-head{display:flex;align-items:center;gap:10px;padding:15px 18px;border-bottom:1px solid var(--card-bd)}
-  .pv-head h3{margin:0;font-size:16px;flex:1}
-  .pv-head .pv-win{font-size:12px;color:var(--muted);font-weight:400}
-  .pv-head button{width:32px;height:32px;padding:0;border-radius:9px;font-size:14px;line-height:1}
-  .pv-body{flex:1;overflow:auto;padding:16px 18px 30px}
-  .pv-sec{margin-bottom:18px}
-  .pv-sec .pv-tag{font-size:11px;color:var(--muted);letter-spacing:.5px;margin-bottom:6px;text-transform:uppercase}
-  .pv-name{font-size:18px;font-weight:700;padding:11px 13px;background:var(--input);
-    border:1px solid var(--card-bd);border-radius:12px;word-break:break-all}
-  .pv-desc{white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:13px;line-height:1.65;
-    background:var(--input);border:1px solid var(--card-bd);border-radius:12px;padding:11px 13px;
-    max-height:300px;overflow:auto;margin:0}
-  .pv-desc.empty{font-style:italic}
-  .pv-actions{display:flex;gap:8px;margin-top:8px}
-  .pv-actions button{padding:6px 12px;font-size:12px}
-  .pv-tbl{width:100%;border-collapse:collapse;font-size:13px}
-  .pv-tbl th,.pv-tbl td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--card-bd)}
-  .pv-tbl th{color:var(--muted);font-weight:500;font-size:12px}
-  .pv-tbl .idx{color:var(--accent2);font-weight:600;width:28px}
-  .pv-tbl .plat{font-size:11px;color:var(--muted)}
-  .pv-tbl .mt{color:var(--ok);font-size:12px}
-  .pv-tbl .un{color:var(--muted);font-size:12px}
-</style>
-</head>
-<body>
-<header><div class="wrap hrow" style="padding-bottom:0;margin-bottom:0">
-  <h1>🎵 群音乐收集 · 配置面板</h1>
-  <span id="statusPill" class="status-pill">—</span>
-  <div class="spacer"></div>
-  <button id="themeBtn" title="切换主题">🌓 主题</button>
-  <button id="aliasBtn" title="编辑分享者昵称映射">✏ 昵称映射</button>
-  <button id="logoutBtn" title="清除本地令牌">退出</button>
-</div></header>
-
-<div class="wrap">
-  <div class="card">
-    <div class="stat-grid">
-      <div class="stat"><div class="k">当前窗口</div><div class="v" id="stWindow">—</div></div>
-      <div class="stat"><div class="k">收集状态</div><div class="v" id="stCollect">—</div></div>
-      <div class="stat"><div class="k">收集模式</div><div class="v" id="stOverride">—</div></div>
-    </div>
-    <pre class="runs" id="stRuns">加载中…</pre>
-  </div>
-
-  <div class="card">
-    <h2><span class="dot"></span>📊 收集预览与实时操作</h2>
-    <div class="winrow">
-      <label>窗口：
-        <select id="winSel"></select>
-      </label>
-      <span id="neteaseBadge" class="badge">网易云：…</span>
-      <button id="ovRefresh">刷新</button>
-    </div>
-    <div class="ops">
-      <button id="opStart">▶ 强制开始收集</button>
-      <button id="opStop">⏸ 强制停止收集</button>
-      <button id="opAuto">↺ 恢复自动</button>
-      <button id="opArchiveAll" class="btn-primary">📦 归档当前窗口全部</button>
-    </div>
-    <div id="groupList"><div class="empty">加载中…</div></div>
-  </div>
-
-  <div id="form"></div>
-</div>
-
-<div class="footbar">
-  <span class="count" id="dirtyCount"></span>
-  <span class="msg" id="saveMsg"></span>
-  <button id="resetBtn">重置改动</button>
-  <button id="saveBtn" class="btn-primary">保存更改</button>
-</div>
-
-<div class="pv-mask hidden" id="pvMask"></div>
-<aside class="pv-drawer" id="pvDrawer" aria-hidden="true">
-  <div class="pv-head">
-    <h3>🎵 本期预览 <span class="pv-win" id="pvWin"></span></h3>
-    <button id="pvClose" title="关闭">✕</button>
-  </div>
-  <div class="pv-body" id="pvBody">加载中…</div>
-</aside>
-
-<div class="modal hidden" id="tokenModal">
-  <div class="box">
-    <h3>需要访问令牌</h3>
-    <p>在服务器 .env 里设置 <code>MUSIC_WEBUI_TOKEN</code> 的值填到这里（首次启动未设置时，令牌会打印在机器人启动日志里）。</p>
-    <input id="tokenInput" placeholder="粘贴令牌…" autocomplete="off">
-    <button class="btn-primary" id="tokenOk" style="width:100%">进入</button>
-  </div>
-</div>
-
-<script>
-const LS_KEY = "mwc_token";
-let TOKEN = localStorage.getItem(LS_KEY) || "";
-let ORIG = {};           // 原始值，用于脏检测
-let DIRTY = {};          // key -> 新值
-
-const $ = (s, r=document) => r.querySelector(s);
-const csrf = {"Authorization": "Bearer " + TOKEN};
-
-async function api(path, opts={}){
-  opts.headers = Object.assign({}, (opts.headers||{}), csrf);
-  const r = await fetch(path, opts);
-  if (r.status === 401){ showToken(); throw new Error("unauthorized"); }
-  return r;
-}
-
-function showToken(){ $("#tokenModal").classList.remove("hidden"); $("#tokenInput").focus(); }
-
-function fieldControl(f, value){
-  const wrap = document.createElement("div");
-  wrap.className = "fctrl";
-  if (f.type === "bool"){
-    const id = "f_"+f.key.replace(/\./g,"_");
-    const lbl = document.createElement("label");
-    lbl.className = "chk";
-    const cb = document.createElement("input");
-    cb.type = "checkbox"; cb.id = id; cb.checked = !!value;
-    cb.onchange = () => markDirty(f.key, cb.checked);
-    const span = document.createElement("span"); span.textContent = f.label;
-    lbl.appendChild(cb); lbl.appendChild(span);
-    wrap.appendChild(lbl);
-  } else if (f.type === "enum"){
-    const sel = document.createElement("select");
-    (f.enum||[]).forEach(o => { const op=document.createElement("option"); op.value=o; op.textContent=o; sel.appendChild(op); });
-    sel.value = value ?? "";
-    sel.onchange = () => markDirty(f.key, sel.value);
-    wrap.appendChild(sel);
-  } else if (f.type === "int" || f.type === "float"){
-    const inp = document.createElement("input"); inp.type="number";
-    inp.value = value ?? "";
-    if (f.type==="int") inp.step="1"; else inp.step="any";
-    inp.oninput = () => markDirty(f.key, inp.value);
-    wrap.appendChild(inp);
-  } else if (f.type === "intlist" || f.type === "strlist"){
-    const inp = document.createElement("input"); inp.type="text";
-    inp.value = Array.isArray(value)? value.join(", ") : (value ?? "");
-    inp.placeholder = "逗号分隔，如 123456, 654321";
-    inp.oninput = () => markDirty(f.key, inp.value);
-    wrap.appendChild(inp);
-  } else {
-    if (f.multiline){
-      const ta = document.createElement("textarea");
-      ta.value = value ?? "";
-      ta.oninput = () => markDirty(f.key, ta.value);
-      wrap.appendChild(ta);
-    } else {
-      const inp = document.createElement("input"); inp.type="text";
-      inp.value = value ?? "";
-      inp.oninput = () => markDirty(f.key, inp.value);
-      wrap.appendChild(inp);
-    }
-  }
-  return wrap;
-}
-
-function markDirty(key, val){
-  const orig = ORIG[key];
-  // 规范化比较：数组/布尔/数字
-  let same = (orig === val);
-  if (!same && typeof orig === "boolean") same = (String(orig)===String(val));
-  if (same){ delete DIRTY[key]; }
-  else { DIRTY[key] = val; }
-  refreshDirty();
-}
-function refreshDirty(){
-  const n = Object.keys(DIRTY).length;
-  $("#dirtyCount").textContent = n? `● ${n} 项待保存` : "";
-  $("#saveBtn").disabled = n===0;
-  document.querySelectorAll(".field").forEach(fr=>{
-    const k = fr.dataset.key;
-    const ctrl = fr.querySelector(".fctrl");
-    if (!ctrl) return;
-    ctrl.classList.toggle("dirty", !!DIRTY[k]);
-  });
-}
-
-function renderForm(schema, values){
-  ORIG = Object.assign({}, values);
-  DIRTY = {};
-  const form = $("#form"); form.innerHTML = "";
-  schema.forEach(sec => {
-    const card = document.createElement("section");
-    card.className = "card";
-    const h = document.createElement("h2"); h.innerHTML = `<span class="dot"></span>${sec.title}`;
-    card.appendChild(h);
-    sec.fields.forEach(f => {
-      if (f.type === "map") return;   // 映射类配置走独立编辑页，不塞进大表单
-      const fr = document.createElement("div");
-      fr.className = "field"; fr.dataset.key = f.key;
-      const lab = document.createElement("div");
-      lab.className = "flabel";
-      lab.innerHTML = `${f.label}${f.hint? `<span class="hint">${f.hint}</span>`:""}`;
-      const ctrl = fieldControl(f, values[f.key]);
-      fr.appendChild(lab); fr.appendChild(ctrl);
-      card.appendChild(fr);
-    });
-    form.appendChild(card);
-  });
-  refreshDirty();
-}
-
-async function loadAll(){
-  try{
-    const [c, s] = await Promise.all([
-      api("/api/music-admin/config"),
-      api("/api/music-admin/status"),
-    ]);
-    const cj = await c.json();
-    const sj = await s.json();
-    renderForm(cj.schema, cj.values);
-    $("#stWindow").textContent = sj.window_label || "—";
-    $("#stCollect").textContent = sj.collecting ? "收集中" : "未在收集期";
-    $("#stCollect").style.color = sj.collecting ? "var(--ok)" : "var(--muted)";
-    $("#stOverride").textContent = sj.collect_override || "—";
-    $("#statusPill").textContent = sj.collecting ? "● 收集中" : "○ 空闲";
-    $("#statusPill").className = "status-pill" + (sj.collecting? " on":"");
-    $("#stRuns").textContent = sj.next_runs || "";
-    setMsg("");
-  }catch(e){ if (e.message!=="unauthorized") setMsg("加载失败: "+e.message, "bad"); }
-}
-
-function setMsg(t, kind=""){ const m=$("#saveMsg"); m.textContent=t; m.className="msg"+(kind?(" "+kind):""); }
-
-async function save(){
-  const payload = { values: DIRTY };
-  setMsg("保存中…");
-  try{
-    const r = await api("/api/music-admin/config", {method:"PATCH", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
-    const j = await r.json();
-    if (!j.ok){
-      const msgs = Object.entries(j.errors||{}).map(([k,v])=>`${k}: ${v}`).join("；");
-      setMsg("保存失败 — "+msgs, "bad");
-      return;
-    }
-    setMsg("已保存 ✓", "ok");
-    await loadAll();
-  }catch(e){ setMsg("保存失败: "+e.message, "bad"); }
-}
-
-// 主题
-const savedTheme = localStorage.getItem("mwc_theme");
-if (savedTheme) document.documentElement.setAttribute("data-theme", savedTheme);
-$("#themeBtn").onclick = () => {
-  const cur = document.documentElement.getAttribute("data-theme");
-  const next = cur==="dark"?"light":"dark";
-  document.documentElement.setAttribute("data-theme", next);
-  localStorage.setItem("mwc_theme", next);
-};
-$("#aliasBtn").onclick = () => window.open("/music-admin/aliases", "_blank");
-// 退出
-$("#logoutBtn").onclick = () => { localStorage.removeItem(LS_KEY); TOKEN=""; csrf.Authorization="Bearer "; showToken(); };
-// token 弹窗
-$("#tokenOk").onclick = () => {
-  const v = $("#tokenInput").value.trim();
-  if (!v) return;
-  TOKEN = v; localStorage.setItem(LS_KEY, v); csrf.Authorization = "Bearer "+v;
-  $("#tokenModal").classList.add("hidden");
-  loadAll();
-};
-$("#tokenInput").addEventListener("keydown", e=>{ if(e.key==="Enter") $("#tokenOk").click(); });
-// 保存/重置
-$("#saveBtn").onclick = save;
-$("#resetBtn").onclick = () => { DIRTY={}; document.querySelectorAll(".fctrl.dirty").forEach(c=>c.classList.remove("dirty")); refreshDirty(); setMsg("已重置本地改动"); };
-
-// ---- 预览与实时操作 ----
-let CUR_WIN = null;
-let OV = null;
-
-function esc(t){ return (t||"").replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
-
-async function loadOverview(){
-  try{
-    const url = "/api/music-admin/overview" + (CUR_WIN ? ("?window_key="+encodeURIComponent(CUR_WIN)) : "");
-    const r = await api(url);
-    OV = await r.json();
-    renderOverview(OV);
-  }catch(e){ if(e.message!=="unauthorized") console.warn("overview 加载失败", e); }
-}
-
-function renderOverview(o){
-  const sel = $("#winSel");
-  sel.innerHTML = "";
-  (o.windows||[]).forEach(w=>{
-    const op = document.createElement("option");
-    op.value = w.key; op.textContent = `${w.key} (${w.count}首)`;
-    sel.appendChild(op);
-  });
-  if (o.windows.length){
-    sel.value = o.selected_window || o.windows[0].key;
-    CUR_WIN = sel.value;
-  } else {
-    sel.innerHTML = `<option value="">（暂无收集记录）</option>`;
-  }
-  const nb = $("#neteaseBadge");
-  if (o.netease_logged_in){ nb.textContent="网易云：已登录 ✓"; nb.className="badge ok"; }
-  else { nb.textContent="网易云：未登录 ✗"; nb.className="badge bad"; }
-
-  const gl = $("#groupList");
-  gl.innerHTML = "";
-  const groups = o.groups || [];
-  if (!groups.length){ gl.innerHTML = `<div class="empty">该窗口下暂无收集记录。</div>`; return; }
-  groups.forEach(g=>{
-    const card = document.createElement("div");
-    card.className = "gcard";
-    const ops = `<div class="ops">
-      <button data-act="preview" data-gid="${g.group_id}">👁 预览</button>
-      <button data-act="archive" data-gid="${g.group_id}">📦 归档本群</button>
-      <button data-act="clear" data-gid="${g.group_id}">🗑 清空本窗口</button>
-      <button data-act="del" data-gid="${g.group_id}" class="danger">删除选中</button>
-    </div>`;
-    let rows = "";
-    if (!g.songs.length){
-      rows = `<tr><td colspan="6" class="empty">本群该窗口暂无歌曲</td></tr>`;
-    } else {
-      g.songs.forEach(s=>{
-        const mt = s.matched ? `<span class="mt">✓</span>` : `<span class="un">·</span>`;
-        rows += `<tr>
-          <td><input type="checkbox" class="songchk" data-gid="${g.group_id}" data-idx="${s.index}"></td>
-          <td class="idx">${s.index}</td>
-          <td><b>${esc(s.title)}</b><br><span style="color:var(--muted);font-size:12px">${esc(s.artists||"")}</span></td>
-          <td>${esc(s.sharer_name||"")}</td>
-          <td class="plat">${esc(s.platform_name||s.platform)}</td>
-          <td>${mt}</td>
-        </tr>`;
-      });
-    }
-    const tbl = `<table class="gtbl"><thead><tr>
-      <th></th><th>#</th><th>歌曲 / 歌手</th><th>分享者</th><th>平台</th><th>匹配</th>
-    </tr></thead><tbody>${rows}</tbody></table>`;
-    card.innerHTML = `<div class="grow"><div class="gtitle">群 ${g.group_id}<span class="cnt">${g.count} 首</span></div></div>${ops}${tbl}`;
-    gl.appendChild(card);
-  });
-  gl.querySelectorAll("button[data-act]").forEach(b=>{ b.onclick = ()=>groupAction(b.dataset.act, b.dataset.gid); });
-}
-
-async function groupAction(act, gid){
-  gid = parseInt(gid,10);
-  // 按钮简写 → 后端规范操作名
-  const ACT_MAP = {del:"delete", pname:"preview_name", pdesc:"preview_desc"};
-  act = ACT_MAP[act] || act;
-  const wk = (OV && OV.selected_window) || "";
-  let body = {action: act, group_id: gid, window_key: wk};
-  if (act === "del"){
-    const checked = document.querySelectorAll(`#groupList .songchk[data-gid="${gid}"]:checked`);
-    const indices = Array.from(checked).map(c=>parseInt(c.dataset.idx,10));
-    if (!indices.length){ flashOp("请先勾选要删除的歌曲"); return; }
-    body.indices = indices;
-  }
-  await doAction(body);
-}
-
-async function doAction(body){
-  try{
-    const r = await api("/api/music-admin/action", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
-    const j = await r.json();
-    if (body.action === "preview" && j.ok && j.data){
-      openPreview(j.data);           // 预览走侧边栏，不闪提示也不刷新列表
-      return;
-    }
-    flashOp(j.message || (j.ok?"操作成功":"操作失败"), j.ok?"ok":"bad");
-    if (j.ok) await loadOverview();
-  }catch(e){ flashOp("操作失败: "+e.message, "bad"); }
-}
-
-function openPreview(d){
-  $("#pvWin").textContent = "· " + (d.window_label || d.window_key || "");
-  const songs = d.songs || [];
-  let rows = "";
-  if (!songs.length){
-    rows = `<tr><td colspan="5" class="empty">该窗口暂无歌曲</td></tr>`;
-  } else {
-    songs.forEach(s=>{
-      const mt = s.matched ? `<span class="mt">✓</span>` : `<span class="un">·</span>`;
-      rows += `<tr>
-        <td class="idx">${s.index}</td>
-        <td><b>${esc(s.title)}</b><br><span style="color:var(--muted);font-size:12px">${esc(s.artists||"")}</span></td>
-        <td>${esc(s.sharer_name||"")}</td>
-        <td class="plat">${esc(s.platform_name||s.platform)}</td>
-        <td>${mt}</td>
-      </tr>`;
-    });
-  }
-  $("#pvBody").innerHTML = `
-    <div class="pv-sec">
-      <div class="pv-tag">歌单名</div>
-      <div class="pv-name">${esc(d.name || "(未生成)")}</div>
-    </div>
-    <div class="pv-sec">
-      <div class="pv-tag">简介</div>
-      <pre class="pv-desc${(d.description ? "" : " empty")}">${esc(d.description || "（简介为空）")}</pre>
-      <div class="pv-actions"><button id="pvCopyDesc">📋 复制简介</button></div>
-    </div>
-    <div class="pv-sec">
-      <div class="pv-tag">歌曲清单（${songs.length} 首）</div>
-      <table class="pv-tbl"><thead><tr>
-        <th>#</th><th>歌曲 / 歌手</th><th>分享者</th><th>平台</th><th>匹配</th>
-      </tr></thead><tbody>${rows}</tbody></table>
-    </div>`;
-  const copyBtn = $("#pvCopyDesc");
-  if (copyBtn){
-    copyBtn.onclick = () => {
-      navigator.clipboard.writeText(d.description || "").then(
-        () => flashOp("简介已复制", "ok"),
-        () => flashOp("复制失败，请手动选择文本", "bad"));
-    };
-  }
-  $("#pvDrawer").classList.add("open");
-  $("#pvDrawer").setAttribute("aria-hidden", "false");
-  $("#pvMask").classList.remove("hidden");
-}
-
-function closePreview(){
-  $("#pvDrawer").classList.remove("open");
-  $("#pvDrawer").setAttribute("aria-hidden", "true");
-  $("#pvMask").classList.add("hidden");
-}
-
-$("#pvClose").onclick = closePreview;
-$("#pvMask").onclick = closePreview;
-document.addEventListener("keydown", e=>{ if (e.key === "Escape") closePreview(); });
-
-function flashOp(msg, kind=""){
-  const m = $("#saveMsg");
-  m.textContent = msg;
-  m.className = "msg"+(kind?(" "+kind):"");
-}
-
-$("#winSel").onchange = (e)=>{ CUR_WIN = e.target.value; loadOverview(); };
-$("#ovRefresh").onclick = loadOverview;
-$("#opStart").onclick = ()=>doAction({action:"start"});
-$("#opStop").onclick = ()=>doAction({action:"stop"});
-$("#opAuto").onclick = ()=>doAction({action:"auto"});
-$("#opArchiveAll").onclick = ()=>doAction({action:"archive_all"});
-
-loadAll();
-loadOverview();
-</script>
-</body>
-</html>
-"""
-
-# -------------------------------------------------------------------- 昵称映射独立页
-
-ALIASES_HTML = r"""<!DOCTYPE html>
-<html lang="zh-CN" data-theme="dark">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>分享者昵称映射 · 群音乐收集</title>
-<style>
-:root{
-  --bg:#0b0f1a; --bg2:#111726; --card:rgba(255,255,255,.04); --card-bd:rgba(255,255,255,.08);
-  --txt:#e8edf6; --muted:#8b97ad; --accent:#6ea8fe; --accent2:#a78bfa; --ok:#34d399; --bad:#f87171;
-  --input:rgba(255,255,255,.06); --shadow:0 10px 30px rgba(0,0,0,.35);
-}
-[data-theme="light"]{
-  --bg:#f4f6fb; --bg2:#ffffff; --card:rgba(20,30,60,.03); --card-bd:rgba(20,30,60,.1);
-  --txt:#1a2233; --muted:#5b6678; --accent:#3b6fe0; --accent2:#7c5cf0; --ok:#0f9d63; --bad:#d8453b;
-  --input:rgba(20,30,60,.05); --shadow:0 10px 30px rgba(20,30,60,.1);
-}
-*{box-sizing:border-box}
-body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
-  background:radial-gradient(1200px 600px at 80% -10%,rgba(110,168,254,.12),transparent),var(--bg);
-  color:var(--txt);line-height:1.55;min-height:100vh}
-.wrap{max-width:860px;margin:0 auto;padding:28px 20px 120px}
-header{position:sticky;top:0;z-index:20;backdrop-filter:blur(14px);
-  background:linear-gradient(var(--bg),rgba(11,15,26,.6));padding:14px 0;margin-bottom:18px;
-  border-bottom:1px solid var(--card-bd)}
-[data-theme="light"] header{background:linear-gradient(#fff,rgba(255,255,255,.7))}
-.hrow{display:flex;align-items:center;gap:14px}
-.hrow h1{font-size:19px;margin:0;font-weight:700}
-.spacer{flex:1}
-button{font:inherit;cursor:pointer;border:1px solid var(--card-bd);background:var(--input);color:var(--txt);
-  border-radius:10px;padding:8px 14px;transition:.18s}
-button:hover{border-color:var(--accent);transform:translateY(-1px)}
-.btn-primary{background:linear-gradient(135deg,var(--accent),var(--accent2));border:none;color:#fff;font-weight:600}
-a.back{color:var(--accent);text-decoration:none;font-size:14px}
-.card{background:var(--card);border:1px solid var(--card-bd);border-radius:18px;padding:18px 20px;
-  margin-bottom:16px;box-shadow:var(--shadow);backdrop-filter:blur(8px)}
-.card h2{font-size:16px;margin:0 0 12px;display:flex;align-items:center;gap:8px}
-.card h2 .dot{width:8px;height:8px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2))}
-.hint{color:var(--muted);font-size:13px;margin:0 0 12px}
-textarea{width:100%;background:var(--input);border:1px solid var(--card-bd);color:var(--txt);
-  border-radius:10px;padding:11px;font:14px/1.6 ui-monospace,monospace;resize:vertical;min-height:180px}
-textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(110,168,254,.18)}
-.pv{list-style:none;margin:0;padding:0}
-.pv li{display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--input);
-  border:1px solid var(--card-bd);border-radius:10px;margin-bottom:8px;font-size:14px}
-.pv .from{font-weight:600}
-.pv .arrow{color:var(--accent2)}
-.pv .to{font-weight:700;color:var(--accent)}
-.pv .empty{color:var(--muted);background:none;border:none;padding:4px 0}
-.footbar{position:fixed;left:0;right:0;bottom:0;z-index:30;display:flex;align-items:center;gap:14px;
-  justify-content:center;padding:14px;background:linear-gradient(transparent,var(--bg) 40%)}
-.footbar .msg{font-size:13px;color:var(--muted)}
-.footbar .msg.ok{color:var(--ok)}
-.footbar .msg.bad{color:var(--bad)}
-.modal{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;
-  background:rgba(0,0,0,.55);backdrop-filter:blur(4px)}
-.modal .box{background:var(--bg2);border:1px solid var(--card-bd);border-radius:18px;padding:26px;width:min(420px,92vw);box-shadow:var(--shadow)}
-.modal h3{margin:0 0 6px}
-.modal p{color:var(--muted);font-size:13px;margin:0 0 14px}
-.modal input{width:100%;background:var(--input);border:1px solid var(--card-bd);color:var(--txt);border-radius:10px;padding:10px;font:inherit;margin-bottom:14px}
-.hidden{display:none!important}
-</style>
-</head>
-<body>
-<header><div class="wrap hrow" style="padding-bottom:0;margin-bottom:0">
-  <h1>✏ 分享者昵称映射</h1>
-  <div class="spacer"></div>
-  <button id="themeBtn" title="切换主题">🌓 主题</button>
-  <a class="back" href="/music-admin">← 返回面板</a>
-</div></header>
-
-<div class="wrap">
-  <div class="card">
-    <h2><span class="dot"></span>映射规则</h2>
-    <p class="hint">每行写一条 <code>原昵称=显示名</code> 或 <code>QQ号码=显示名</code>，例如 <code>菜老名=Jacksing</code> 或 <code>123456789=Jacksing</code>。
-    保存后，<b>网易云简介 / 群内文字榜单 / WebUI 表格</b> 里对应的分享者名字都会替换成显示名，
-    但数据库里仍保留原始昵称不变。昵称优先于 QQ 号码匹配；空行和以 <code>#</code> 开头的注释会被忽略。</p>
-    <textarea id="aliasInput" placeholder="菜老名=Jacksing&#10;123456789=Jacksing&#10;# 一行一条，原昵称或QQ号码=显示名"></textarea>
-  </div>
-
-  <div class="card">
-    <h2><span class="dot"></span>实时预览</h2>
-    <ul class="pv" id="previewList"><li class="empty">（暂无映射）</li></ul>
-  </div>
-</div>
-
-<div class="footbar">
-  <span class="msg" id="saveMsg"></span>
-  <button id="saveBtn" class="btn-primary">保存映射</button>
-</div>
-
-<div class="modal hidden" id="tokenModal">
-  <div class="box">
-    <h3>需要访问令牌</h3>
-    <p>与主配置面板共用同一令牌（服务器 .env 里的 <code>MUSIC_WEBUI_TOKEN</code>，未设置时打印在启动日志）。</p>
-    <input id="tokenInput" placeholder="粘贴令牌…" autocomplete="off">
-    <button class="btn-primary" id="tokenOk" style="width:100%">进入</button>
-  </div>
-</div>
-
-<script>
-const LS_KEY = "mwc_token";
-let TOKEN = localStorage.getItem(LS_KEY) || "";
-const $ = (s, r=document) => r.querySelector(s);
-const csrf = {"Authorization": "Bearer " + TOKEN};
-
-async function api(path, opts={}){
-  opts.headers = Object.assign({}, (opts.headers||{}), csrf);
-  const r = await fetch(path, opts);
-  if (r.status === 401){ showToken(); throw new Error("unauthorized"); }
-  return r;
-}
-function showToken(){ $("#tokenModal").classList.remove("hidden"); $("#tokenInput").focus(); }
-function esc(t){ return (t==null?"":String(t)).replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
-
-function dictToLines(m){
-  return Object.keys(m||{}).map(k => k + "=" + m[k]).join("\n");
-}
-function linesToDict(text){
-  const out = {};
-  (text||"").split(/\r?\n/).forEach(line=>{
-    line = line.trim();
-    if (!line || line.startsWith("#")) return;
-    const i = line.indexOf("=");
-    if (i < 0) return;
-    const k = line.slice(0, i).trim(), v = line.slice(i+1).trim();
-    if (k) out[k] = v;
-  });
-  return out;
-}
-function renderPreview(m){
-  const ul = $("#previewList");
-  const keys = Object.keys(m||{});
-  if (!keys.length){ ul.innerHTML = `<li class="empty">（暂无映射）</li>`; return; }
-  ul.innerHTML = keys.map(k =>
-    `<li><span class="from">${esc(k)}</span><span class="arrow">→</span><span class="to">${esc(m[k])}</span></li>`
-  ).join("");
-}
-
-function setMsg(t, kind=""){ const m=$("#saveMsg"); m.textContent=t; m.className="msg"+(kind?(" "+kind):""); }
-
-async function load(){
-  try{
-    const r = await api("/api/music-admin/config");
-    const cj = await r.json();
-    const m = (cj.values && cj.values["playlist.sharer_aliases"]) || {};
-    $("#aliasInput").value = dictToLines(m);
-    renderPreview(m);
-    setMsg("");
-  }catch(e){ if (e.message!=="unauthorized") setMsg("加载失败: "+e.message, "bad"); }
-}
-
-async function save(){
-  const m = linesToDict($("#aliasInput").value);
-  setMsg("保存中…");
-  try{
-    const r = await api("/api/music-admin/config", {method:"PATCH",
-      headers:{"Content-Type":"application/json"}, body: JSON.stringify({values:{"playlist.sharer_aliases": m}})});
-    const j = await r.json();
-    if (!j.ok){
-      const msgs = Object.entries(j.errors||{}).map(([k,v])=>`${k}: ${v}`).join("；");
-      setMsg("保存失败 — "+msgs, "bad");
-      return;
-    }
-    setMsg("已保存 ✓ 共 "+Object.keys(m).length+" 条映射", "ok");
-    renderPreview(m);
-  }catch(e){ setMsg("保存失败: "+e.message, "bad"); }
-}
-
-const savedTheme = localStorage.getItem("mwc_theme");
-if (savedTheme) document.documentElement.setAttribute("data-theme", savedTheme);
-$("#themeBtn").onclick = () => {
-  const cur = document.documentElement.getAttribute("data-theme");
-  const next = cur==="dark"?"light":"dark";
-  document.documentElement.setAttribute("data-theme", next);
-  localStorage.setItem("mwc_theme", next);
-};
-$("#aliasInput").addEventListener("input", () => renderPreview(linesToDict($("#aliasInput").value)));
-$("#saveBtn").onclick = save;
-$("#tokenOk").onclick = () => {
-  const v = $("#tokenInput").value.trim();
-  if (!v) return;
-  TOKEN = v; localStorage.setItem(LS_KEY, v); csrf.Authorization = "Bearer "+v;
-  $("#tokenModal").classList.add("hidden");
-  load();
-};
-$("#tokenInput").addEventListener("keydown", e=>{ if(e.key==="Enter") $("#tokenOk").click(); });
-
-load();
-</script>
-</body>
-</html>
-"""
+from .webui_frontend import DASHBOARD_HTML, ALIASES_HTML

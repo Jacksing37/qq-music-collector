@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -436,6 +437,248 @@ class CollectorService:
             playlist_id, desc, name=name, group_id=group_id,
             retries=self.config.playlist.desc_retry,
         )
+
+    # ------------------------------------------------------------ 网页端手动收集管理
+
+    _NETEASE_RE = re.compile(
+        r"music\.163\.com/(?:#/)?(?:m/)?song/?\?(?:[^#\s]*&)?id=(\d+)", re.I
+    )
+    _NETEASE_RE2 = re.compile(
+        r"music\.163\.com/(?:#/)?(?:m/)?song/(\d+)", re.I
+    )
+
+    @staticmethod
+    def _extract_netease_id(text: str) -> Optional[str]:
+        """从一段文本（链接或纯数字）里提取网易云歌曲 id。"""
+        if not text:
+            return None
+        m = service._NETEASE_RE.search(text) or service._NETEASE_RE2.search(text)
+        if m:
+            return m.group(1)
+        s = text.strip()
+        if s.isdigit():
+            return s
+        return None
+
+    async def _expand_short_link(self, url: str) -> Optional[str]:
+        """展开 163cn.tv 这类短链，拿到最终带 song id 的 URL。"""
+        try:
+            import httpx
+        except Exception:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                resp = await client.get(url.strip())
+                return str(resp.url)
+        except Exception:
+            return None
+
+    async def manual_add_song(
+        self, group_id: int, window_key: str, payload: dict
+    ) -> dict:
+        """网页端手动添加一首歌到指定群/窗口。
+
+        ``payload`` 含 platform / song_id / title / artists / sharer_name /
+        sharer_id / url。网易云来源且给了 song_id 但没给歌名时，自动拉详情补全。
+        """
+        platform = str(payload.get("platform") or "netease")
+        song_id = str(payload.get("song_id") or "").strip()
+        title = (payload.get("title") or "").strip()
+        artists = (payload.get("artists") or "").strip()
+        sharer_name = (payload.get("sharer_name") or "").strip() or "手动添加"
+        try:
+            sharer_id = int(payload.get("sharer_id") or 0)
+        except (TypeError, ValueError):
+            sharer_id = 0
+        url = (payload.get("url") or "").strip()
+
+        if platform == "netease" and song_id and not title:
+            try:
+                details = await self.netease.song_detail([song_id])
+            except Exception:
+                details = []
+            if details:
+                d = details[0]
+                title = d.get("name") or title
+                arts = d.get("artists") or []
+                artists = " / ".join(a.get("name", "") for a in arts) or artists
+                url = url or (d.get("url") or "")
+
+        if not song_id:
+            return {"ok": False, "message": "缺少歌曲 id（网易云为数字 id）"}
+        song = Song(
+            platform=platform,
+            song_id=song_id,
+            title=title or "未命名歌曲",
+            artists=artists,
+            sharer_name=sharer_name,
+            sharer_id=sharer_id,
+            url=url,
+            created_at=time.time(),
+        )
+        inserted, stored = await self.store.add_song(group_id, window_key, song)
+        return {
+            "ok": True,
+            "inserted": inserted,
+            "song": {
+                "title": stored.title,
+                "artists": stored.artists,
+                "netease_id": stored.netease_id,
+                "matched": stored.matched,
+            },
+            "message": "已添加" if inserted else "该歌曲已存在（未重复添加）",
+        }
+
+    async def edit_song(
+        self, group_id: int, window_key: str, index: int, payload: dict
+    ) -> dict:
+        """网页端编辑一条已收集歌曲的歌名 / 歌手 / 分享者。"""
+        song = await self.store.get_song_by_index(group_id, window_key, index)
+        if song is None or song.row_id is None:
+            return {"ok": False, "message": "序号无效或歌曲不存在"}
+        upd: dict = {}
+        if payload.get("title") is not None:
+            upd["title"] = str(payload["title"]).strip()
+        if payload.get("artists") is not None:
+            upd["artists"] = str(payload["artists"]).strip()
+        if payload.get("sharer_name") is not None:
+            upd["sharer_name"] = str(payload["sharer_name"]).strip()
+        if payload.get("sharer_id") is not None:
+            try:
+                upd["sharer_id"] = int(payload["sharer_id"])
+            except (TypeError, ValueError):
+                pass
+        if not upd:
+            return {"ok": False, "message": "没有可修改的字段"}
+        await self.store.update_song_meta(song.row_id, **upd)
+        return {"ok": True, "message": "已保存修改"}
+
+    async def match_song(
+        self, group_id: int, window_key: str, index: int, netease_link: str
+    ) -> dict:
+        """网页端手动匹配：把一条已收集歌曲绑定到粘贴的网易云链接（正确的歌）。
+
+        解析链接 → 取 song_id → 拉详情补全标题/歌手 → 写 netease_id + matched。
+        """
+        song = await self.store.get_song_by_index(group_id, window_key, index)
+        if song is None or song.row_id is None:
+            return {"ok": False, "message": "序号无效或歌曲不存在"}
+
+        sid = self._extract_netease_id(netease_link)
+        if not sid and "http" in (netease_link or ""):
+            expanded = await self._expand_short_link(netease_link)
+            if expanded:
+                sid = self._extract_netease_id(expanded)
+        if not sid:
+            return {"ok": False, "message": "无法从链接解析出网易云歌曲 id"}
+
+        title, artists, album = song.title, song.artists, song.album
+        try:
+            details = await self.netease.song_detail([sid])
+        except Exception:
+            details = []
+        if details:
+            d = details[0]
+            if d.get("name"):
+                title = d["name"]
+            arts = d.get("artists") or []
+            if arts:
+                artists = " / ".join(a.get("name", "") for a in arts)
+            album = (d.get("album") or {}).get("name", "") or album
+
+        await self.store.update_song_meta(
+            song.row_id,
+            netease_id=sid,
+            matched=1,
+            title=title,
+            artists=artists,
+            album=album,
+        )
+        return {
+            "ok": True,
+            "message": f"已绑定网易云歌曲 {sid}",
+            "song": {"title": title, "artists": artists, "netease_id": sid, "matched": True},
+        }
+
+    async def reorder_songs(
+        self, group_id: int, window_key: str, ordered_indices: list[int]
+    ) -> dict:
+        """网页端排序：``ordered_indices`` 是当前显示顺序（1 基）重新排列后的完整列表。"""
+        songs = await self.store.list_songs(group_id, window_key)
+        by_index = {i + 1: s.row_id for i, s in enumerate(songs) if s.row_id is not None}
+        ordered_row_ids = [by_index[i] for i in ordered_indices if i in by_index]
+        if not ordered_row_ids:
+            return {"ok": False, "message": "排序列表为空或无效"}
+        n = await self.store.set_song_order(group_id, window_key, ordered_row_ids)
+        return {"ok": True, "count": n, "message": f"已重排 {n} 首"}
+
+    async def sync_playlist(self, group_id: int, window: Optional[WindowState] = None) -> dict:
+        """全量同步当前窗口到歌单：增 + 删 + 简介。
+
+        - 尚无歌单：先建歌单并加入全部（不触发「归档后清空」）。
+        - 已有歌单：计算窗口有/歌单无(to_add) 与 歌单有/窗口无(to_remove) 做对账，
+          调 add/remove，重写 added_ids，再重写简介。
+        """
+        state = window or self.current_window()
+        cfg = self.config.playlist
+        songs = await self.store.list_songs(group_id, state.key)
+        arch = await self.store.get_archive(group_id, state.key)
+
+        if not arch or not str(arch.get("playlist_id") or ""):
+            report = await self.archiver.archive(
+                group_id, state.key, state.label, songs, cfg,
+                start_at=state.start_at,
+                end_at=state.end_at or state.archive_at,
+            )
+            if not report.ok:
+                return {"ok": False, "message": report.message or "建歌单失败"}
+            if report.created_new:
+                if cfg.pending_name:
+                    config_manager.update("playlist.pending_name", "")
+                if cfg.seq_auto_increment:
+                    config_manager.update("playlist.seq", cfg.seq + 1)
+            arch = await self.store.get_archive(group_id, state.key)
+            if not arch:
+                return {"ok": False, "message": "建歌单后未读到归档记录"}
+
+        playlist_id = int(arch["playlist_id"])
+        current_ids = [int(s.netease_id) for s in songs if s.netease_id]
+        added_ids = set(int(x) for x in (arch.get("added_ids") or set()) if str(x).isdigit())
+        to_add = [i for i in current_ids if i not in added_ids]
+        to_remove = [i for i in added_ids if i not in set(current_ids)]
+
+        added_n = removed_n = 0
+        try:
+            if to_add:
+                await self.netease.add_tracks(playlist_id, [str(i) for i in to_add])
+                added_n = len(to_add)
+            if to_remove:
+                await self.netease.remove_tracks(playlist_id, [str(i) for i in to_remove])
+                removed_n = len(to_remove)
+        except Exception as exc:
+            return {"ok": False, "message": f"歌单增删失败: {exc}"}
+
+        new_added = (added_ids | set(to_add)) - set(to_remove)
+        await self.store.record_archive(
+            group_id, state.key, str(playlist_id), arch.get("playlist_url"),
+            total=len(songs), added=len(new_added), failed=0,
+            added_ids=[str(i) for i in new_added],
+        )
+
+        desc = await self.rebuild_description(group_id, state)
+        desc_ok, desc_note = await self.push_description(
+            playlist_id, desc, name="", group_id=group_id
+        )
+        return {
+            "ok": True,
+            "added": added_n,
+            "removed": removed_n,
+            "desc_ok": desc_ok,
+            "playlist_id": playlist_id,
+            "playlist_url": self.netease.playlist_url(playlist_id),
+            "message": f"已同步：新增 {added_n} / 移除 {removed_n} 首"
+            + ("" if desc_ok else "（简介写入待补写）"),
+        }
 
     # ------------------------------------------------------------ 清理收集数据
 

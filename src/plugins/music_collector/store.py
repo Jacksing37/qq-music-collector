@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS songs (
     created_at  REAL    NOT NULL,
     netease_id  TEXT,
     matched     INTEGER NOT NULL DEFAULT 0,
+    -- 显式排序权重：拖拽/上下移动时改写，便于网页端手动调整榜单顺序
+    -- （默认 0，按 id 升序回退到分享先后顺序）
+    sort_order  INTEGER NOT NULL DEFAULT 0,
     UNIQUE(group_id, window_key, platform, song_id)
 );
 CREATE INDEX IF NOT EXISTS idx_songs_window ON songs(group_id, window_key, id);
@@ -120,6 +123,13 @@ class Store:
             if "snapshot" not in pcols:
                 await db.execute(
                     "ALTER TABLE pending_desc ADD COLUMN snapshot TEXT NOT NULL DEFAULT '{}'"
+                )
+            # 老库迁移：songs 表补 sort_order 列（网页端手动排序用）
+            async with db.execute("PRAGMA table_info(songs)") as cur:
+                scols = [row[1] for row in await cur.fetchall()]
+            if "sort_order" not in scols:
+                await db.execute(
+                    "ALTER TABLE songs ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"
                 )
             await db.commit()
 
@@ -309,11 +319,67 @@ class Store:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                f"SELECT {_COLUMNS} FROM songs WHERE group_id=? AND window_key=? ORDER BY id ASC",
+                f"SELECT {_COLUMNS} FROM songs "
+                "WHERE group_id=? AND window_key=? ORDER BY sort_order ASC, id ASC",
                 (group_id, window_key),
             ) as cur:
                 rows = await cur.fetchall()
         return [_row_to_song(r) for r in rows]
+
+    async def get_song_by_index(self, group_id: int, window_key: str, index: int) -> Optional[Song]:
+        """按列表序号（从 1 开始）取一条记录，用于编辑 / 手动匹配定位。"""
+        songs = await self.list_songs(group_id, window_key)
+        if not (1 <= index <= len(songs)):
+            return None
+        return songs[index - 1]
+
+    # 允许通过 update_song_meta 修改的字段白名单
+    _EDITABLE = (
+        "title", "artists", "album", "sharer_name", "sharer_id",
+        "netease_id", "matched",
+    )
+
+    async def update_song_meta(self, row_id: int, **fields: object) -> bool:
+        """按 row_id 更新歌曲的可编辑字段（歌名 / 歌手 / 分享者 / 匹配信息等）。
+
+        只接受 ``_EDITABLE`` 里的键，其余忽略，避免误改主键列。返回是否真的改了。
+        """
+        sets: list[str] = []
+        values: list[object] = []
+        for key in self._EDITABLE:
+            if key in fields:
+                val = fields[key]
+                if key == "matched":
+                    val = 1 if val else 0
+                sets.append(f"{key}=?")
+                values.append(val)
+        if not sets:
+            return False
+        values.append(row_id)
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                f"UPDATE songs SET {', '.join(sets)} WHERE id=?", tuple(values)
+            )
+            await db.commit()
+        return True
+
+    async def set_song_order(
+        self, group_id: int, window_key: str, ordered_row_ids: Sequence[int]
+    ) -> int:
+        """把本窗口歌曲重排为 ``ordered_row_ids`` 指定的顺序（顺序即榜单顺序）。
+
+        通过重写每行的 sort_order 实现，避免改动自增主键。返回受影响行数。
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            changed = 0
+            for idx, rid in enumerate(ordered_row_ids):
+                cur = await db.execute(
+                    "UPDATE songs SET sort_order=? WHERE id=? AND group_id=? AND window_key=?",
+                    (idx, rid, group_id, window_key),
+                )
+                changed += cur.rowcount
+            await db.commit()
+        return changed
 
     async def count(self, group_id: int, window_key: str) -> int:
         async with aiosqlite.connect(self.db_path) as db:

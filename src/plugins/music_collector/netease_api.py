@@ -432,6 +432,39 @@ class NeteaseAPI:
             last_error = f"{label}: code={code} {data.get('message') or data.get('msg') or ''}"
         raise NeteaseError(-1, f"加歌失败 -> {last_error}")
 
+    async def remove_tracks(self, playlist_id: int, track_ids: list[str]) -> dict[str, Any]:
+        """从歌单移除歌曲（``op=del``）。用于「同步到歌单」时删掉已不在窗口里的歌。
+
+        与 ``add_tracks`` 共用同一套通道降级。返回网易云原始响应；业务层据此判断成功。
+        """
+        if not track_ids:
+            return {"code": 200}
+        if not self.logged_in:
+            raise NeteaseError(-2, "网易云未登录，请先执行 /music cookie <MUSIC_U>")
+        payload = {
+            "op": "del",
+            "pid": str(playlist_id),
+            "trackIds": json.dumps([str(t) for t in track_ids], separators=(",", ":")),
+            "imme": "true",
+        }
+        last_error = "所有通道都失败"
+        for label, call in (
+            ("linuxapi", lambda: self._linux_post("/playlist/manipulate/tracks", payload)),
+            ("api", lambda: self._api_post("/playlist/manipulate/tracks", payload)),
+            ("weapi", lambda: self._post("/playlist/manipulate/tracks", payload)),
+        ):
+            try:
+                data = await call()
+            except Exception as exc:
+                last_error = f"{label}: {exc}"
+                continue
+            code = data.get("code")
+            # 502 = 歌单内歌曲重复 / 已不存在，视为成功
+            if code in (200, 502):
+                return data
+            last_error = f"{label}: code={code} {data.get('message') or data.get('msg') or ''}"
+        raise NeteaseError(-1, f"删歌失败 -> {last_error}")
+
     async def playlist_detail(self, playlist_id: int) -> dict[str, Any]:
         """读取歌单详情（用于写后校验）。"""
         for path, params in (

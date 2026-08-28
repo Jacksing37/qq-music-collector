@@ -50,6 +50,16 @@ def test_endpoints():
         assert s.status_code == 200
         assert "window_label" in s.json()
 
+        # 管理员接口（只读 GET，不改动 .env）
+        a = client.get("/api/music-admin/admin", headers=H)
+        assert a.status_code == 200
+        assert "superusers" in a.json() and "note" in a.json()
+
+        # 网易云账号接口（只读 GET）
+        ac = client.get("/api/music-admin/account", headers=H)
+        assert ac.status_code == 200
+        assert "logged_in" in ac.json()
+
         print("webui e2e OK")
 
 
