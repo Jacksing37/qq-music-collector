@@ -121,6 +121,10 @@ class PlaylistConfig(BaseModel):
     #: 例：{"菜老名": "Jacksing"} —— 网易云简介 / 群内文字榜单 / WebUI 表格里
     #: 「菜老名」都会显示成「Jacksing」，但数据库里保留原始昵称不变。
     sharer_aliases: dict[str, str] = Field(default_factory=dict)
+    #: 分享即归档：每收到一批新歌分享，立即把新歌追加进当前窗口歌单
+    #: （自动复用已建歌单，不新建、不消耗期号）。默认关闭；开启后静默执行，
+    #: 结果只在日志记录，不额外刷屏。
+    auto_archive_on_share: bool = False
 
 
 #: 自我介绍默认文案。占位符见 naming.py，另有 {nick} {count} {state} {playlist}

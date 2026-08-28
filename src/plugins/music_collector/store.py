@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Optional, Sequence
@@ -46,6 +47,8 @@ CREATE TABLE IF NOT EXISTS archives (
     added        INTEGER NOT NULL DEFAULT 0,
     failed       INTEGER NOT NULL DEFAULT 0,
     created_at   REAL    NOT NULL,
+    -- 该窗口歌单已收录的网易云歌曲 id（JSON 数组），用于同窗口再次归档时增量追加去重
+    added_ids    TEXT    NOT NULL DEFAULT '[]',
     UNIQUE(group_id, window_key)
 );
 
@@ -95,6 +98,13 @@ class Store:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.db_path) as db:
             await db.executescript(_SCHEMA)
+            # 老库迁移：archives 表补 added_ids 列（同窗口再次归档增量去重用）
+            async with db.execute("PRAGMA table_info(archives)") as cur:
+                cols = [row[1] for row in await cur.fetchall()]
+            if "added_ids" not in cols:
+                await db.execute(
+                    "ALTER TABLE archives ADD COLUMN added_ids TEXT NOT NULL DEFAULT '[]'"
+                )
             await db.commit()
 
     # ------------------------------------------------------------ 写入
@@ -149,22 +159,37 @@ class Store:
         total: int,
         added: int,
         failed: int,
+        added_ids: Optional[Sequence[str]] = None,
     ) -> None:
+        """记录 / 更新归档信息。
+
+        ``added_ids`` 是该窗口歌单当前已收录的网易云 id 列表（用于同窗口
+        再次归档时的增量去重）；不传时保持库中已有值不变。
+        """
+        prev = await self.get_archive(group_id, window_key)
+        merged = added_ids
+        if merged is None:
+            merged = json.loads((prev or {}).get("added_ids") or "[]")
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """
                 INSERT INTO archives
-                    (group_id, window_key, playlist_id, playlist_url, total, added, failed, created_at)
-                VALUES (?,?,?,?,?,?,?,?)
+                    (group_id, window_key, playlist_id, playlist_url, total, added,
+                     failed, created_at, added_ids)
+                VALUES (?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(group_id, window_key) DO UPDATE SET
                     playlist_id=excluded.playlist_id,
                     playlist_url=excluded.playlist_url,
                     total=excluded.total,
                     added=excluded.added,
                     failed=excluded.failed,
-                    created_at=excluded.created_at
+                    created_at=excluded.created_at,
+                    added_ids=excluded.added_ids
                 """,
-                (group_id, window_key, playlist_id, playlist_url, total, added, failed, time.time()),
+                (
+                    group_id, window_key, playlist_id, playlist_url, total, added,
+                    failed, time.time(), json.dumps(merged, ensure_ascii=False),
+                ),
             )
             await db.commit()
 
@@ -273,7 +298,14 @@ class Store:
                 (group_id, window_key),
             ) as cur:
                 row = await cur.fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        result = dict(row)
+        try:
+            result["added_ids"] = set(json.loads(result.get("added_ids") or "[]"))
+        except (TypeError, json.JSONDecodeError):
+            result["added_ids"] = set()
+        return result
 
     async def remove_song(self, group_id: int, window_key: str, index: int) -> Optional[Song]:
         """按列表序号（从 1 开始）删除一条记录，用于管理员纠错。"""

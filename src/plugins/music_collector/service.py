@@ -149,7 +149,39 @@ class CollectorService:
                 result.index_of[id(song)] = await self.store.position_of(
                     group_id, state.key, song.row_id
                 )
+
+        # 分享即归档：本批新收录的歌立即写进当前窗口歌单（静默执行，不刷屏）
+        if result.accepted and self.config.playlist.auto_archive_on_share:
+            await self.auto_archive_songs(group_id, state, result.accepted)
         return result
+
+    async def auto_archive_songs(
+        self, group_id: int, state: WindowState, songs: Sequence[Song]
+    ) -> None:
+        """把一批新分享的歌增量归档到当前窗口歌单。
+
+        复用同一窗口已建的歌单（不会新建、不消耗期号）；失败只记日志，
+        不打断分享回复流程。
+        """
+        try:
+            cfg = self.config.playlist
+            all_songs = await self.store.list_songs(group_id, state.key)
+            report = await self.archiver.archive(
+                group_id, state.key, state.label, songs, cfg,
+                start_at=state.start_at,
+                end_at=state.end_at or state.archive_at,
+                desc_songs=all_songs,
+            )
+            if report.ok:
+                logger.info(
+                    f"[music] 分享即归档 group={group_id} window={state.key} "
+                    f"{'复用歌单追加' if not report.created_new else '新建歌单'} "
+                    f"{report.added} 首（总收录 {len(all_songs)} 首）"
+                )
+            else:
+                logger.warning(f"[music] 分享即归档失败 group={group_id}: {report.message}")
+        except Exception as exc:
+            logger.warning(f"[music] 分享即归档异常 group={group_id}: {type(exc).__name__} {exc}")
 
     # ------------------------------------------------------------ 榜单
 
@@ -211,11 +243,13 @@ class CollectorService:
             name_override=name_override,
         )
         if report.ok:
-            # 一次性歌单名用完即弃；期号自增
-            if cfg.pending_name and not name_override:
-                config_manager.update("playlist.pending_name", "")
-            if cfg.seq_auto_increment:
-                config_manager.update("playlist.seq", cfg.seq + 1)
+            # 只有「新建歌单」才消耗一次性歌单名 / 自增期号；
+            # 复用已有歌单追加时不改动命名与期号。
+            if report.created_new:
+                if cfg.pending_name and not name_override:
+                    config_manager.update("playlist.pending_name", "")
+                if cfg.seq_auto_increment:
+                    config_manager.update("playlist.seq", cfg.seq + 1)
             # 归档（结束收集）后自动清空本期已收集歌曲
             if self.config.clear.after_archive:
                 removed = await self.store.delete_window(group_id, state.key)

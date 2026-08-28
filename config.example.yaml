@@ -86,6 +86,9 @@ playlist:
   # 例：{菜老名: Jacksing, 123456789: Jacksing}
   # 设置后网易云简介 / 群内文字榜单 / WebUI 表格里的「菜老名」都会显示成「Jacksing」
   sharer_aliases: {}
+  # 分享即归档：每收到一批新歌分享，立即把新歌追加进当前窗口的歌单
+  #（自动复用已建歌单，不新建、不消耗期号）。默认关闭；开启后静默执行，结果只记日志
+  auto_archive_on_share: false
 
 # 已收集歌曲的清理（区别于 cache：cache 清理的是榜单图片缓存）
 clear:

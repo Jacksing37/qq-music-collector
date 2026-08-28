@@ -139,6 +139,8 @@ class ArchiveReport:
     total: int = 0
     added: int = 0
     unmatched: list[Song] = field(default_factory=list)
+    #: 本次是否新建了歌单；False 表示复用了当前窗口已存在的歌单追加
+    created_new: bool = True
     #: 简介是否成功写入网易云
     desc_ok: bool = False
     #: 简介写入失败原因（成功时是命中的通道名）
@@ -149,8 +151,13 @@ class ArchiveReport:
     def summary(self, aliases: Optional[dict[str, str]] = None) -> str:
         if not self.ok:
             return f"归档失败：{self.message}"
+        if self.added <= 0 and not self.created_new:
+            return (
+                f"当前窗口的歌单已是最新（{self.playlist_name}）\n"
+                f"链接: {self.playlist_url}\n没有需要追加的新歌。"
+            )
         lines = [
-            f"歌单已生成：{self.playlist_name}" if self.playlist_name else "歌单已生成",
+            f"歌单{'已更新' if not self.created_new else '已生成'}：{self.playlist_name}",
             f"链接: {self.playlist_url}",
             f"收录 {self.added}/{self.total} 首",
         ]
@@ -179,6 +186,8 @@ class Archiver:
     def __init__(self, api: NeteaseAPI, store: Store) -> None:
         self.api = api
         self.store = store
+        #: 串行化归档写歌单，防止自动归档 / 手动 / 定时同时触发时网易云频控或顺序错乱
+        self._lock = asyncio.Lock()
 
     async def write_description(
         self,
@@ -247,6 +256,34 @@ class Archiver:
         start_at: Optional[datetime] = None,
         end_at: Optional[datetime] = None,
         name_override: str = "",
+        desc_songs: Optional[Sequence[Song]] = None,
+    ) -> ArchiveReport:
+        """把一批歌曲写进当前窗口的歌单。
+
+        - 窗口已归档过（archives 表有 playlist_id）时**复用**原歌单，只追加
+          还没收录过的歌，不新建、不消耗 pending_name / 期号。
+        - 简介始终按 ``desc_songs``（缺省为本次 songs 全量）重写，保证
+          「谁分享了什么」清单与歌单内容一致。
+        """
+        async with self._lock:
+            return await self._archive_locked(
+                group_id, window_key, window_label, songs, cfg,
+                start_at=start_at, end_at=end_at, name_override=name_override,
+                desc_songs=desc_songs,
+            )
+
+    async def _archive_locked(
+        self,
+        group_id: int,
+        window_key: str,
+        window_label: str,
+        songs: Sequence[Song],
+        cfg: PlaylistConfig,
+        *,
+        start_at: Optional[datetime] = None,
+        end_at: Optional[datetime] = None,
+        name_override: str = "",
+        desc_songs: Optional[Sequence[Song]] = None,
     ) -> ArchiveReport:
         report = ArchiveReport(total=len(songs))
         if not songs:
@@ -255,6 +292,15 @@ class Archiver:
         if not self.api.logged_in:
             report.message = "网易云未登录，请管理员先私聊机器人执行 /music cookie <MUSIC_U>"
             return report
+
+        # 0. 查当前窗口是否已归档过：有则复用歌单，只追加新歌
+        existing = await self.store.get_archive(group_id, window_key)
+        reused_playlist_id: Optional[int] = None
+        added_set: set[str] = set()
+        if existing and str(existing.get("playlist_id") or "").isdigit():
+            reused_playlist_id = int(existing["playlist_id"])
+            added_set = set(existing.get("added_ids") or set())
+            report.created_new = False
 
         # 1. 逐首匹配 id
         matched_pairs: list[tuple[str, Song]] = []
@@ -271,47 +317,72 @@ class Archiver:
 
         # 保持先后顺序的同时去重
         ordered_unique: list[str] = []
-        matched_songs: list[Song] = []
         seen: set[str] = set()
         for tid, song in matched_pairs:
             if tid not in seen:
                 seen.add(tid)
                 ordered_unique.append(tid)
-                matched_songs.append(song)
 
         if not ordered_unique:
             report.message = "没有任何歌曲能匹配到网易云曲库"
             return report
 
-        # 2. 建歌单
-        context = build_context(
-            group_id=group_id,
-            window_label=window_label,
-            start_at=start_at,
-            end_at=end_at,
-            count=len(ordered_unique),
-            total=len(songs),
-            seq=cfg.seq,
-            songs=songs,
-            emoji_style=cfg.emoji_style,
-            aliases=cfg.sharer_aliases,
-        )
-        name = (name_override or cfg.pending_name or cfg.name_template).strip()
-        name = render_template(name, context) or f"群歌单 {window_label}"
-        report.playlist_name = name
-        try:
-            playlist_id = await self.api.create_playlist(name, cfg.privacy)
-        except NeteaseError as exc:
-            report.message = exc.message
-            return report
-        except Exception as exc:
-            report.message = f"创建歌单异常: {exc}"
+        # 2. 与歌单内已有歌曲求差集：只处理真正的新歌
+        new_ids = [tid for tid in ordered_unique if tid not in added_set]
+
+        # 新建歌单（仅首次归档时）
+        if reused_playlist_id is None:
+            context = build_context(
+                group_id=group_id,
+                window_label=window_label,
+                start_at=start_at,
+                end_at=end_at,
+                count=len(ordered_unique),
+                total=len(songs),
+                seq=cfg.seq,
+                songs=songs,
+                emoji_style=cfg.emoji_style,
+                aliases=cfg.sharer_aliases,
+            )
+            name = (name_override or cfg.pending_name or cfg.name_template).strip()
+            name = render_template(name, context) or f"群歌单 {window_label}"
+            report.playlist_name = name
+            try:
+                playlist_id = await self.api.create_playlist(name, cfg.privacy)
+            except NeteaseError as exc:
+                report.message = exc.message
+                return report
+            except Exception as exc:
+                report.message = f"创建歌单异常: {exc}"
+                return report
+            report.created_new = True
+        else:
+            playlist_id = reused_playlist_id
+            # 复用场景不重新生成歌单名；archives 表不存名字，用窗口标签兜底展示
+            report.playlist_name = f"群歌单 {window_label}"
+
+        if not new_ids:
+            # 没有新歌可追加：简介仍按当前窗口全量重写一次（保持清单最新）
+            report.playlist_url = self.api.playlist_url(playlist_id)
+            report.added = 0
+            await self._write_description_full(
+                report, group_id, window_key, window_label, songs,
+                cfg, playlist_id, start_at=start_at, end_at=end_at,
+                desc_songs=desc_songs,
+            )
+            report.ok = True
+            report.playlist_id = playlist_id
+            await self.store.record_archive(
+                group_id, window_key, str(playlist_id), report.playlist_url,
+                report.total, report.added, len(report.unmatched),
+                added_ids=sorted(added_set),
+            )
             return report
 
-        # 3. 分批加歌
+        # 3. 分批加歌（复用已有歌单 = 追加；新歌单 = 初始填充）
         # 网易云 add 接口会把整批歌曲「倒序」插到歌单顶部，直接按原序提交会导致
         # 最终歌单顺序和简介清单相反。所以这里把顺序整体反转后再提交，抵消它的倒序。
-        add_order = list(reversed(ordered_unique))
+        add_order = list(reversed(new_ids))
         added = 0
         for i in range(0, len(add_order), cfg.batch_size):
             batch = add_order[i:i + cfg.batch_size]
@@ -322,13 +393,62 @@ class Archiver:
                 # 单批失败不影响其余批次
                 pass
             await asyncio.sleep(0.5)
+        merged_ids = added_set | set(new_ids)
 
-        # 4. 简介：模板开头 + 「谁分享了什么歌」清单
-        context["count"] = str(added)
+        report.ok = True
+        report.playlist_id = playlist_id
+        report.playlist_url = self.api.playlist_url(playlist_id)
+        report.added = added
+
+        await self._write_description_full(
+            report, group_id, window_key, window_label, songs,
+            cfg, playlist_id, start_at=start_at, end_at=end_at,
+            desc_songs=desc_songs, total_in_playlist=len(merged_ids),
+        )
+
+        await self.store.record_archive(
+            group_id, window_key, str(playlist_id), report.playlist_url,
+            report.total, added, len(report.unmatched),
+            added_ids=sorted(merged_ids),
+        )
+        return report
+
+    async def _write_description_full(
+        self,
+        report: ArchiveReport,
+        group_id: int,
+        window_key: str,
+        window_label: str,
+        songs: Sequence[Song],
+        cfg: PlaylistConfig,
+        playlist_id: int,
+        *,
+        start_at: Optional[datetime] = None,
+        end_at: Optional[datetime] = None,
+        desc_songs: Optional[Sequence[Song]] = None,
+        total_in_playlist: Optional[int] = None,
+    ) -> None:
+        """生成并写入歌单简介。
+
+        ``desc_songs`` 缺省时用本次 ``songs``；自动归档（单曲）场景下由调用方
+        传入窗口全量，保证简介清单完整。
+        """
+        listed = desc_songs if desc_songs is not None else songs
+        context = build_context(
+            group_id=group_id,
+            window_label=window_label,
+            start_at=start_at,
+            end_at=end_at,
+            count=total_in_playlist if total_in_playlist is not None else len(listed),
+            total=len(listed),
+            seq=cfg.seq,
+            songs=listed,
+            emoji_style=cfg.emoji_style,
+            aliases=cfg.sharer_aliases,
+        )
         header = render_template(cfg.description_template, context)
         body_lines: list[str] = []
         if cfg.include_sharers and cfg.sharer_style != "none":
-            listed = matched_songs or list(songs)
             if cfg.sharer_style == "by_person":
                 body_lines = build_sharer_lines(
                     listed,
@@ -360,16 +480,6 @@ class Archiver:
         desc = fit_description(header, body_lines)
         report.description = desc
         report.desc_ok, report.desc_note = await self.write_description(
-            playlist_id, desc, name=name, group_id=group_id, retries=cfg.desc_retry
+            playlist_id, desc, name=report.playlist_name, group_id=group_id,
+            retries=cfg.desc_retry,
         )
-
-        report.ok = True
-        report.playlist_id = playlist_id
-        report.playlist_url = self.api.playlist_url(playlist_id)
-        report.added = added
-
-        await self.store.record_archive(
-            group_id, window_key, str(playlist_id), report.playlist_url,
-            report.total, added, len(report.unmatched),
-        )
-        return report

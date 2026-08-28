@@ -18,13 +18,21 @@ from music_collector.webui import build_overview, dispatch_action  # noqa: E402
 
 class _Song:
     def __init__(self, title, artists="", sharer_name="", platform="netease",
-                 netease_id=None, matched=False):
+                 netease_id=None, matched=False, sharer_id=0):
         self.title = title
         self.artists = artists
         self.sharer_name = sharer_name
+        self.sharer_id = sharer_id
         self.platform = platform
         self.netease_id = netease_id
         self.matched = matched
+
+
+class _Playlist:
+    """webui 的 _song_item 会读 playlist.sharer_aliases。"""
+
+    def __init__(self):
+        self.sharer_aliases = {}
 
 
 class _State:
@@ -60,6 +68,7 @@ class _FakeService:
         def __init__(self, groups=None):
             self.groups = groups or []
             self.collect_override = "auto"
+            self.playlist = _Playlist()
     class _Win:
         def __init__(self): self.key = "2026-W33"
     @property

@@ -51,6 +51,9 @@ class _StubAPI:
 
 
 class _StubStore:
+    async def get_archive(self, group_id, window_key):
+        return None  # 未归档过 -> 走新建歌单分支
+
     async def mark_matched(self, row_id, netease_id):
         pass
 
