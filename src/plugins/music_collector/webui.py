@@ -551,6 +551,7 @@ def _song_item(song, index: int) -> dict:
         "url": song.url,
         "netease_id": song.netease_id,
         "matched": song.matched,
+        "created_at": getattr(song, "created_at", None),
     }
 
 

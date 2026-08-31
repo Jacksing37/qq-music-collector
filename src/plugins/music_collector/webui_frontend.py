@@ -84,6 +84,7 @@ pre.runs{margin:10px 0 0;font-size:12px;color:var(--muted);white-space:pre-wrap;
 .gtbl tr:hover td{background:rgba(110,168,254,.05)}
 .gtbl .idx{color:var(--accent2);font-weight:600;width:30px}
 .gtbl .plat{font-size:11px;color:var(--muted);width:64px}
+.gtbl .date{font-size:11px;color:var(--muted);width:118px;white-space:nowrap}
 .gtbl .mt{color:var(--ok);font-size:12px}.gtbl .un{color:var(--muted);font-size:12px}
 .gtbl .acts{white-space:nowrap;width:1%}
 .gtbl .acts button{padding:3px 7px;font-size:12px;margin-left:4px}
@@ -443,6 +444,13 @@ $("#opArchiveAll").onclick=()=>doAction({action:"archive_all"});
 function flashOp(msg, kind=""){
   const m=$("#saveMsg"); m.textContent=msg; m.className="msg"+(kind?(" "+kind):"");
 }
+function fmtDate(ts){
+  if(ts==null || ts===0) return "—";
+  const d = new Date(ts*1000);
+  if(isNaN(d.getTime())) return "—";
+  const p = n => String(n).padStart(2,"0");
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 async function doAction(body){
   try{
     const r = await api("/api/music-admin/action", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
@@ -505,6 +513,7 @@ function renderGroupCard(g, wk){
         <td><b>${esc(s.title)}</b><br><span style="color:var(--muted);font-size:12px">${esc(s.artists||"")}</span></td>
         <td>${esc(s.sharer_name||"")}</td>
         <td class="plat">${esc(s.platform_name||s.platform)}</td>
+        <td class="date">${fmtDate(s.created_at)}</td>
         <td>${mt}</td>
         <td class="acts">
           <button title="上移" data-mv="-1" data-g="${g.group_id}" data-idx="${s.index}">↑</button>
@@ -515,7 +524,7 @@ function renderGroupCard(g, wk){
     });
   }
   const tbl=`<table class="gtbl"><thead><tr>
-    <th></th><th>#</th><th>歌曲 / 歌手（可拖拽行排序）</th><th>分享者</th><th>平台</th><th>匹配</th><th></th>
+    <th></th><th>#</th><th>歌曲 / 歌手（可拖拽行排序）</th><th>分享者</th><th>平台</th><th>收录日期</th><th>匹配</th><th></th>
   </tr></thead><tbody>${rows}</tbody></table>`;
   card.innerHTML=`<div class="gtitle">群 ${g.group_id}<span class="cnt">${g.count} 首</span></div>${ops}${tbl}`;
   card.querySelectorAll("button[data-act]").forEach(b=> b.onclick=()=>groupAction(b.dataset.act,b.dataset.g, wk));
@@ -654,7 +663,7 @@ function openPreview(d){
     const mt=s.matched?`<span class="mt">✓</span>`:`<span class="un">·</span>`;
     rows+=`<tr><td class="idx">${s.index}</td>
       <td><b>${esc(s.title)}</b><br><span style="color:var(--muted);font-size:12px">${esc(s.artists||"")}</span></td>
-      <td>${esc(s.sharer_name||"")}</td><td class="plat">${esc(s.platform_name||s.platform)}</td><td>${mt}</td></tr>`;
+      <td>${esc(s.sharer_name||"")}</td><td class="plat">${esc(s.platform_name||s.platform)}</td><td class="date">${fmtDate(s.created_at)}</td><td>${mt}</td></tr>`;
   });
   $("#pvBody").innerHTML=`
     <div class="pv-sec"><div class="pv-tag">歌单名</div><div class="pv-name">${esc(d.name||"(未生成)")}</div></div>
@@ -662,7 +671,7 @@ function openPreview(d){
       <pre class="pv-desc${(d.description?"":" empty")}">${esc(d.description||"（简介为空）")}</pre>
       <div class="row" style="margin-top:8px"><button id="pvCopyDesc">📋 复制简介</button></div></div>
     <div class="pv-sec"><div class="pv-tag">歌曲清单（${songs.length} 首）</div>
-      <table class="gtbl"><thead><tr><th>#</th><th>歌曲/歌手</th><th>分享者</th><th>平台</th><th>匹配</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      <table class="gtbl"><thead><tr><th>#</th><th>歌曲/歌手</th><th>分享者</th><th>平台</th><th>收录日期</th><th>匹配</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   const cb=$("#pvCopyDesc"); if(cb) cb.onclick=()=>navigator.clipboard.writeText(d.description||"").then(()=>flashOp("简介已复制","ok"),()=>flashOp("复制失败","bad"));
   $("#pvDrawer").classList.add("open"); $("#pvDrawer").setAttribute("aria-hidden","false"); $("#pvMask").classList.remove("hidden");
 }

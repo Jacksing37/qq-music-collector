@@ -4,6 +4,7 @@
 """
 
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,7 +19,7 @@ from music_collector.webui import build_overview, dispatch_action  # noqa: E402
 
 class _Song:
     def __init__(self, title, artists="", sharer_name="", platform="netease",
-                 netease_id=None, matched=False, sharer_id=0, url=""):
+                 netease_id=None, matched=False, sharer_id=0, url="", created_at=None):
         self.title = title
         self.artists = artists
         self.sharer_name = sharer_name
@@ -27,6 +28,7 @@ class _Song:
         self.netease_id = netease_id
         self.matched = matched
         self.url = url
+        self.created_at = created_at if created_at is not None else time.time()
 
 
 class _Playlist:
@@ -216,6 +218,19 @@ def test_dispatch_unknown_and_bad_param():
     r = asyncio.get_event_loop().run_until_complete(
         dispatch_action({"action": "archive", "group_id": "abc"}))
     assert not r["ok"] and "参数错误" in r["message"]
+
+
+def test_song_item_includes_created_at():
+    from music_collector.webui import _song_item
+    svc = _FakeService(); _patch(svc)
+    ts = 1700000000.0
+    s = _Song("晴天", "周杰伦", "张三", created_at=ts)
+    item = _song_item(s, 0)
+    assert item["created_at"] == ts, item
+    # 未显式传入时回退到构造默认值（time.time，正数）而非抛错（向后兼容）
+    s2 = _Song("稻香")
+    got = _song_item(s2, 0)["created_at"]
+    assert isinstance(got, float) and got > 0, got
 
 
 if __name__ == "__main__":
