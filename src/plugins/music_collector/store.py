@@ -15,6 +15,10 @@ import aiosqlite
 
 from .models import Song
 
+#: 总库（跨窗口去重的群级歌曲库）在 songs 表里使用的虚拟窗口键。
+#: 复用现有 songs / archives 全部基础设施，避免新建表与重复逻辑。
+MASTER_KEY = "__master__"
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS songs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -410,10 +414,13 @@ class Store:
         return [int(r[0]) for r in rows]
 
     async def all_groups(self) -> list[int]:
-        """所有出现过收集记录的群（不限窗口），用于"开始收录"全群广播。"""
+        """所有出现过收集记录的群（不限窗口），用于"开始收录"全群广播。
+
+        排除总库虚拟窗口，否则只往总库里分享过的群也会被纳入广播。
+        """
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
-                "SELECT DISTINCT group_id FROM songs"
+                "SELECT DISTINCT group_id FROM songs WHERE window_key<>?", (MASTER_KEY,)
             ) as cur:
                 rows = await cur.fetchall()
         return [int(r[0]) for r in rows]
@@ -484,20 +491,25 @@ class Store:
     async def windows_with_counts(
         self, group_id: Optional[int] = None
     ) -> list[tuple[str, int]]:
-        """列出各窗口及其歌曲数，供手动清理时选择目标窗口。"""
+        """列出各窗口及其歌曲数，供手动清理 / 概览下拉选择目标窗口。
+
+        排除总库虚拟窗口，避免它混进普通窗口列表。
+        """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             if group_id is None:
                 async with db.execute(
                     "SELECT window_key, COUNT(*) AS n FROM songs "
-                    "GROUP BY window_key ORDER BY window_key DESC"
+                    "WHERE window_key<>? GROUP BY window_key ORDER BY window_key DESC",
+                    (MASTER_KEY,),
                 ) as cur:
                     rows = await cur.fetchall()
             else:
                 async with db.execute(
-                    "SELECT window_key, COUNT(*) AS n FROM songs WHERE group_id=? "
+                    "SELECT window_key, COUNT(*) AS n FROM songs "
+                    "WHERE group_id=? AND window_key<>? "
                     "GROUP BY window_key ORDER BY window_key DESC",
-                    (group_id,),
+                    (group_id, MASTER_KEY),
                 ) as cur:
                     rows = await cur.fetchall()
         return [(r["window_key"], int(r["n"])) for r in rows]

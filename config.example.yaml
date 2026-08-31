@@ -90,6 +90,43 @@ playlist:
   #（自动复用已建歌单，不新建、不消耗期号）。默认关闭；开启后静默执行，结果只记日志
   auto_archive_on_share: false
 
+# ---------------------------------------------------------------------------
+# 总库：跨窗口去重的群级歌曲库。
+# 开启后每首新分享会同时进入总库（与正常收集互相独立）；分享已存在于总库的歌会
+# 提示重复（仅跨窗口；同窗口重复仍走通用设置的「重复提醒」）。总库可像正常收集
+# 一样在网页端增删改、拖拽排序、同步到歌单，并独立归档成一个大歌单。
+# 归档相关字段与上面 playlist 段互相独立、可分别设置。
+# ---------------------------------------------------------------------------
+master:
+  # 总库总开关：关闭后分享不会写入总库，也不会做总库查重提示
+  enabled: false
+  # 分享时是否与总库对比，命中已存在则提示重复
+  compare_on_share: true
+  # 重复提示文案，用 \n 表示换行。可用占位符：
+  #   {title}歌名 {artists}歌手 {platform}来源 {sharer}本次分享者
+  #   {who}总库首发者 {index}总库序号 {count}总库总数 {window}当前窗口
+  notify_template: " 这首《{title}》之前已经有人分享过了（总库第 {index} 位，首发: {who}）"
+  # 分享即归档：每收到新分享立即把总库增量同步到总库歌单（静默执行，不刷屏）
+  auto_archive: false
+  # 总库归档用歌单配置（与上面 playlist 段互相独立，可分别设置）
+  name_template: 群总库 {group}
+  description_template: 由 QQ 群 {group} 跨窗口汇总收集，共 {count} 首。
+  include_sharers: true
+  sharer_style: list
+  seq: 1
+  seq_auto_increment: true
+  pending_name: ''
+  privacy: false
+  cross_platform_match: true
+  strict_match: true
+  batch_size: 100
+  desc_retry: 3
+  desc_retry_minutes: 30
+  emoji_style: text
+  desc_show_artist: true
+  desc_blank_line: false
+  sharer_aliases: {}
+
 # 已收集歌曲的清理（区别于 cache：cache 清理的是榜单图片缓存）
 clear:
   # 归档（结束收集）建歌单成功后，是否自动清空本期已收集歌曲

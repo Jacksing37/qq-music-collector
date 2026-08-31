@@ -144,6 +144,7 @@ pre.runs{margin:10px 0 0;font-size:12px;color:var(--muted);white-space:pre-wrap;
     <div class="brand">管理面板</div>
     <button class="nav active" data-page="overview">📊 概览</button>
     <button class="nav" data-page="collect">🎵 收集管理</button>
+    <button class="nav" data-page="master">📚 总库</button>
     <button class="nav" data-page="config">⚙ 配置</button>
     <button class="nav" data-page="aliases">✏ 昵称映射</button>
     <button class="nav" data-page="admin">🛡 管理员</button>
@@ -194,6 +195,21 @@ pre.runs{margin:10px 0 0;font-size:12px;color:var(--muted);white-space:pre-wrap;
         <p class="muted">在下方各群卡片里可编辑、手动匹配、调整顺序、删除，并对单个群「同步到歌单」（增+删+简介）。</p>
       </div>
       <div id="collectGroups"><div class="empty">加载中…</div></div>
+    </section>
+
+    <!-- 总库 -->
+    <section id="page-master" class="page hidden">
+      <div class="card">
+        <h2><span class="dot"></span>总库（跨窗口去重）</h2>
+        <div class="row">
+          <button id="mAggBtn">📥 汇总现有窗口到总库</button>
+          <button id="mArchiveBtn" class="btn-primary">📦 归档总库全部</button>
+          <button id="mSyncBtn">🔄 同步全部歌单</button>
+          <button id="mAddBtn">➕ 手动添加歌曲</button>
+        </div>
+        <p class="muted">总库把当前群里<strong>所有窗口</strong>的歌曲汇聚去重。有人分享了总库里已存在的歌时，会在群里提示（提示开关与文案在「配置」页的「总库」分组里设置）。下面可对总库做编辑、匹配、拖拽排序、删除，并归档 / 同步到独立的<strong>总库网易云歌单</strong>（命名 / 简介 / 期号等配置同样在「配置」页设置）。</p>
+      </div>
+      <div id="masterGroups"><div class="empty">加载中…</div></div>
     </section>
 
     <!-- 配置 -->
@@ -327,7 +343,9 @@ pre.runs{margin:10px 0 0;font-size:12px;color:var(--muted);white-space:pre-wrap;
 const LS_KEY = "mwc_token";
 let TOKEN = localStorage.getItem(LS_KEY) || "";
 let ORIG = {}, DIRTY = {};
-let CUR_WIN = null, OV = null, COLL = null;
+let CUR_WIN = null, OV = null, COLL = null, MASTER = null, ADD_CTX = null;
+const MASTER_KEY = "__master__";
+function getColl(wk){ return wk===MASTER_KEY ? MASTER : COLL; }
 const $ = (s, r=document) => r.querySelector(s);
 const csrf = {"Authorization": "Bearer " + TOKEN};
 
@@ -364,6 +382,7 @@ function switchPage(name){
   $("#footbar").classList.toggle("hidden", name!=="config");
   if(name==="overview") loadOverview();
   if(name==="collect") loadCollect();
+  if(name==="master") loadMaster();
   if(name==="config") loadConfig();
   if(name==="aliases") loadAliases();
   if(name==="admin") loadAdmin();
@@ -430,7 +449,11 @@ async function doAction(body){
     const j = await r.json();
     if(body.action==="preview" && j.ok && j.data){ openPreview(j.data); return; }
     flashOp(j.message || (j.ok?"操作成功":"操作失败"), j.ok?"ok":"bad");
-    if(j.ok){ if(CUR_WIN) loadOverview(); loadCollect(); loadStatus(); }
+    if(j.ok){
+      const cur = (document.querySelector(".nav.active")||{}).dataset?.page;
+      if(cur==="master"){ loadMaster(); }
+      else { if(CUR_WIN) loadOverview(); loadCollect(); loadStatus(); }
+    }
     return j;
   }catch(e){ flashOp("操作失败: "+e.message,"bad"); }
 }
@@ -445,11 +468,21 @@ async function loadCollect(){
     const wrap=$("#collectGroups"); wrap.innerHTML="";
     const groups = COLL.groups||[];
     if(!groups.length){ wrap.innerHTML=`<div class="empty">该窗口下暂无收集记录。</div>`; return; }
-    groups.forEach(g=> wrap.appendChild(renderGroupCard(g)) );
+    groups.forEach(g=> wrap.appendChild(renderGroupCard(g, COLL.selected_window)) );
   }catch(e){ if(e.message!=="unauthorized") console.warn("collect 加载失败", e); }
 }
-function renderGroupCard(g){
-  const card=document.createElement("div"); card.className="gcard";
+async function loadMaster(){
+  try{
+    const url = "/api/music-admin/overview?scope=master";
+    MASTER = await (await api(url)).json();
+    const wrap=$("#masterGroups"); wrap.innerHTML="";
+    const groups = MASTER.groups||[];
+    if(!groups.length){ wrap.innerHTML=`<div class="empty">总库还是空的。分享歌曲（启用总库后）或点上方「📥 汇总现有窗口到总库」即可填充。</div>`; return; }
+    groups.forEach(g=> wrap.appendChild(renderGroupCard(g, MASTER_KEY)) );
+  }catch(e){ if(e.message!=="unauthorized") console.warn("master 加载失败", e); }
+}
+function renderGroupCard(g, wk){
+  const card=document.createElement("div"); card.className="gcard"; card.dataset.wk=wk||""; card.dataset.gid=g.group_id;
   const pl = g.playlist_url
     ? `<a class="plink" href="${esc(g.playlist_url)}" target="_blank" rel="noreferrer">🔗 网易云歌单</a>`
     : `<span class="muted">（本窗口尚未建歌单，归档或同步后在此显示）</span>`;
@@ -485,10 +518,10 @@ function renderGroupCard(g){
     <th></th><th>#</th><th>歌曲 / 歌手（可拖拽行排序）</th><th>分享者</th><th>平台</th><th>匹配</th><th></th>
   </tr></thead><tbody>${rows}</tbody></table>`;
   card.innerHTML=`<div class="gtitle">群 ${g.group_id}<span class="cnt">${g.count} 首</span></div>${ops}${tbl}`;
-  card.querySelectorAll("button[data-act]").forEach(b=> b.onclick=()=>groupAction(b.dataset.act,b.dataset.g));
-  card.querySelectorAll("button[data-mv]").forEach(b=> b.onclick=()=>moveRow(g.group_id, parseInt(b.dataset.idx,10), parseInt(b.dataset.mv,10)));
-  card.querySelectorAll("button[data-edit]").forEach(b=> b.onclick=()=>openEdit(g.group_id, parseInt(b.dataset.idx,10)));
-  card.querySelectorAll("button[data-match]").forEach(b=> b.onclick=()=>openMatch(g.group_id, parseInt(b.dataset.idx,10)));
+  card.querySelectorAll("button[data-act]").forEach(b=> b.onclick=()=>groupAction(b.dataset.act,b.dataset.g, wk));
+  card.querySelectorAll("button[data-mv]").forEach(b=> b.onclick=()=>moveRow(g.group_id, parseInt(b.dataset.idx,10), parseInt(b.dataset.mv,10), wk));
+  card.querySelectorAll("button[data-edit]").forEach(b=> b.onclick=()=>openEdit(g.group_id, parseInt(b.dataset.idx,10), wk));
+  card.querySelectorAll("button[data-match]").forEach(b=> b.onclick=()=>openMatch(g.group_id, parseInt(b.dataset.idx,10), wk));
   // 拖拽排序
   card.querySelectorAll("tr.songrow").forEach(tr=>{
     tr.addEventListener("dragstart", e=>{ DRAG_IDX=parseInt(tr.dataset.idx,10); tr.classList.add("dragging"); if(e.dataTransfer){ e.dataTransfer.effectAllowed="move"; } });
@@ -498,26 +531,27 @@ function renderGroupCard(g){
     tr.addEventListener("drop", e=>{
       e.preventDefault(); tr.classList.remove("droptgt");
       if(DRAG_IDX===null) return;
-      const g2=(COLL.groups||[]).find(x=>x.group_id===g.group_id); if(!g2) return;
+      const g2=(getColl(wk).groups||[]).find(x=>x.group_id===g.group_id); if(!g2) return;
       const arr=g2.songs.slice();
       const from=arr.findIndex(s=>s.index===DRAG_IDX); if(from<0) return;
       const toIdx=parseInt(tr.dataset.idx,10);
       let to=arr.findIndex(s=>s.index===toIdx); if(to<0) return;
       const r=tr.getBoundingClientRect(); const after=(e.clientY-r.top)>r.height/2; if(after) to+=1;
       const [m]=arr.splice(from,1); arr.splice(to,0,m);
-      reorderGroup(g.group_id, arr);
+      reorderGroup(g.group_id, arr, wk);
     });
   });
   return card;
 }
-async function groupAction(act, gid){
+async function groupAction(act, gid, wk){
   gid=parseInt(gid,10);
   const ACT_MAP={del:"delete", pname:"preview_name", pdesc:"preview_desc"};
   act=ACT_MAP[act]||act;
-  const wk=(COLL&&COLL.selected_window)||"";
+  wk = wk || (COLL&&COLL.selected_window)||"";
   let body={action:act, group_id:gid, window_key:wk};
   if(act==="del"){
-    const checked=document.querySelectorAll(`#collectGroups .songchk[data-g="${gid}"]:checked`);
+    const card=document.querySelector(`.gcard[data-wk="${wk}"][data-gid="${gid}"]`);
+    const checked=card?card.querySelectorAll(`.songchk[data-g="${gid}"]:checked`):[];
     const indices=Array.from(checked).map(c=>parseInt(c.dataset.idx,10));
     if(!indices.length){ flashOp("请先勾选要删除的歌曲"); return; }
     body.indices=indices;
@@ -525,16 +559,17 @@ async function groupAction(act, gid){
   await doAction(body);
 }
 let DRAG_IDX=null;
-async function reorderGroup(gid, arr){
+async function reorderGroup(gid, arr, wk){
   const ordered=arr.map(s=>s.index);
-  await doAction({action:"reorder", group_id:gid, window_key:(COLL&&COLL.selected_window)||"", ordered_indices:ordered});
+  wk = wk || (COLL&&COLL.selected_window)||"";
+  await doAction({action:"reorder", group_id:gid, window_key:wk, ordered_indices:ordered});
 }
-async function moveRow(gid, idx, dir){
-  const g=(COLL.groups||[]).find(x=>x.group_id===gid); if(!g) return;
+async function moveRow(gid, idx, dir, wk){
+  const g=(getColl(wk).groups||[]).find(x=>x.group_id===gid); if(!g) return;
   const i=g.songs.findIndex(s=>s.index===idx); if(i<0) return;
   const j=i+dir; if(j<0||j>=g.songs.length) return;
   const arr=g.songs.slice(); [arr[i],arr[j]]=[arr[j],arr[i]];
-  await reorderGroup(gid, arr);
+  await reorderGroup(gid, arr, wk);
 }
 $("#cArchiveBtn").onclick=()=>doAction({action:"archive_all"});
 $("#cSyncAllBtn").onclick=async()=>{
@@ -542,15 +577,37 @@ $("#cSyncAllBtn").onclick=async()=>{
   if(!gids.length){ flashOp("当前窗口无群可同步"); return; }
   for(const gid of gids){ await doAction({action:"sync", group_id:gid}); }
 };
-$("#cAddBtn").onclick=()=>{ $("#addModal").classList.remove("hidden"); };
+$("#cAddBtn").onclick=()=>{ ADD_CTX={window_key:(COLL&&COLL.selected_window)||"", group_id:(COLL&&COLL.groups[0]?COLL.groups[0].group_id:0)}; $("#addModal").classList.remove("hidden"); };
+
+/* 总库页头部操作 */
+$("#mAggBtn").onclick=async()=>{
+  const gids=(OV&&OV.groups||[]).map(g=>g.group_id);
+  if(!gids.length){ flashOp("没有任何已收集的群可汇总"); return; }
+  for(const gid of gids){ await doAction({action:"master_aggregate", group_id:gid}); }
+};
+$("#mArchiveBtn").onclick=async()=>{
+  const gids=(MASTER&&MASTER.groups||[]).map(g=>g.group_id);
+  if(!gids.length){ flashOp("总库暂无歌曲可归档"); return; }
+  for(const gid of gids){ await doAction({action:"archive", group_id:gid, window_key:MASTER_KEY}); }
+};
+$("#mSyncBtn").onclick=async()=>{
+  const gids=(MASTER&&MASTER.groups||[]).map(g=>g.group_id);
+  if(!gids.length){ flashOp("总库暂无歌曲可同步"); return; }
+  for(const gid of gids){ await doAction({action:"sync", group_id:gid, window_key:MASTER_KEY}); }
+};
+$("#mAddBtn").onclick=()=>{
+  const g=(MASTER&&MASTER.groups||[])[0];
+  ADD_CTX={window_key:MASTER_KEY, group_id:g?g.group_id:0};
+  $("#addModal").classList.remove("hidden");
+};
 
 /* ---- 编辑 / 匹配 / 添加 弹窗 ---- */
 let EDIT_CTX=null, MATCH_CTX=null;
-function openEdit(gid, idx){
-  const g=(COLL.groups||[]).find(x=>x.group_id===gid); if(!g) return;
+function openEdit(gid, idx, wk){
+  const g=(getColl(wk).groups||[]).find(x=>x.group_id===gid); if(!g) return;
   const s=g.songs.find(x=>x.index===idx); if(!s) return;
   const neteaseLink = s.netease_id ? `https://music.163.com/song?id=${s.netease_id}` : "";
-  EDIT_CTX={gid, idx, netease_orig: neteaseLink};
+  EDIT_CTX={gid, idx, wk, netease_orig: neteaseLink};
   $("#edTitle").value=s.title||""; $("#edArtists").value=s.artists||""; $("#edSharer").value=s.sharer_name||"";
   $("#edSharerId").value=""; $("#edUrl").value=s.url||""; $("#edNetease").value=neteaseLink;
   $("#editModal").classList.remove("hidden");
@@ -564,26 +621,26 @@ $("#edSave").onclick=async()=>{
   // 仅当匹配链接被修改时才发送，避免误触发重新匹配
   const nl=$("#edNetease").value.trim();
   if(nl && nl!==EDIT_CTX.netease_orig) fields.netease_link=nl;
-  const wk=(COLL&&COLL.selected_window)||"";
+  const wk=EDIT_CTX.wk||"";
   await doAction({action:"edit_song", group_id:EDIT_CTX.gid, window_key:wk, index:EDIT_CTX.idx, fields});
   $("#editModal").classList.add("hidden");
 };
-function openMatch(gid, idx){ MATCH_CTX={gid, idx}; $("#mtLink").value=""; $("#matchModal").classList.remove("hidden"); }
+function openMatch(gid, idx, wk){ MATCH_CTX={gid, idx, wk}; $("#mtLink").value=""; $("#matchModal").classList.remove("hidden"); }
 $("#mtCancel").onclick=()=>$("#matchModal").classList.add("hidden");
 $("#mtSave").onclick=async()=>{
   if(!MATCH_CTX) return;
   const link=$("#mtLink").value.trim();
-  const wk=(COLL&&COLL.selected_window)||"";
+  const wk=MATCH_CTX.wk||"";
   await doAction({action:"match", group_id:MATCH_CTX.gid, window_key:wk, index:MATCH_CTX.idx, link});
   $("#matchModal").classList.add("hidden");
 };
 $("#adCancel").onclick=()=>$("#addModal").classList.add("hidden");
 $("#adSave").onclick=async()=>{
+  if(!ADD_CTX) return;
   const song={platform:$("#adPlatform").value, song_id:$("#adSongId").value.trim(),
     title:$("#adTitle").value.trim(), artists:$("#adArtists").value.trim(),
     sharer_name:$("#adSharer").value.trim(), sharer_id:parseInt($("#adSharerId").value||"0",10)};
-  const wk=(COLL&&COLL.selected_window)||"";
-  await doAction({action:"add_song", group_id:(COLL&&COLL.groups[0]?COLL.groups[0].group_id:0), window_key:wk, song});
+  await doAction({action:"add_song", group_id:ADD_CTX.group_id, window_key:ADD_CTX.window_key, song});
   $("#addModal").classList.add("hidden");
 };
 

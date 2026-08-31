@@ -33,6 +33,9 @@ PREFERRED_ORDER = [
     "test_card_fallback.py",
     "test_schedule_dedup.py",
     "smoke_commands.py",
+    "test_master_store.py",
+    "test_master_service.py",
+    "test_webui_master.py",
 ]
 
 

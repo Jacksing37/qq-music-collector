@@ -186,6 +186,74 @@ class IntroConfig(BaseModel):
     always_reply: bool = True
 
 
+#: 总库重复提示默认文案。占位符见 MasterConfig.notify_template 注释。
+DEFAULT_MASTER_DUP = (
+    " 这首《{title}》之前已经有人分享过了（总库第 {index} 位，首发: {who}）"
+)
+
+
+class MasterConfig(BaseModel):
+    """总库（跨窗口去重的群级歌曲库）。
+
+    总库按群聚合所有窗口的歌曲，用于「分享过就别再重复推」以及独立归档成一个
+    大歌单。数据落在 songs 表的 ``__master__`` 虚拟窗口里，复用现有收集/归档
+    全部逻辑，因此功能与正常收集一致（可手动增删改、可拖拽排序、可同步到歌单）。
+
+    - ``enabled`` 关闭时，分享不会写入总库，也不会做总库查重提示。
+    - ``compare_on_share`` 开启后，分享已存在于总库的歌会提示重复（仅跨窗口；
+      同窗口重复仍走原 ``notify_duplicate`` 逻辑，两者不重复刷屏）。
+    - 归档相关字段（命名/简介/清单样式/期号/隐私等）与正常收集的 ``playlist``
+      互相独立、可分别设置（配置页「总库」分组里平铺展示）。
+    """
+
+    #: 总库总开关
+    enabled: bool = False
+    #: 分享时是否与总库对比，命中已存在则提示重复
+    compare_on_share: bool = True
+    #: 重复提示模板，支持占位符（命令行/网页端用 \\n 表示换行）：
+    #:   {title}    歌名          {artists}  歌手
+    #:   {platform} 来源平台名     {sharer}   本次分享者（已套昵称映射）
+    #:   {who}      总库首发者（首次进总库的人）   {index}  该歌在总库中的序号
+    #:   {count}    总库当前总首数               {window} 当前窗口文案
+    notify_template: str = DEFAULT_MASTER_DUP
+    #: 分享即归档：每收到新分享立即把总库增量同步到总库歌单（静默执行，不刷屏）
+    auto_archive: bool = False
+    #: 歌单名模板（占位符见 PlaylistConfig.name_template）
+    name_template: str = "群总库 {group}"
+    #: 简介开头模板（占位符见 PlaylistConfig.description_template）
+    description_template: str = "由 QQ 群 {group} 跨窗口汇总收集，共 {count} 首。"
+    #: 简介里附上分享清单
+    include_sharers: bool = True
+    #: 清单样式：list=逐首列 / by_person=按人聚合 / by_name=只列分享者名 / none=不附
+    sharer_style: Literal["list", "by_person", "by_name", "none"] = "list"
+    #: 自增期号，每成功归档一次 +1
+    seq: int = 1
+    #: 期号自增
+    seq_auto_increment: bool = True
+    #: 一次性歌单名，设置后仅下一次归档生效，用完自动清空
+    pending_name: str = ""
+    #: 歌单隐私
+    privacy: bool = False
+    #: 非网易云来源的歌曲，是否在网易云搜索匹配后加入
+    cross_platform_match: bool = True
+    #: 严格匹配（歌名 + 歌手都要对得上）；关闭后只按歌名，命中率高但可能加错版本
+    strict_match: bool = True
+    #: 单次加歌批大小
+    batch_size: int = 100
+    #: 简介写入重试次数
+    desc_retry: int = 3
+    #: 定时补写待写入简介的间隔分钟数；<=0 关闭自动补写
+    desc_retry_minutes: int = 30
+    #: 表情处理：text=转中文词 / strip=直接删 / keep=原样
+    emoji_style: Literal["text", "strip", "keep"] = "text"
+    #: 简介清单里是否带歌手名
+    desc_show_artist: bool = True
+    #: 简介清单条目之间是否插空行
+    desc_blank_line: bool = False
+    #: 分享者昵称映射（仅展示层替换，入库仍保留原始昵称）
+    sharer_aliases: dict[str, str] = Field(default_factory=dict)
+
+
 class CardConfig(BaseModel):
     """音乐卡片发送策略。
 
@@ -283,6 +351,7 @@ class AppConfig(BaseModel):
     clear: ClearConfig = Field(default_factory=ClearConfig)
     intro: IntroConfig = Field(default_factory=IntroConfig)
     reply: ReplyConfig = Field(default_factory=ReplyConfig)
+    master: MasterConfig = Field(default_factory=MasterConfig)
 
 
 class ConfigManager:

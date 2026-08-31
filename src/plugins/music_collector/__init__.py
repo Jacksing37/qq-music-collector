@@ -21,6 +21,7 @@ from .models import Song  # noqa: E402
 from .naming import build_context, render_template, resolve_alias  # noqa: E402
 from .scheduler import reload_jobs  # noqa: E402
 from .service import service  # noqa: E402
+from .store import MASTER_KEY  # noqa: E402
 
 from . import commands as _commands  # noqa: E402,F401  仅为注册命令
 from . import webui as _webui  # noqa: E402,F401  配置管理 Web UI
@@ -204,6 +205,38 @@ async def _playlist_placeholder(group_id: int, window_key: str) -> str:
     return url
 
 
+async def build_master_dup_text(
+    song: Song, index: int, group_id: int, sharer_name: str
+) -> str:
+    """生成总库跨窗口重复提示文案（模板见 config.master.notify_template）。
+
+    占位符：{title}歌名 {artists}歌手 {platform}来源 {sharer}本次分享者
+    {who}总库首发者 {index}总库序号 {count}总库总数 {window}当前窗口。
+    """
+    cfg = service.config.master
+    aliases = service.config.playlist.sharer_aliases
+    who = resolve_alias(
+        song.sharer_name or str(song.sharer_id), song.sharer_id, aliases
+    )
+    nick = resolve_alias(sharer_name, 0, aliases)
+    try:
+        count = await service.store.count(group_id, MASTER_KEY)
+    except Exception:
+        count = index
+    state = service.current_window()
+    context = {
+        "title": song.title,
+        "artists": song.artists,
+        "platform": song.platform_name,
+        "sharer": nick,
+        "who": who,
+        "index": str(index),
+        "count": str(count),
+        "window": state.label,
+    }
+    return render_template(cfg.notify_template, context)
+
+
 async def build_accept_text(song: Song, index: int, group_id: int) -> str:
     """生成收录回复文案（自定义模板开启时走模板，否则用内置格式）。"""
     cfg = service.config.reply
@@ -290,6 +323,19 @@ async def handle_music_share(bot: Bot, event: GroupMessageEvent) -> None:
             index = result.index_of.get(id(song), 0)
             who = resolve_alias(song.sharer_name or str(song.sharer_id), song.sharer_id, cfg.playlist.sharer_aliases)
             text = f" 这首《{song.title}》已经在榜单第 {index} 位了（首发: {who}）"
+            await _reply_song(bot, event, text, song, with_card=cfg.reply_card)
+
+    # 总库跨窗口重复提示：仅当总库已存在该歌（曾在不同窗口被分享过），
+    # 与上方同窗口重复提示互不冲突、不重复刷屏。
+    if cfg.master.enabled and cfg.master.compare_on_share and result.master_duplicated:
+        for song in result.master_duplicated:
+            index = result.master_index_of.get(id(song), 0)
+            try:
+                text = await build_master_dup_text(song, index, group_id, sharer_name)
+            except Exception as exc:
+                logger.warning(f"[music] 总库重复提示渲染失败，回退内置格式: {exc}")
+                who = resolve_alias(song.sharer_name or str(song.sharer_id), song.sharer_id, cfg.playlist.sharer_aliases)
+                text = f" 这首《{song.title}》之前已经有人分享过了（总库第 {index} 位，首发: {who}）"
             await _reply_song(bot, event, text, song, with_card=cfg.reply_card)
 
     if result.unidentified:

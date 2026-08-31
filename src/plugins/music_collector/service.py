@@ -14,7 +14,14 @@ from typing import Optional, Sequence
 
 from .archiver import Archiver, ArchiveReport, songs_from_snapshot
 from .cache import CleanResult, clean_caches
-from .config import CACHE_DIR, DB_PATH, NETEASE_SESSION_PATH, AppConfig, config_manager
+from .config import (
+    CACHE_DIR,
+    DB_PATH,
+    NETEASE_SESSION_PATH,
+    AppConfig,
+    PlaylistConfig,
+    config_manager,
+)
 from . import detector
 from .detector import detect_from_segments
 from .models import MusicLink, Song
@@ -22,7 +29,7 @@ from .naming import build_context, render_template
 from .netease_api import NeteaseAPI
 from .providers import ProviderRegistry
 from .render import build_text_list, render_song_list
-from .store import Store
+from .store import MASTER_KEY, Store
 from .window import WindowResolver, WindowState
 
 try:
@@ -38,9 +45,11 @@ class CollectResult:
 
     def __init__(self) -> None:
         self.accepted: list[Song] = []      # 新收录
-        self.duplicated: list[Song] = []    # 重复分享
+        self.duplicated: list[Song] = []    # 同窗口重复分享
+        self.master_duplicated: list[Song] = []  # 跨窗口重复（总库已存在）
         self.unidentified: list[Song] = []  # 没认出来的链接，不入榜
-        self.index_of: dict[int, int] = {}  # id(song) -> 榜单序号
+        self.index_of: dict[int, int] = {}        # id(song) -> 本窗口榜单序号
+        self.master_index_of: dict[int, int] = {}  # id(song) -> 总库序号
 
     @property
     def any_music(self) -> bool:
@@ -142,21 +151,216 @@ class CollectorService:
                 continue
 
             inserted, stored = await self.store.add_song(group_id, state.key, song)
+
+            # 总库：启用后每首新分享同时进群级总库（跨窗口去重）。
+            # 仅当「本窗口是新收录、但总库早已存在该歌」时，记为跨窗口重复，
+            # 与同窗口重复提示互不冲突、不重复刷屏。
+            master_dup_stored = None
+            if self.config.master.enabled:
+                m_inserted, m_stored = await self.store.add_song(group_id, MASTER_KEY, song)
+                if inserted and not m_inserted:
+                    master_dup_stored = m_stored
+
             if inserted:
                 result.accepted.append(stored)
             else:
                 result.duplicated.append(stored)
+            if master_dup_stored is not None:
+                result.master_duplicated.append(master_dup_stored)
 
         for song in result.accepted + result.duplicated:
             if song.row_id is not None:
                 result.index_of[id(song)] = await self.store.position_of(
                     group_id, state.key, song.row_id
                 )
+        for song in result.master_duplicated:
+            if song.row_id is not None:
+                result.master_index_of[id(song)] = await self.store.position_of(
+                    group_id, MASTER_KEY, song.row_id
+                )
 
         # 分享即归档：本批新收录的歌立即写进当前窗口歌单（静默执行，不刷屏）
         if result.accepted and self.config.playlist.auto_archive_on_share:
             await self.auto_archive_songs(group_id, state, result.accepted)
+        # 总库分享即归档：同样静默把总库增量同步到总库歌单
+        if result.accepted and self.config.master.enabled and self.config.master.auto_archive:
+            await self.auto_archive_master(group_id)
         return result
+
+    def _master_state(self) -> WindowState:
+        """构造总库用的窗口状态（歌单命名/简介用，无需真实时间区间）。"""
+        return WindowState(
+            mode="master",
+            key=MASTER_KEY,
+            label="总库",
+            collecting=True,
+            start_at=None,
+            archive_at=None,
+        )
+
+    def _master_playlist_cfg(self) -> "PlaylistConfig":
+        """把扁平的 master 配置组装成归档器需要的 PlaylistConfig。
+
+        master 段为了网页端能平铺展示，字段是扁平的；归档器严格依赖
+        ``PlaylistConfig``，这里在调用前临时拼一个。
+        """
+        m = self.config.master
+        return PlaylistConfig(
+            name_template=m.name_template,
+            description_template=m.description_template,
+            include_sharers=m.include_sharers,
+            sharer_style=m.sharer_style,
+            seq=m.seq,
+            seq_auto_increment=m.seq_auto_increment,
+            pending_name=m.pending_name,
+            privacy=m.privacy,
+            cross_platform_match=m.cross_platform_match,
+            strict_match=m.strict_match,
+            batch_size=m.batch_size,
+            desc_retry=m.desc_retry,
+            desc_retry_minutes=m.desc_retry_minutes,
+            emoji_style=m.emoji_style,
+            desc_show_artist=m.desc_show_artist,
+            desc_blank_line=m.desc_blank_line,
+            sharer_aliases=m.sharer_aliases,
+        )
+
+    async def auto_archive_master(self, group_id: int) -> None:
+        """把总库增量归档到总库歌单（静默执行，不刷屏）。"""
+        try:
+            cfg = self._master_playlist_cfg()
+            all_songs = await self.store.list_songs(group_id, MASTER_KEY)
+            report = await self.archiver.archive(
+                group_id, MASTER_KEY, "总库", all_songs, cfg,
+                start_at=None, end_at=None, desc_songs=all_songs,
+            )
+            if report.ok:
+                logger.info(
+                    f"[music] 总库分享即归档 group={group_id} "
+                    f"{'复用歌单追加' if not report.created_new else '新建歌单'} "
+                    f"{report.added} 首（总库共 {len(all_songs)} 首）"
+                )
+            else:
+                logger.warning(f"[music] 总库分享即归档失败 group={group_id}: {report.message}")
+        except Exception as exc:
+            logger.warning(f"[music] 总库分享即归档异常 group={group_id}: {type(exc).__name__} {exc}")
+
+    async def aggregate_to_master(self, group_id: int) -> int:
+        """把该群所有窗口的歌曲一键汇总进总库（跨窗口去重）。返回新增进总库的条数。"""
+        windows = await self.store.windows_with_counts(group_id)
+        added = 0
+        for wk, _ in windows:
+            songs = await self.store.list_songs(group_id, wk)
+            for s in songs:
+                song = Song(
+                    platform=s.platform, song_id=s.song_id, title=s.title,
+                    artists=s.artists, album=s.album, cover=s.cover, url=s.url,
+                    duration=s.duration, sharer_id=s.sharer_id, sharer_name=s.sharer_name,
+                    netease_id=s.netease_id, matched=s.matched, created_at=s.created_at,
+                )
+                ins, _ = await self.store.add_song(group_id, MASTER_KEY, song)
+                if ins:
+                    added += 1
+        return added
+
+    async def run_master_archive(
+        self, group_id: int, name_override: str = ""
+    ) -> ArchiveReport:
+        """把总库归档到网易云歌单（与正常收集一致：复用/新建、简介清单、期号等）。"""
+        songs = await self.store.list_songs(group_id, MASTER_KEY)
+        cfg = self._master_playlist_cfg()
+        report = await self.archiver.archive(
+            group_id, MASTER_KEY, "总库", songs, cfg,
+            start_at=None, end_at=None, name_override=name_override,
+        )
+        if report.ok and report.created_new:
+            if cfg.pending_name and not name_override:
+                config_manager.update("master.pending_name", "")
+            if cfg.seq_auto_increment:
+                config_manager.update("master.seq", cfg.seq + 1)
+        return report
+
+    async def sync_master_playlist(self, group_id: int) -> dict:
+        """全量同步总库到总库歌单：增 + 删 + 简介（与正常收集一致）。"""
+        cfg = self._master_playlist_cfg()
+        songs = await self.store.list_songs(group_id, MASTER_KEY)
+        arch = await self.store.get_archive(group_id, MASTER_KEY)
+
+        if not arch or not str(arch.get("playlist_id") or ""):
+            report = await self.archiver.archive(
+                group_id, MASTER_KEY, "总库", songs, cfg,
+                start_at=None, end_at=None,
+            )
+            if not report.ok:
+                return {"ok": False, "message": report.message or "建歌单失败"}
+            if report.created_new:
+                if cfg.pending_name:
+                    config_manager.update("master.pending_name", "")
+                if cfg.seq_auto_increment:
+                    config_manager.update("master.seq", cfg.seq + 1)
+            arch = await self.store.get_archive(group_id, MASTER_KEY)
+            if not arch:
+                return {"ok": False, "message": "建歌单后未读到归档记录"}
+
+        playlist_id = int(arch["playlist_id"])
+        current_ids = [int(s.netease_id) for s in songs if s.netease_id]
+        added_ids = set(int(x) for x in (arch.get("added_ids") or set()) if str(x).isdigit())
+        to_add = [i for i in current_ids if i not in added_ids]
+        to_remove = [i for i in added_ids if i not in set(current_ids)]
+
+        added_n = removed_n = 0
+        try:
+            if to_add:
+                await self.netease.add_tracks(playlist_id, [str(i) for i in to_add])
+                added_n = len(to_add)
+            if to_remove:
+                await self.netease.remove_tracks(playlist_id, [str(i) for i in to_remove])
+                removed_n = len(to_remove)
+        except Exception as exc:
+            return {"ok": False, "message": f"歌单增删失败: {exc}"}
+
+        new_added = (added_ids | set(to_add)) - set(to_remove)
+        await self.store.record_archive(
+            group_id, MASTER_KEY, str(playlist_id), arch.get("playlist_url"),
+            total=len(songs), added=len(new_added), failed=0,
+            added_ids=[str(i) for i in new_added],
+        )
+
+        desc = await self._render_description(
+            songs, group_id, "总库", self._master_playlist_cfg(),
+            start_at=None, end_at=None, count=len(songs),
+        )
+        desc_ok, desc_note = await self.push_description(
+            playlist_id, desc, name="", group_id=group_id
+        )
+        return {
+            "ok": True,
+            "added": added_n,
+            "removed": removed_n,
+            "desc_ok": desc_ok,
+            "playlist_id": playlist_id,
+            "playlist_url": self.netease.playlist_url(playlist_id),
+            "message": f"已同步总库：新增 {added_n} / 移除 {removed_n} 首"
+            + ("" if desc_ok else "（简介写入待补写）"),
+        }
+
+    async def preview_master_name(self, group_id: int) -> str:
+        songs = await self.store.list_songs(group_id, MASTER_KEY)
+        m = self.config.master
+        context = build_context(
+            group_id=group_id, window_label="总库",
+            start_at=None, end_at=None,
+            count=len(songs), total=len(songs), seq=m.seq, songs=songs,
+            emoji_style=m.emoji_style, aliases=m.sharer_aliases,
+        )
+        return render_template(m.pending_name or m.name_template, context)
+
+    async def preview_master_description(self, group_id: int) -> str:
+        songs = await self.store.list_songs(group_id, MASTER_KEY)
+        return await self._render_description(
+            songs, group_id, "总库", self._master_playlist_cfg(),
+            start_at=None, end_at=None, count=len(songs),
+        )
 
     async def auto_archive_songs(
         self, group_id: int, state: WindowState, songs: Sequence[Song]

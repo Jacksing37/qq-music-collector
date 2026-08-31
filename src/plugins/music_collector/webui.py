@@ -32,6 +32,7 @@ from pydantic_core import PydanticUndefined
 
 from .config import AppConfig, config_manager
 from .models import PLATFORM_NAMES
+from .store import MASTER_KEY
 from .naming import resolve_alias
 from .scheduler import next_runs, reload_jobs
 from .service import service
@@ -134,6 +135,31 @@ FIELD_META: dict[str, tuple[str, str, bool]] = {
     "playlist.name_template": ("歌单名模板", "占位符：{seq}期号 {slash}如26/8/7 {y}{yy}年 {m}{mm}月 {d}{dd}日 {ymd}{date}日期 {week}周数 {weekday}星期 {start}起始日 {end}结束日 {window}窗口文案 {count}收录数 {total}分享数 {sharers}人数 {group}群号", True),
     "playlist.description_template": ("简介开头模板", "后续自动接「谁分享了什么歌」清单。占位符同歌单名，另可用 {songlist}歌曲清单 {sharerlist}按人聚合清单；{group}群号 {window}窗口 {count}数", True),
 }
+
+# -------------------------------------------------------------------- 总库字段元信息
+
+SECTION_TITLES["master"] = "总库"
+
+# 总库顶层开关 / 提示模板
+FIELD_META["master.enabled"] = (
+    "总库开关", "开启后每首分享同时进入群级总库（跨窗口去重），并提供总库管理页", False,
+)
+FIELD_META["master.compare_on_share"] = (
+    "分享对比总库", "开启后分享已存在于总库的歌会提示重复（仅跨窗口；同窗口重复走通用「重复提醒」）", False,
+)
+FIELD_META["master.notify_template"] = (
+    "重复提示文案", "占位符：{title}歌名 {artists}歌手 {platform}来源 {sharer}本次分享者 {who}总库首发者 {index}总库序号 {count}总库总数 {window}当前窗口；用 \\n 换行", True,
+)
+FIELD_META["master.auto_archive"] = (
+    "分享即归档总库", "每收到新分享立即把总库增量同步到总库歌单（静默执行，不刷屏）", False,
+)
+
+# 总库归档用 playlist 配置：复用 playlist.* 的字段元信息，文案改指总库。
+for _k, _v in list(FIELD_META.items()):
+    if _k.startswith("playlist."):
+        _label, _hint, _multi = _v
+        _label = _label.replace("歌单", "总库歌单")
+        FIELD_META["master." + _k[len("playlist."):]] = (_label, _hint, _multi)
 
 
 # -------------------------------------------------------------------- schema
@@ -528,12 +554,39 @@ def _song_item(song, index: int) -> dict:
     }
 
 
-async def build_overview(window_key: typing.Optional[str] = None) -> dict:
+async def build_overview(
+    window_key: typing.Optional[str] = None, scope: str = "window"
+) -> dict:
     """汇总当前收集情况：每个群收集了哪些歌，按窗口分桶。
 
     返回纯字典，便于前端渲染与单测。``window_key`` 省略时使用当前窗口。
+    ``scope="master"`` 时改为汇总各群的**总库**（跨窗口去重后的群级歌曲库）。
     """
+    from .store import MASTER_KEY
+
     state = service.current_window()
+    if scope == "master":
+        # 总库视角：每个有总库歌曲的群，列出其总库内容与已建的总库歌单链接
+        gids = await service.store.groups_in_window(MASTER_KEY)
+        groups: list[dict] = []
+        for gid in gids:
+            songs = await service.store.list_songs(gid, MASTER_KEY)
+            arch = await service.store.get_archive(gid, MASTER_KEY)
+            groups.append({
+                "group_id": gid,
+                "count": len(songs),
+                "playlist_url": (arch or {}).get("playlist_url"),
+                "songs": [_song_item(s, i) for i, s in enumerate(songs)],
+            })
+        return {
+            "window": {"key": MASTER_KEY, "label": "总库", "collecting": True},
+            "selected_window": MASTER_KEY,
+            "scope": "master",
+            "netease_logged_in": service.netease.logged_in,
+            "windows": [],
+            "groups": groups,
+        }
+
     wk = window_key or state.key
     windows = await service.windows_with_counts()
     # 当前/选中窗口即使还没有收集记录，也要出现在下拉框里，避免切不到
@@ -544,7 +597,7 @@ async def build_overview(window_key: typing.Optional[str] = None) -> dict:
         gids = list(service.config.groups)
     else:
         gids = await service.store.groups_in_window(wk)
-    groups: list[dict] = []
+    groups = []
     for gid in gids:
         songs = await service.store.list_songs(gid, wk)
         arch = await service.store.get_archive(gid, wk)
@@ -557,6 +610,7 @@ async def build_overview(window_key: typing.Optional[str] = None) -> dict:
     return {
         "window": {"key": state.key, "label": state.label, "collecting": state.collecting},
         "selected_window": wk,
+        "scope": "window",
         "netease_logged_in": service.netease.logged_in,
         "windows": [{"key": k, "count": n} for k, n in windows],
         "groups": groups,
@@ -576,15 +630,24 @@ async def dispatch_action(body: dict) -> dict:
         "del": "delete",
     }.get(action, action)
     try:
+        wk = body.get("window_key")
         if action in ("start", "stop", "auto"):
             value = {"start": "on", "stop": "off", "auto": "auto"}[action]
             note = service.set_collect_override(value)
             return {"ok": True, "message": note}
 
+        if action == "master_aggregate":
+            gid = int(body.get("group_id"))
+            n = await service.aggregate_to_master(gid)
+            return {"ok": True, "message": f"已把 {n} 首历史歌曲汇总进总库"}
+
         if action == "archive":
             gid = int(body.get("group_id"))
             name = (body.get("name_override") or "").strip()
-            rep = await service.run_archive(gid, name_override=name)
+            if wk == MASTER_KEY:
+                rep = await service.run_master_archive(gid, name_override=name)
+            else:
+                rep = await service.run_archive(gid, name_override=name)
             if rep.ok:
                 return {
                     "ok": True,
@@ -621,6 +684,21 @@ async def dispatch_action(body: dict) -> dict:
 
         if action == "preview":
             gid = int(body.get("group_id"))
+            if wk == MASTER_KEY:
+                name = await service.preview_master_name(gid)
+                desc = await service.preview_master_description(gid)
+                songs = await service.store.list_songs(gid, MASTER_KEY)
+                return {
+                    "ok": True,
+                    "message": "预览已生成",
+                    "data": {
+                        "window_key": MASTER_KEY,
+                        "window_label": "总库",
+                        "name": name,
+                        "description": desc,
+                        "songs": [_song_item(s, i) for i, s in enumerate(songs)],
+                    },
+                }
             state = service.current_window()
             name = await service.preview_playlist_name(gid)
             desc = await service.rebuild_description(gid)
@@ -639,12 +717,18 @@ async def dispatch_action(body: dict) -> dict:
 
         if action == "preview_name":
             gid = int(body.get("group_id"))
-            name = await service.preview_playlist_name(gid)
+            if wk == MASTER_KEY:
+                name = await service.preview_master_name(gid)
+            else:
+                name = await service.preview_playlist_name(gid)
             return {"ok": True, "message": "歌单名预览已生成", "data": {"name": name}}
 
         if action == "preview_desc":
             gid = int(body.get("group_id"))
-            desc = await service.rebuild_description(gid)
+            if wk == MASTER_KEY:
+                desc = await service.preview_master_description(gid)
+            else:
+                desc = await service.rebuild_description(gid)
             return {"ok": True, "message": "简介预览已生成", "data": {"description": desc}}
 
         # ---- 网页端收集管理（需求 1）----
@@ -673,6 +757,8 @@ async def dispatch_action(body: dict) -> dict:
 
         if action == "sync":
             gid = int(body.get("group_id"))
+            if wk == MASTER_KEY:
+                return await service.sync_master_playlist(gid)
             return await service.sync_playlist(gid)
 
         return {"ok": False, "message": f"未知操作: {action}"}
@@ -684,7 +770,8 @@ async def _api_overview(request: Request):
     if not _token_ok(request):
         raise HTTPException(status_code=401, detail="unauthorized")
     wk = request.query_params.get("window_key") or None
-    return JSONResponse(await build_overview(wk))
+    scope = request.query_params.get("scope") or "window"
+    return JSONResponse(await build_overview(wk, scope=scope))
 
 
 async def _api_action(request: Request):
