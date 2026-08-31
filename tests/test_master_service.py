@@ -114,8 +114,8 @@ async def test_handle_segments_master_dup():
     config_manager.config.master.enabled = True
     config_manager.config.master.compare_on_share = True
 
-    # 先手动把这首歌放进总库，模拟「已被其他窗口分享过」
-    await store.add_song(gid, MASTER_KEY, _song("555", "孤勇者"))
+    # 先手动把这首歌放进总库，模拟「已被其他窗口分享过」，并标注首发来源窗口
+    await store.add_song(gid, MASTER_KEY, _song("555", "孤勇者"), src_window="W-首发期")
 
     # 用真实 detector 解析链接（无需联网），只桩 providers.resolve 返回固定歌曲
     real_resolve = svc.providers.resolve
@@ -130,6 +130,7 @@ async def test_handle_segments_master_dup():
         )
         check("本次窗口收录成功", len(r.accepted) == 1, str(r.accepted))
         check("命中总库已存在 -> master_duplicated", len(r.master_duplicated) == 1, str(r.master_duplicated))
+        check("master_dup 记录携带首发来源窗口", r.master_duplicated[0].src_window == "W-首发期", str(r.master_duplicated[0].src_window))
     finally:
         svc.providers.resolve = real_resolve
 
@@ -216,6 +217,34 @@ async def test_auto_archive_master():
     check("added 含该歌", arch and "1" in arch["added_ids"], f"-> {arch}")
 
 
+async def test_build_master_dup_text_period_date():
+    print("\n[G] build_master_dup_text 含首发期号/日期/首发者")
+    from music_collector.service import service as svc_singleton
+    import music_collector as init_mod
+    cfg = config_manager.config.master
+    cfg.notify_template = "在 {period} 期 {date}，由 {who} 分享过了哟"
+    cfg.enabled = True
+    config_manager.config.playlist.sharer_aliases = {}
+    # 1700000000 -> 2023-11-14 (本地时区)
+    song = Song(platform="netease", song_id="1", title="孤勇者",
+                sharer_name="张三", created_at=1700000000.0, src_window="Wk.86线上学习26/8/7")
+    async def _count(gid, wk): return 5
+    orig_count = svc_singleton.store.count
+    orig_cw = svc_singleton.current_window
+    svc_singleton.store.count = _count
+    svc_singleton.current_window = lambda: type("S", (), {"label": "x"})()
+    try:
+        text = await init_mod.build_master_dup_text(song, 3, 6001, "李四")
+    finally:
+        svc_singleton.store.count = orig_count
+        svc_singleton.current_window = orig_cw
+    import time as _time
+    expected_date = _time.strftime("%y/%m/%d", _time.localtime(1700000000.0))
+    check("含首发期号", "Wk.86线上学习26/8/7" in text, text)
+    check("含首发者", "张三" in text, text)
+    check("含首发日期 YY/MM/DD", expected_date in text, text)
+
+
 async def main() -> None:
     await test_aggregate_to_master()
     await test_handle_segments_master_dup()
@@ -223,6 +252,7 @@ async def main() -> None:
     await test_sync_master_playlist()
     await test_preview_master()
     await test_auto_archive_master()
+    await test_build_master_dup_text_period_date()
     print("\n====================================================")
     print(f"通过 {PASSED} 项，失败 {FAILED} 项")
     if FAILED:

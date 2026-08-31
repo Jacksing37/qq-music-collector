@@ -60,6 +60,9 @@ class Song:
     matched: bool = False
     # 数据库行号，入库后回填，用于保持分享先后顺序
     row_id: Optional[int] = None
+    # 所属窗口键；总库记录额外保存首发来源窗口（src_window，用于重复提示的「期号」）
+    window_key: str = ""
+    src_window: str = ""
 
     @property
     def platform_name(self) -> str:

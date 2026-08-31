@@ -157,7 +157,9 @@ class CollectorService:
             # 与同窗口重复提示互不冲突、不重复刷屏。
             master_dup_stored = None
             if self.config.master.enabled:
-                m_inserted, m_stored = await self.store.add_song(group_id, MASTER_KEY, song)
+                m_inserted, m_stored = await self.store.add_song(
+                    group_id, MASTER_KEY, song, src_window=state.key
+                )
                 if inserted and not m_inserted:
                     master_dup_stored = m_stored
 
@@ -258,7 +260,9 @@ class CollectorService:
                     duration=s.duration, sharer_id=s.sharer_id, sharer_name=s.sharer_name,
                     netease_id=s.netease_id, matched=s.matched, created_at=s.created_at,
                 )
-                ins, _ = await self.store.add_song(group_id, MASTER_KEY, song)
+                ins, _ = await self.store.add_song(
+                    group_id, MASTER_KEY, song, src_window=wk
+                )
                 if ins:
                     added += 1
         return added

@@ -148,7 +148,7 @@ FIELD_META["master.compare_on_share"] = (
     "分享对比总库", "开启后分享已存在于总库的歌会提示重复（仅跨窗口；同窗口重复走通用「重复提醒」）", False,
 )
 FIELD_META["master.notify_template"] = (
-    "重复提示文案", "占位符：{title}歌名 {artists}歌手 {platform}来源 {sharer}本次分享者 {who}总库首发者 {index}总库序号 {count}总库总数 {window}当前窗口；用 \\n 换行", True,
+    "重复提示文案", "占位符：{title}歌名 {artists}歌手 {platform}来源 {sharer}本次分享者 {who}总库首发者 {index}总库序号 {count}总库总数 {window}当前窗口 {period}首发期号(来源窗口) {date}首发日期(YY/MM/DD)；用 \\n 换行", True,
 )
 FIELD_META["master.auto_archive"] = (
     "分享即归档总库", "每收到新分享立即把总库增量同步到总库歌单（静默执行，不刷屏）", False,

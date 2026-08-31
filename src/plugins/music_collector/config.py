@@ -188,7 +188,7 @@ class IntroConfig(BaseModel):
 
 #: 总库重复提示默认文案。占位符见 MasterConfig.notify_template 注释。
 DEFAULT_MASTER_DUP = (
-    " 这首《{title}》之前已经有人分享过了（总库第 {index} 位，首发: {who}）"
+    " 这首《{title}》在 {period} 期 {date}，由 {who} 分享过了哟"
 )
 
 

@@ -205,13 +205,22 @@ async def _playlist_placeholder(group_id: int, window_key: str) -> str:
     return url
 
 
+def _fmt_dup_date(ts: float) -> str:
+    """把 Unix 时间戳格式化成 YY/MM/DD（本地时区），用于总库重复提示。"""
+    if not ts:
+        return "—"
+    t = time.localtime(ts)
+    return f"{t.tm_year % 100:02d}/{t.tm_mon:02d}/{t.tm_mday:02d}"
+
+
 async def build_master_dup_text(
     song: Song, index: int, group_id: int, sharer_name: str
 ) -> str:
     """生成总库跨窗口重复提示文案（模板见 config.master.notify_template）。
 
     占位符：{title}歌名 {artists}歌手 {platform}来源 {sharer}本次分享者
-    {who}总库首发者 {index}总库序号 {count}总库总数 {window}当前窗口。
+    {who}总库首发者 {index}总库序号 {count}总库总数 {window}当前窗口
+    {period}首发所在期号（来源窗口） {date}首发分享日期(YY/MM/DD)。
     """
     cfg = service.config.master
     aliases = service.config.playlist.sharer_aliases
@@ -233,6 +242,8 @@ async def build_master_dup_text(
         "index": str(index),
         "count": str(count),
         "window": state.label,
+        "period": getattr(song, "src_window", "") or "",
+        "date": _fmt_dup_date(song.created_at),
     }
     return render_template(cfg.notify_template, context)
 
@@ -335,7 +346,8 @@ async def handle_music_share(bot: Bot, event: GroupMessageEvent) -> None:
             except Exception as exc:
                 logger.warning(f"[music] 总库重复提示渲染失败，回退内置格式: {exc}")
                 who = resolve_alias(song.sharer_name or str(song.sharer_id), song.sharer_id, cfg.playlist.sharer_aliases)
-                text = f" 这首《{song.title}》之前已经有人分享过了（总库第 {index} 位，首发: {who}）"
+                period = getattr(song, "src_window", "") or ""
+                text = f" 这首《{song.title}》在 {period} 期 {_fmt_dup_date(song.created_at)}，由 {who} 分享过了哟"
             await _reply_song(bot, event, text, song, with_card=cfg.reply_card)
 
     if result.unidentified:

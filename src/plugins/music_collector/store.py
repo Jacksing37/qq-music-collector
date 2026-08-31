@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS songs (
     -- 显式排序权重：拖拽/上下移动时改写，便于网页端手动调整榜单顺序
     -- （默认 0，按 id 升序回退到分享先后顺序）
     sort_order  INTEGER NOT NULL DEFAULT 0,
+    src_window  TEXT    NOT NULL DEFAULT '',
     UNIQUE(group_id, window_key, platform, song_id)
 );
 CREATE INDEX IF NOT EXISTS idx_songs_window ON songs(group_id, window_key, id);
@@ -79,7 +80,7 @@ CREATE TABLE IF NOT EXISTS pending_desc (
 
 _COLUMNS = (
     "id, group_id, window_key, platform, song_id, title, artists, album, "
-    "cover, url, duration, sharer_id, sharer_name, created_at, netease_id, matched"
+    "cover, url, duration, sharer_id, sharer_name, created_at, netease_id, matched, src_window"
 )
 
 
@@ -99,6 +100,8 @@ def _row_to_song(row: aiosqlite.Row) -> Song:
         netease_id=row["netease_id"],
         matched=bool(row["matched"]),
         row_id=row["id"],
+        window_key=row["window_key"],
+        src_window=row["src_window"],
     )
 
 
@@ -135,14 +138,22 @@ class Store:
                 await db.execute(
                     "ALTER TABLE songs ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"
                 )
+            if "src_window" not in scols:
+                await db.execute(
+                    "ALTER TABLE songs ADD COLUMN src_window TEXT NOT NULL DEFAULT ''"
+                )
             await db.commit()
 
     # ------------------------------------------------------------ 写入
 
-    async def add_song(self, group_id: int, window_key: str, song: Song) -> tuple[bool, Song]:
+    async def add_song(
+        self, group_id: int, window_key: str, song: Song,
+        src_window: Optional[str] = None,
+    ) -> tuple[bool, Song]:
         """插入一首歌。返回 (是否新增, 最终落库的 Song)。
 
         重复分享时返回已有记录，方便上层提示"这首已经有人分享过了"。
+        ``src_window`` 用于总库记录回溯首发来源窗口（默认等于 window_key）。
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -151,14 +162,15 @@ class Store:
                 INSERT OR IGNORE INTO songs
                     (group_id, window_key, platform, song_id, title, artists, album,
                      cover, url, duration, sharer_id, sharer_name, created_at,
-                     netease_id, matched)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     netease_id, matched, src_window)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     group_id, window_key, song.platform, song.song_id, song.title,
                     song.artists, song.album, song.cover, song.url, song.duration,
                     song.sharer_id, song.sharer_name, song.created_at or time.time(),
                     song.netease_id, int(song.matched),
+                    src_window or window_key,
                 ),
             )
             inserted = cursor.rowcount > 0

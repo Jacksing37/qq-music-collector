@@ -79,10 +79,26 @@ async def test_master_cross_window_dedup():
     check("总库该歌仅 1 条", cnt == 1, f"cnt={cnt}")
 
 
+async def test_master_src_window_persisted():
+    print("\n[D] 总库记录保存首发来源窗口（src_window）")
+    store = Store(Path(tempfile.mktemp(suffix=".db")))
+    await store.init()
+    gid = 7003
+    ins, stored = await store.add_song(
+        gid, MASTER_KEY, _song("5", "溯源歌"), src_window="W1")
+    check("总库新增成功", ins, f"ins={ins}")
+    check("落库 src_window=W1", stored.src_window == "W1", f"src_window={stored.src_window}")
+    check("落库 window_key=__master__", stored.window_key == MASTER_KEY, f"wk={stored.window_key}")
+    # 未传 src_window 时默认等于 window_key
+    _, stored2 = await store.add_song(gid, "W2", _song("6", "普通歌"))
+    check("未传 src_window 默认=window_key", stored2.src_window == "W2", f"src_window={stored2.src_window}")
+
+
 async def main() -> None:
     await test_master_key_constant()
     await test_master_excluded_from_lists()
     await test_master_cross_window_dedup()
+    await test_master_src_window_persisted()
     print("\n====================================================")
     print(f"通过 {PASSED} 项，失败 {FAILED} 项")
     if FAILED:
