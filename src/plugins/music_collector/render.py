@@ -44,19 +44,30 @@ _BOLD_CANDIDATES = [
     "/System/Library/Fonts/PingFang.ttc",
 ]
 
+# 泰文字体候选（Linux 上通常由 fonts-noto-sans-thai / google-noto-sans-thai-fonts 提供）
+_THAI_CANDIDATES = [
+    "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansThai-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansThai.ttf",
+    "/usr/share/fonts/truetype/thai/NotoSansThai-Regular.ttf",
+    "/usr/share/fonts/google-noto/NotoSansThai-Regular.ttf",
+    "/usr/share/fonts/google-noto-cjk/NotoSansThai-Regular.ttf",
+]
+
 # 系统字体目录（兜底扫描用）
 _FONT_DIRS = ["/usr/share/fonts", "/usr/local/share/fonts", "/usr/share/X11/fonts"]
 # 兜底扫描时认可的文件/目录名关键字（小写匹配）。
 # 同时匹配「文件名」和「所在目录名」——dnf 系字体常落在 google-noto-cjk 目录里。
 _CJK_HINTS = ("cjk", "wqy", "droidsansfallback", "sourcehansans", "notosanssc", "noto-sans-cjk", "han")
+_THAI_HINTS = ("thai", "notosansthai")
 
 
-@lru_cache(maxsize=2)
-def _scan_cjk_font(prefer_bold: bool) -> Optional[str]:
-    """候选路径全落空时，遍历系统字体目录找一个能显示中文的字体。
+@lru_cache(maxsize=4)
+def _scan_font(prefer_bold: bool, hints: tuple[str, ...]) -> Optional[str]:
+    """候选路径全落空时，遍历系统字体目录找一个匹配关键字的字体。
 
-    容器/发行版之间 fonts-noto-cjk 的落盘路径差异很大，硬编码列表容易漏，
-    扫一遍比让用户看到一屏方块字强。
+    容器/发行版之间字体的落盘路径差异很大，硬编码列表容易漏，
+    扫一遍比让用户看到一屏方块字强。``hints`` 为文件名/父目录名要包含的小写关键字。
     """
     found: list[str] = []
     for base in _FONT_DIRS:
@@ -67,7 +78,7 @@ def _scan_cjk_font(prefer_bold: bool) -> Optional[str]:
             if path.suffix.lower() not in (".ttc", ".otf", ".ttf"):
                 continue
             haystack = path.name.lower() + "/" + path.parent.name.lower()
-            if any(hint in haystack for hint in _CJK_HINTS):
+            if any(hint in haystack for hint in hints):
                 found.append(str(path))
     if not found:
         return None
@@ -81,6 +92,14 @@ def _scan_cjk_font(prefer_bold: bool) -> Optional[str]:
     return found[0]
 
 
+def _scan_cjk_font(prefer_bold: bool) -> Optional[str]:
+    return _scan_font(prefer_bold, _CJK_HINTS)
+
+
+def _scan_thai_font() -> Optional[str]:
+    return _scan_font(False, _THAI_HINTS)
+
+
 def _find_font(candidates: Sequence[str], override: Optional[str] = None) -> Optional[str]:
     if override and Path(override).exists():
         return override
@@ -90,6 +109,15 @@ def _find_font(candidates: Sequence[str], override: Optional[str] = None) -> Opt
     return _scan_cjk_font(candidates is _BOLD_CANDIDATES)
 
 
+def _find_thai_font(override: Optional[str] = None) -> Optional[str]:
+    if override and Path(override).exists():
+        return override
+    for path in _THAI_CANDIDATES:
+        if Path(path).exists():
+            return path
+    return _scan_thai_font()
+
+
 def _load_font(path: Optional[str], size: int) -> ImageFont.FreeTypeFont:
     if path:
         try:
@@ -97,6 +125,72 @@ def _load_font(path: Optional[str], size: int) -> ImageFont.FreeTypeFont:
         except OSError:
             pass
     return ImageFont.load_default(size)
+
+
+# ---------------------------------------------------------------- 多脚本回退
+# Pillow 的 draw.text 不会跨字体自动回退：主字体（CJK）不含泰文等字形时会画成方块。
+# 这里按字符码点把「泰文」等主字体缺失的脚本路由到对应回退字体，逐段绘制。
+
+# (字体, 回退字体) 二元组，回退字体为 None 时全走主字体（无泰文字体时等价旧行为）。
+FontPair = tuple[ImageFont.FreeTypeFont, Optional[ImageFont.FreeTypeFont]]
+
+
+def _script_font(ch: str, thai: Optional[ImageFont.FreeTypeFont],
+                 primary: ImageFont.FreeTypeFont) -> ImageFont.FreeTypeFont:
+    o = ord(ch)
+    # 泰文 Unicode 区块 U+0E00–U+0E7F
+    if 0x0E00 <= o <= 0x0E7F and thai is not None:
+        return thai
+    return primary
+
+
+def _split_runs(text: str, pair: FontPair):
+    """把文本按「用哪个字体画」切成连续段，返回 [(font, run), ...]。"""
+    primary, thai = pair
+    runs: list[tuple[ImageFont.FreeTypeFont, str]] = []
+    cur: Optional[ImageFont.FreeTypeFont] = None
+    buf = ""
+    for ch in text:
+        f = _script_font(ch, thai, primary)
+        if f is cur:
+            buf += ch
+        else:
+            if buf:
+                runs.append((cur, buf))
+            cur = f
+            buf = ch
+    if buf:
+        runs.append((cur, buf))
+    return runs
+
+
+def _text_width(draw: ImageDraw.ImageDraw, text: str, pair: FontPair) -> float:
+    return sum(draw.textlength(run, font=f) for f, run in _split_runs(text, pair))
+
+
+def _draw_text(draw: ImageDraw.ImageDraw, xy: tuple[int, int], text: str,
+               pair: FontPair, fill) -> float:
+    """带脚本回退的绘制，返回绘制结束的 x 坐标。"""
+    x, y = xy
+    for f, run in _split_runs(text, pair):
+        draw.text((x, y), run, font=f, fill=fill)
+        x += draw.textlength(run, font=f)
+    return x
+
+
+def _ellipsize_fb(draw: ImageDraw.ImageDraw, text: str, pair: FontPair,
+                  max_w: int) -> str:
+    if _text_width(draw, text, pair) <= max_w:
+        return text
+    ellipsis = "…"
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _text_width(draw, text[:mid] + ellipsis, pair) <= max_w:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo] + ellipsis
 
 
 # ---------------------------------------------------------------- 主题
@@ -214,20 +308,6 @@ async def fetch_covers(songs: Sequence[Song]) -> dict[str, bytes]:
 # ---------------------------------------------------------------- 绘制
 
 
-def _ellipsize(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_w: int) -> str:
-    if draw.textlength(text, font=font) <= max_w:
-        return text
-    ellipsis = "…"
-    lo, hi = 0, len(text)
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if draw.textlength(text[:mid] + ellipsis, font=font) <= max_w:
-            lo = mid
-        else:
-            hi = mid - 1
-    return text[:lo] + ellipsis
-
-
 def _rounded_cover(data: bytes, size: int, radius: int = 10) -> Optional[Image.Image]:
     try:
         img = Image.open(io.BytesIO(data)).convert("RGB")
@@ -254,24 +334,29 @@ def _render_page(
 ) -> Image.Image:
     regular = _find_font(_REGULAR_CANDIDATES, cfg.font_path)
     bold = _find_font(_BOLD_CANDIDATES, cfg.font_path)
+    thai_path = _find_thai_font(cfg.thai_font_path)
 
-    f_title = _load_font(bold, 34)
-    f_sub = _load_font(regular, 17)
-    f_name = _load_font(bold, 20)
-    f_meta = _load_font(regular, 15)
-    f_index = _load_font(bold, 19)
-    f_small = _load_font(regular, 14)
+    def _tf(size: int) -> Optional[ImageFont.FreeTypeFont]:
+        return _load_font(thai_path, size) if thai_path else None
+
+    # (主字体, 泰文回退字体) 二元组；无泰文字体时回退为 None（等价旧行为）
+    f_title = (_load_font(bold, 34), _tf(34))
+    f_sub = (_load_font(regular, 17), _tf(17))
+    f_name = (_load_font(bold, 20), _tf(20))
+    f_meta = (_load_font(regular, 15), _tf(15))
+    f_index = (_load_font(bold, 19), _tf(19))
+    f_small = (_load_font(regular, 14), _tf(14))
 
     height = HEADER_H + ROW_H * len(songs) + FOOTER_H
     img = Image.new("RGB", (WIDTH, height), theme.bg)
     draw = ImageDraw.Draw(img)
 
     # 头部
-    draw.text((PADDING, 34), title, font=f_title, fill=theme.text)
-    draw.text((PADDING, 84), subtitle, font=f_sub, fill=theme.subtext)
+    _draw_text(draw, (PADDING, 34), title, f_title, theme.text)
+    _draw_text(draw, (PADDING, 84), subtitle, f_sub, theme.subtext)
     if page_info:
-        w = draw.textlength(page_info, font=f_sub)
-        draw.text((WIDTH - PADDING - w, 88), page_info, font=f_sub, fill=theme.subtext)
+        w = _text_width(draw, page_info, f_sub)
+        _draw_text(draw, (WIDTH - PADDING - w, 88), page_info, f_sub, theme.subtext)
     draw.line([(PADDING, HEADER_H - 14), (WIDTH - PADDING, HEADER_H - 14)], fill=theme.divider, width=1)
 
     # 条目
@@ -282,8 +367,8 @@ def _render_page(
         )
 
         num = str(start_index + i)
-        num_w = draw.textlength(num, font=f_index)
-        draw.text((PADDING + 40 - num_w, top + 32), num, font=f_index, fill=theme.accent)
+        num_w = _text_width(draw, num, f_index)
+        _draw_text(draw, (PADDING + 40 - num_w, top + 32), num, f_index, theme.accent)
 
         cover_x = PADDING + 56
         cover_y = top + 8
@@ -302,34 +387,34 @@ def _render_page(
             text_x = cover_x
 
         right_limit = WIDTH - PADDING - 190
-        name = _ellipsize(draw, song.title or "未识别歌曲", f_name, right_limit - text_x)
-        draw.text((text_x, top + 16), name, font=f_name, fill=theme.text)
+        name = _ellipsize_fb(draw, song.title or "未识别歌曲", f_name, right_limit - text_x)
+        _draw_text(draw, (text_x, top + 16), name, f_name, theme.text)
 
         meta_parts = [song.artists or "未知歌手"]
         if song.album:
             meta_parts.append(song.album)
-        meta = _ellipsize(draw, " · ".join(meta_parts), f_meta, right_limit - text_x)
-        draw.text((text_x, top + 46), meta, font=f_meta, fill=theme.subtext)
+        meta = _ellipsize_fb(draw, " · ".join(meta_parts), f_meta, right_limit - text_x)
+        _draw_text(draw, (text_x, top + 46), meta, f_meta, theme.subtext)
 
         # 右侧信息
         tag = song.platform_name
-        tag_w = draw.textlength(tag, font=f_small)
+        tag_w = _text_width(draw, tag, f_small)
         draw.rounded_rectangle(
             (WIDTH - PADDING - 24 - tag_w - 16, top + 16,
              WIDTH - PADDING - 24, top + 40),
             radius=6, outline=theme.accent, width=1,
         )
-        draw.text((WIDTH - PADDING - 32 - tag_w, top + 21), tag, font=f_small, fill=theme.accent)
+        _draw_text(draw, (WIDTH - PADDING - 32 - tag_w, top + 21), tag, f_small, theme.accent)
 
         sharer = resolve_alias(song.sharer_name or "", song.sharer_id, aliases)
         if sharer:
-            sharer_text = _ellipsize(draw, f"by {sharer}", f_small, 168)
-            sw = draw.textlength(sharer_text, font=f_small)
-            draw.text((WIDTH - PADDING - 24 - sw, top + 48), sharer_text,
-                      font=f_small, fill=theme.subtext)
+            sharer_text = _ellipsize_fb(draw, f"by {sharer}", f_small, 168)
+            sw = _text_width(draw, sharer_text, f_small)
+            _draw_text(draw, (WIDTH - PADDING - 24 - sw, top + 48), sharer_text,
+                       f_small, theme.subtext)
 
     footer = f"生成于 {datetime.now():%Y-%m-%d %H:%M}"
-    draw.text((PADDING, height - FOOTER_H + 18), footer, font=f_small, fill=theme.subtext)
+    _draw_text(draw, (PADDING, height - FOOTER_H + 18), footer, f_small, theme.subtext)
     return img
 
 

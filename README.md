@@ -274,6 +274,9 @@ Wk.86 线上学习歌单，共 12 首。
 4. **字体**：纯净 Linux 镜像常没有中文字体，长图会变方块。Docker 镜像已内置中文字体；
    裸机 Debian/Ubuntu 用 `apt install fonts-noto-cjk`；RHEL/CentOS/Rocky/Alma（dnf 系）用
    `dnf install google-noto-sans-cjk-ttc-fonts`（或 `wqy-zenhei`）。
+   **泰文**：歌单图片里若出现泰文昵称/歌名，主字体（CJK）不含泰文，需单独装泰文字体——
+   Debian/Ubuntu：`apt install fonts-noto-sans-thai`；dnf 系：`dnf install google-noto-sans-thai-fonts`。
+   装好后渲染会自动探测到，无需改配置；也可在 `render.thai_font_path` 显式指定。
 
 ### 方式一：Docker（NapCat 也是 Docker 时首选）
 

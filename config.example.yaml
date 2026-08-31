@@ -128,6 +128,9 @@ render:
   show_cover: true
   # 留空自动探测系统中文字体
   font_path: null
+  # 泰文字体路径。歌单图片里的泰文昵称/歌名需要；主字体(CJK)不含泰文，不装会显示成方块。
+  # 留空则自动探测系统中的泰文字体（如 fonts-noto-sans-thai / google-noto-sans-thai-fonts）。
+  thai_font_path: null
   # light / dark
   theme: dark
 

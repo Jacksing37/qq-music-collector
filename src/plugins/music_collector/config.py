@@ -252,6 +252,9 @@ class RenderConfig(BaseModel):
     show_cover: bool = True
     #: 自定义字体路径，留空则自动探测系统中文字体
     font_path: Optional[str] = None
+    #: 泰文字体路径（歌单图片里的泰文昵称/歌名需要）。留空则自动探测系统中的泰文字体
+    #: （如 fonts-noto-sans-thai）。主字体（CJK）不含泰文，不装会显示成方块。
+    thai_font_path: Optional[str] = None
     #: 图片主题：light / dark
     theme: Literal["light", "dark"] = "dark"
 
