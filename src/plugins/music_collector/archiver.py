@@ -272,18 +272,22 @@ class Archiver:
         songs: Sequence[Song],
         merged_ids: set[str],
     ) -> None:
-        """把歌单里已有的曲目重排成与 ``songs`` 一致的顺序，使歌单与简介顺序对齐。
+        """把歌单内曲目顺序重排成与 ``songs`` 一致（歌单顺序 = 简介顺序）。
 
-        - 仅当 NeteaseAPI 提供重排接口时执行；测试 stub 无该方法则直接跳过，
-          不影响归档主流程。
+        实现改用「移除本 bot 管理的曲目 + 按窗口正序重新加入」两步，只依赖已验证的
+        ``add_tracks`` / ``remove_tracks``，**不依赖网易云专门的 reorder 接口**
+        （该接口在不少环境会静默失效：返回 200 但不真改顺序，导致「同步后顺序不变」）。
+
         - 以「当前歌单实际曲目」为基准：清单曲目按 ``songs`` 顺序排列在前，
-          清单外（如用户手动加的歌）原样附加在后，绝不会误删歌单里的歌。
-        - 任何异常都不影响归档，仅记日志。
+          清单外（用户手动加的歌）原样附加在后，绝不会误删歌单里的歌。
+        - 安全护栏：若当前曲目与本 bot 已收录没有任何交集，说明读到的曲目列表
+          不可信（接口异常 / 歌单被换），直接跳过，避免「清空后重加」误删用户歌曲。
+        - 任何异常都不影响归档主流程，仅记日志。
         """
         try:
-            if not hasattr(self.api, "reorder_tracks") or not hasattr(
-                self.api, "playlist_track_ids"
-            ):
+            if not hasattr(self.api, "add_tracks") or not hasattr(self.api, "remove_tracks"):
+                return
+            if not hasattr(self.api, "playlist_track_ids"):
                 return
             current = await self.api.playlist_track_ids(playlist_id)
             if not current:
@@ -293,12 +297,26 @@ class Archiver:
                 str(s.netease_id) for s in songs
                 if s.netease_id and str(s.netease_id) in merged
             ]
+            if not canonical:
+                return
             canon_set = set(canonical)
+            # 安全护栏：当前歌单里至少要包含一首本 bot 管理的歌，否则说明拿到的
+            # 曲目列表不可信，跳过以免误删用户手动加入的歌。
+            if not (canon_set & set(current)):
+                logger.warning(
+                    f"[music] 歌单重排跳过（当前曲目与已收录无交集）playlist={playlist_id}"
+                )
+                return
             extra = [cid for cid in current if cid not in canon_set]
             desired = canonical + extra
             if desired == current:
                 return
-            await self.api.reorder_tracks(playlist_id, desired)
+            # 先移除本 bot 管理的曲目（保留用户额外歌），再按窗口正序重新加入。
+            # add 会把整批倒序插到顶部，反转提交后顶部即 canonical 正序；
+            # 用户额外歌在 remove 后仍在，最终落在 canonical 之后。
+            managed = [cid for cid in current if cid in canon_set]
+            await self.api.remove_tracks(playlist_id, managed)
+            await self.api.add_tracks(playlist_id, list(reversed(canonical)))
         except Exception as exc:
             logger.warning(f"[music] 歌单重排失败 playlist={playlist_id}: {exc}")
 

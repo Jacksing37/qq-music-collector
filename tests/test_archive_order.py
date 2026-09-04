@@ -1,8 +1,9 @@
-"""归档后歌单顺序须与简介顺序一致（增量追加不再倒序）。
+"""归档/同步后歌单顺序须与简介顺序一致（增量追加不再倒序）。
 
 网易云 add 会把整批歌倒序插到歌单顶部；开启「分享即归档」后每首歌是单独增量追加，
 若不做处理，歌单会是最新在上、简介是最旧在上，两者相反。本测试用模拟「顶部插入」
-的 stub 验证重排逻辑能把歌单纠正为与简介一致的顺序，且不会误删用户手动加的歌。
+的 stub 验证重排逻辑（移除本 bot 管理的曲目再按窗口正序重新加入，不依赖网易云
+专用 reorder 接口）能把歌单纠正为与简介一致的顺序，且不会误删用户手动加的歌。
 
 运行: PYTHONDONTWRITEBYTECODE=1 ./.venv/Scripts/python.exe tests/test_archive_order.py
 """
@@ -59,12 +60,14 @@ class NeteaseStub:
         self.tracks[playlist_id] = list(reversed(batch)) + self.tracks[playlist_id]
         return {"code": 200}
 
+    async def remove_tracks(self, playlist_id: int, batch: list[str]) -> dict:
+        for tid in batch:
+            if tid in self.tracks[playlist_id]:
+                self.tracks[playlist_id].remove(tid)
+        return {"code": 200}
+
     async def playlist_track_ids(self, playlist_id: int) -> list[str]:
         return list(self.tracks.get(playlist_id, []))
-
-    async def reorder_tracks(self, playlist_id: int, ordered_ids: list[str]) -> dict:
-        self.tracks[playlist_id] = list(ordered_ids)
-        return {"code": 200}
 
     async def update_description(self, playlist_id: int, desc: str, name: str = "") -> tuple[bool, str]:
         self.descs[playlist_id] = desc
