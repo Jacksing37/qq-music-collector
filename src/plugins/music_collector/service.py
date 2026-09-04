@@ -330,6 +330,11 @@ class CollectorService:
             added_ids=[str(i) for i in new_added],
         )
 
+        # 同步后按总库顺序重排歌单，保证歌单顺序与简介一致
+        await self.archiver.reorder_to_match(
+            playlist_id, songs, {str(i) for i in new_added},
+        )
+
         desc = await self._render_description(
             songs, group_id, "总库", self._master_playlist_cfg(),
             start_at=None, end_at=None, count=len(songs),
@@ -914,6 +919,11 @@ class CollectorService:
             group_id, state.key, str(playlist_id), arch.get("playlist_url"),
             total=len(songs), added=len(new_added), failed=0,
             added_ids=[str(i) for i in new_added],
+        )
+
+        # 同步后按窗口顺序重排歌单，保证歌单顺序与简介/清单一致
+        await self.archiver.reorder_to_match(
+            playlist_id, songs, {str(i) for i in new_added},
         )
 
         desc = await self.rebuild_description(group_id, state)

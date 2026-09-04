@@ -484,6 +484,69 @@ class NeteaseAPI:
         detail = await self.playlist_detail(playlist_id)
         return (detail.get("description") or "") if detail else ""
 
+    async def playlist_track_ids(self, playlist_id: int) -> list[str]:
+        """读取歌单内全部曲目 id（按当前实际顺序）。
+
+        优先用 ``/playlist/track/all``（不受详情接口分页限制）；失败再退回从
+        详情里抠 ``trackIds`` / ``tracks``。返回空列表表示拿不到（调用方应跳过重排）。
+        """
+        try:
+            data = await self._api_get("/playlist/track/all", {
+                "id": playlist_id, "limit": 1000, "offset": 0,
+            })
+            songs = data.get("songs") or data.get("trackList") or []
+            ids = [str(s["id"]) for s in songs if isinstance(s, dict) and s.get("id")]
+            if ids:
+                return ids
+        except Exception:
+            pass
+        detail = await self.playlist_detail(playlist_id)
+        if not detail:
+            return []
+        ids: list[str] = []
+        for t in detail.get("trackIds") or []:
+            if isinstance(t, dict) and t.get("id"):
+                ids.append(str(t["id"]))
+            elif t:
+                ids.append(str(t))
+        if not ids:
+            for t in detail.get("tracks") or []:
+                if isinstance(t, dict) and t.get("id"):
+                    ids.append(str(t["id"]))
+        return [i for i in ids if i]
+
+    async def reorder_tracks(self, playlist_id: int, ordered_ids: list[str]) -> dict[str, Any]:
+        """按给定顺序重排歌单曲目（网易云 ``/song/order/update``）。
+
+        ``ordered_ids`` 必须是歌单当前曲目的完整 id 列表（顺序即期望顺序），
+        多/少/错任意一个都会报错，因此调用方需传入「当前实际曲目」重排后的完整列表。
+        """
+        ordered = [str(i) for i in ordered_ids]
+        if not ordered:
+            return {"code": 200}
+        if not self.logged_in:
+            raise NeteaseError(-2, "网易云未登录，请先执行 /music cookie <MUSIC_U>")
+        payload = {
+            "pid": str(playlist_id),
+            "ids": json.dumps(ordered, separators=(",", ":")),
+        }
+        last_error = "所有通道都失败"
+        for label, call in (
+            ("linuxapi", lambda: self._linux_post("/song/order/update", payload)),
+            ("api", lambda: self._api_post("/song/order/update", payload)),
+            ("weapi", lambda: self._post_checked("/song/order/update", payload)),
+        ):
+            try:
+                data = await call()
+            except Exception as exc:
+                last_error = f"{label}: {exc}"
+                continue
+            code = data.get("code")
+            if code in (200,):
+                return data
+            last_error = f"{label}: code={code} {data.get('message') or data.get('msg') or ''}"
+        raise NeteaseError(-1, f"歌单重排失败 -> {last_error}")
+
     async def update_description(
         self, playlist_id: int, desc: str, name: str = ""
     ) -> tuple[bool, str]:

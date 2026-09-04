@@ -26,6 +26,13 @@ from .naming import (
 from .netease_api import NeteaseAPI, NeteaseError
 from .store import Store
 
+try:  # 插件内用 nonebot logger，离线测试退回标准库
+    from nonebot.log import logger
+except Exception:  # pragma: no cover
+    import logging
+
+    logger = logging.getLogger("music_collector.archiver")
+
 # 搜索限速，避免触发风控
 _SEARCH_INTERVAL = 0.35
 
@@ -259,6 +266,42 @@ class Archiver:
         )
         return False, note
 
+    async def reorder_to_match(
+        self,
+        playlist_id: int,
+        songs: Sequence[Song],
+        merged_ids: set[str],
+    ) -> None:
+        """把歌单里已有的曲目重排成与 ``songs`` 一致的顺序，使歌单与简介顺序对齐。
+
+        - 仅当 NeteaseAPI 提供重排接口时执行；测试 stub 无该方法则直接跳过，
+          不影响归档主流程。
+        - 以「当前歌单实际曲目」为基准：清单曲目按 ``songs`` 顺序排列在前，
+          清单外（如用户手动加的歌）原样附加在后，绝不会误删歌单里的歌。
+        - 任何异常都不影响归档，仅记日志。
+        """
+        try:
+            if not hasattr(self.api, "reorder_tracks") or not hasattr(
+                self.api, "playlist_track_ids"
+            ):
+                return
+            current = await self.api.playlist_track_ids(playlist_id)
+            if not current:
+                return
+            merged = {str(i) for i in merged_ids}
+            canonical: list[str] = [
+                str(s.netease_id) for s in songs
+                if s.netease_id and str(s.netease_id) in merged
+            ]
+            canon_set = set(canonical)
+            extra = [cid for cid in current if cid not in canon_set]
+            desired = canonical + extra
+            if desired == current:
+                return
+            await self.api.reorder_tracks(playlist_id, desired)
+        except Exception as exc:
+            logger.warning(f"[music] 歌单重排失败 playlist={playlist_id}: {exc}")
+
     async def match_netease_id(self, song: Song, cfg: PlaylistConfig) -> Optional[str]:
         """为一首歌找到对应的网易云歌曲 id。
 
@@ -441,6 +484,13 @@ class Archiver:
                 pass
             await asyncio.sleep(0.5)
         merged_ids = added_set | set(new_ids)
+
+        # 增量追加会把新歌顶到歌单顶部，导致「歌单顺序」与「简介顺序」相反；
+        # 这里按简介（desc_songs）的顺序把歌单重排回一致。复用场景（reused 非 None）
+        # 才走到这里，新建歌单的情况由上方整批反转保证正序，无需重排。
+        if reused_playlist_id is not None:
+            listed = desc_songs if desc_songs is not None else songs
+            await self.reorder_to_match(playlist_id, listed, merged_ids)
 
         report.ok = True
         report.playlist_id = playlist_id
