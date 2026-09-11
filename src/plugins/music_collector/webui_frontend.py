@@ -667,7 +667,7 @@ async function groupAction(act, gid, wk){
   act=ACT_MAP[act]||act;
   wk = wk || (COLL&&COLL.selected_window)||"";
   let body={action:act, group_id:gid, window_key:wk};
-  if(act==="del"){
+  if(act==="delete"){
     const card=document.querySelector(`.gcard[data-wk="${wk}"][data-gid="${gid}"]`);
     const checked=card?card.querySelectorAll(`.songchk[data-g="${gid}"]:checked`):[];
     const indices=Array.from(checked).map(c=>parseInt(c.dataset.idx,10));

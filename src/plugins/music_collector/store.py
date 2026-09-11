@@ -199,6 +199,25 @@ class Store:
                 row = await cur.fetchone()
         return inserted, (_row_to_song(row) if row else song)
 
+    async def find_in_window(
+        self, group_id: int, window_key: str, song: Song
+    ) -> Optional[Song]:
+        """查询某窗口是否已收录过同一首歌（platform + song_id 相同）。
+
+        仅查询、不写入。用于开启总库后判定「同窗口重复分享」：已存在总库的歌
+        不再写入当前窗口，但仍需据其在当前窗口是否已有记录决定要不要发
+        ``notify_duplicate`` 提示，避免重复分享完全静默。
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"SELECT {_COLUMNS} FROM songs "
+                "WHERE group_id=? AND window_key=? AND platform=? AND song_id=?",
+                (group_id, window_key, song.platform, song.song_id),
+            ) as cur:
+                row = await cur.fetchone()
+        return _row_to_song(row) if row else None
+
     async def mark_matched(self, row_id: int, netease_id: Optional[str]) -> None:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(

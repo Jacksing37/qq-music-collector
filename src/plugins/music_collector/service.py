@@ -167,7 +167,14 @@ class CollectorService:
                     master_dup_stored = m_stored
 
             if already_in_master:
-                result.master_duplicated.append(master_dup_stored)
+                # 已在总库（跨窗口重复）：不再写入当前窗口（避免重复计数）。
+                # 但若当前窗口此前也已收录过这首歌，仍记为同窗口重复，走 notify_duplicate，
+                # 否则开启总库后「同一首歌重复分享」会完全静默、不发任何提示。
+                win_stored = await self.store.find_in_window(group_id, state.key, song)
+                if win_stored is not None:
+                    result.duplicated.append(win_stored)
+                else:
+                    result.master_duplicated.append(master_dup_stored)
                 continue
 
             inserted, stored = await self.store.add_song(group_id, state.key, song)
