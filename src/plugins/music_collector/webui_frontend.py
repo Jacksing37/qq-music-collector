@@ -225,6 +225,10 @@ button:disabled{opacity:.5;cursor:not-allowed}
           <button id="mSyncBtn">🔄 同步全部歌单</button>
           <button id="mAddBtn">➕ 手动添加歌曲</button>
         </div>
+        <div class="row" style="margin-top:10px">
+          <input id="mImportUrl" placeholder="粘贴网易云歌单链接，如 https://music.163.com/#/playlist?id=123456" style="flex:1;min-width:260px" />
+          <button id="mImportBtn" class="btn-primary">📥 从歌单导入总库</button>
+        </div>
         <p class="muted">总库把当前群里<strong>所有窗口</strong>的歌曲汇聚去重。有人分享了总库里已存在的歌时，会在群里提示（提示开关与文案在「配置」页的「总库」分组里设置）。下面可对总库做编辑、匹配、拖拽排序、删除，并归档 / 同步到独立的<strong>总库网易云歌单</strong>（命名 / 简介 / 期号等配置同样在「配置」页设置）。</p>
       </div>
       <div id="masterGroups"><div class="empty">加载中…</div></div>
@@ -645,6 +649,15 @@ $("#mAddBtn").onclick=()=>{
   const g=(MASTER&&MASTER.groups||[])[0];
   ADD_CTX={window_key:MASTER_KEY, group_id:g?g.group_id:0};
   $("#addModal").classList.remove("hidden");
+};
+$("#mImportBtn").onclick=async()=>{
+  const g=(MASTER&&MASTER.groups||[])[0];
+  const gid=g?g.group_id:0;
+  const url=($("#mImportUrl").value||"").trim();
+  if(!url){ flashOp("请输入网易云歌单链接","bad"); return; }
+  await doAction({action:"import_playlist_master", group_id:gid, url});
+  $("#mImportUrl").value="";
+  await loadMaster();
 };
 
 /* ---- 编辑 / 匹配 / 添加 弹窗 ---- */

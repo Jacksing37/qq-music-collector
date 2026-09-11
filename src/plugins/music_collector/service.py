@@ -150,19 +150,24 @@ class CollectorService:
                 result.unidentified.append(song)
                 continue
 
-            inserted, stored = await self.store.add_song(group_id, state.key, song)
-
-            # 总库：启用后每首新分享同时进群级总库（跨窗口去重）。
-            # 仅当「本窗口是新收录、但总库早已存在该歌」时，记为跨窗口重复，
-            # 与同窗口重复提示互不冲突、不重复刷屏。
+            # 总库：启用后先判定该歌是否已存在于群级总库（跨窗口去重）。
+            # 若总库早已存在，则不再写入当前窗口，避免同一首歌在多个窗口重复收录，
+            # 仅记录为跨窗口重复提示（与同窗口重复互不冲突、不重复刷屏）。
             master_dup_stored = None
+            already_in_master = False
             if self.config.master.enabled:
                 m_inserted, m_stored = await self.store.add_song(
                     group_id, MASTER_KEY, song, src_window=state.key
                 )
-                if inserted and not m_inserted:
+                if not m_inserted:
+                    already_in_master = True
                     master_dup_stored = m_stored
 
+            if already_in_master:
+                result.master_duplicated.append(master_dup_stored)
+                continue
+
+            inserted, stored = await self.store.add_song(group_id, state.key, song)
             if inserted:
                 result.accepted.append(stored)
             else:
@@ -231,7 +236,7 @@ class CollectorService:
         """把总库增量归档到总库歌单（静默执行，不刷屏）。"""
         try:
             cfg = self._master_playlist_cfg()
-            all_songs = await self.store.list_songs(group_id, MASTER_KEY)
+            all_songs = await self.store.list_songs(group_id, MASTER_KEY, newest_first=True)
             report = await self.archiver.archive(
                 group_id, MASTER_KEY, "总库", all_songs, cfg,
                 start_at=None, end_at=None, desc_songs=all_songs,
@@ -267,11 +272,96 @@ class CollectorService:
                     added += 1
         return added
 
+    _PLAYLIST_RE = re.compile(
+        r"music\.163\.com/(?:#/)?(?:m/)?playlist[/\?]?[^\s#]*?id=(\d+)", re.I
+    )
+    _PLAYLIST_RE2 = re.compile(r"music\.163\.com/playlist/(\d+)", re.I)
+
+    @classmethod
+    def _extract_playlist_id(cls, text: str) -> Optional[str]:
+        """从文本（歌单链接或纯数字）里提取网易云歌单 id。"""
+        if not text:
+            return None
+        m = cls._PLAYLIST_RE.search(text) or cls._PLAYLIST_RE2.search(text)
+        if m:
+            return m.group(1)
+        s = text.strip()
+        if s.isdigit():
+            return s
+        return None
+
+    async def _song_details_bulk(self, ids: list[str]) -> dict[str, dict]:
+        """批量拉歌曲详情（网易云一次有限制，按 200 分批），返回 id->detail。"""
+        out: dict[str, dict] = {}
+        for i in range(0, len(ids), 200):
+            batch = ids[i:i + 200]
+            try:
+                dets = await self.netease.song_detail(batch)
+            except Exception:
+                dets = []
+            for d in dets:
+                did = d.get("id")
+                if did is not None:
+                    out[str(did)] = d
+        return out
+
+    async def import_playlist_to_master(self, group_id: int, playlist_url: str) -> dict:
+        """从网易云歌单链接解析全部曲目，导入到该群总库（跨窗口去重）。
+
+        带 WebUI 入口（总库页「从歌单导入总库」）。导入的歌统一标记 platform=netease、
+        netease_id=自身 id、matched=True，并按导入时刻写入 created_at（越新越靠前）。
+        """
+        pid = self._extract_playlist_id(playlist_url)
+        if not pid:
+            return {"ok": False, "message": "无法从链接解析出歌单 id"}
+        if not self.netease.logged_in:
+            return {"ok": False, "message": "网易云未登录，请先登录后再导入"}
+        try:
+            ids = await self.netease.playlist_track_ids(int(pid))
+        except Exception as exc:
+            return {"ok": False, "message": f"读取歌单曲目失败: {exc}"}
+        if not ids:
+            return {"ok": False, "message": "歌单为空或读取失败（可能不存在/无权限）"}
+        details = await self._song_details_bulk([str(i) for i in ids])
+        added = total = 0
+        for cid in ids:
+            d = details.get(str(cid))
+            if not d or not d.get("name"):
+                continue
+            total += 1
+            arts = d.get("artists") or d.get("ar") or []
+            artists = " / ".join(a.get("name", "") for a in arts)
+            album = (d.get("album") or {}).get("name", "") or ""
+            dur = int(d.get("duration") or d.get("dt") or 0) // 1000
+            song = Song(
+                platform="netease",
+                song_id=str(cid),
+                title=d["name"],
+                artists=artists,
+                album=album,
+                netease_id=str(cid),
+                matched=True,
+                duration=dur,
+                created_at=time.time(),
+            )
+            ins, _ = await self.store.add_song(
+                group_id, MASTER_KEY, song, src_window="import"
+            )
+            if ins:
+                added += 1
+        return {
+            "ok": True,
+            "added": added,
+            "total": total,
+            "message": f"已导入 {added}/{total} 首到总库"
+            + ("" if added == total else f"（{total - added} 首已存在或信息缺失跳过）"),
+        }
+
     async def run_master_archive(
         self, group_id: int, name_override: str = ""
     ) -> ArchiveReport:
         """把总库归档到网易云歌单（与正常收集一致：复用/新建、简介清单、期号等）。"""
-        songs = await self.store.list_songs(group_id, MASTER_KEY)
+        songs = await self.store.list_songs(group_id, MASTER_KEY, newest_first=True)
         cfg = self._master_playlist_cfg()
         report = await self.archiver.archive(
             group_id, MASTER_KEY, "总库", songs, cfg,
@@ -287,7 +377,9 @@ class CollectorService:
     async def sync_master_playlist(self, group_id: int) -> dict:
         """全量同步总库到总库歌单：增 + 删 + 简介（与正常收集一致）。"""
         cfg = self._master_playlist_cfg()
-        songs = await self.store.list_songs(group_id, MASTER_KEY)
+        songs = await self.store.list_songs(group_id, MASTER_KEY, newest_first=True)
+        # 同步前先对总库内全部歌做跨平台匹配，确保非网易云来源的歌也能进歌单
+        await self._ensure_matched(songs, cfg)
         arch = await self.store.get_archive(group_id, MASTER_KEY)
 
         if not arch or not str(arch.get("playlist_id") or ""):
@@ -354,7 +446,7 @@ class CollectorService:
         }
 
     async def preview_master_name(self, group_id: int) -> str:
-        songs = await self.store.list_songs(group_id, MASTER_KEY)
+        songs = await self.store.list_songs(group_id, MASTER_KEY, newest_first=True)
         m = self.config.master
         context = build_context(
             group_id=group_id, window_label="总库",
@@ -365,11 +457,26 @@ class CollectorService:
         return render_template(m.pending_name or m.name_template, context)
 
     async def preview_master_description(self, group_id: int) -> str:
-        songs = await self.store.list_songs(group_id, MASTER_KEY)
+        songs = await self.store.list_songs(group_id, MASTER_KEY, newest_first=True)
         return await self._render_description(
             songs, group_id, "总库", self._master_playlist_cfg(),
             start_at=None, end_at=None, count=len(songs),
         )
+
+    async def _ensure_matched(self, songs: Sequence[Song], cfg) -> None:
+        """为没有 ``netease_id`` 的歌做跨平台匹配，并落库（原地更新 ``song.netease_id``）。
+
+        同步 / 分享即归档复用歌单时，需要保证窗口里所有歌（含历史收录、之前没匹配上的
+        非网易云歌）都能被匹配进网易云歌单，而不只是当次新分享的那几首。
+        """
+        for s in songs:
+            if s.netease_id or s.row_id is None:
+                continue
+            nid = await self.archiver.match_netease_id(s, cfg)
+            if nid:
+                s.netease_id = nid
+                s.matched = True
+                await self.store.mark_matched(s.row_id, nid)
 
     async def auto_archive_songs(
         self, group_id: int, state: WindowState, songs: Sequence[Song]
@@ -377,13 +484,15 @@ class CollectorService:
         """把一批新分享的歌增量归档到当前窗口歌单。
 
         复用同一窗口已建的歌单（不会新建、不消耗期号）；失败只记日志，
-        不打断分享回复流程。
+        不打断分享回复流程。会先对窗口内全部歌做跨平台匹配，确保非网易云的歌
+        也能被加进歌单。
         """
         try:
             cfg = self.config.playlist
             all_songs = await self.store.list_songs(group_id, state.key)
+            await self._ensure_matched(all_songs, cfg)
             report = await self.archiver.archive(
-                group_id, state.key, state.label, songs, cfg,
+                group_id, state.key, state.label, all_songs, cfg,
                 start_at=state.start_at,
                 end_at=state.end_at or state.archive_at,
                 desc_songs=all_songs,
@@ -878,6 +987,8 @@ class CollectorService:
         state = window or self.current_window()
         cfg = self.config.playlist
         songs = await self.store.list_songs(group_id, state.key)
+        # 同步前先对窗口内全部歌做跨平台匹配，确保非网易云来源的歌也能进歌单
+        await self._ensure_matched(songs, cfg)
         arch = await self.store.get_archive(group_id, state.key)
 
         if not arch or not str(arch.get("playlist_id") or ""):

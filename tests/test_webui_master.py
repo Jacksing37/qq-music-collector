@@ -100,7 +100,7 @@ class _FakeService:
         async def groups_in_window(self, wk):
             return [6001] if wk == MASTER_KEY else [6001, 6002]
 
-        async def list_songs(self, gid, wk):
+        async def list_songs(self, gid, wk, newest_first=False):
             return self._p._master_songs if wk == MASTER_KEY else []
 
         async def get_archive(self, gid, wk):

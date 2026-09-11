@@ -571,7 +571,7 @@ async def build_overview(
         gids = await service.store.groups_in_window(MASTER_KEY)
         groups: list[dict] = []
         for gid in gids:
-            songs = await service.store.list_songs(gid, MASTER_KEY)
+            songs = await service.store.list_songs(gid, MASTER_KEY, newest_first=True)
             arch = await service.store.get_archive(gid, MASTER_KEY)
             groups.append({
                 "group_id": gid,
@@ -761,6 +761,13 @@ async def dispatch_action(body: dict) -> dict:
             if wk == MASTER_KEY:
                 return await service.sync_master_playlist(gid)
             return await service.sync_playlist(gid)
+
+        if action == "import_playlist_master":
+            gid = int(body.get("group_id"))
+            url = (body.get("url") or "").strip()
+            if not url:
+                return {"ok": False, "message": "请输入网易云歌单链接"}
+            return await service.import_playlist_to_master(gid, url)
 
         return {"ok": False, "message": f"未知操作: {action}"}
     except (ValueError, TypeError) as exc:

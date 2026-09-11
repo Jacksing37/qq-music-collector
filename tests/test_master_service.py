@@ -128,7 +128,8 @@ async def test_handle_segments_master_dup():
         r = await svc.handle_segments(
             gid, [{"type": "text", "data": {"text": "https://music.163.com/song?id=555"}}], 123, "李四"
         )
-        check("本次窗口收录成功", len(r.accepted) == 1, str(r.accepted))
+        # 已存在于总库的歌：不再收录进当前窗口，仅提示跨窗口重复
+        check("已在总库 -> 不入当前窗口", len(r.accepted) == 0, str(r.accepted))
         check("命中总库已存在 -> master_duplicated", len(r.master_duplicated) == 1, str(r.master_duplicated))
         check("master_dup 记录携带首发来源窗口", r.master_duplicated[0].src_window == "W-首发期", str(r.master_duplicated[0].src_window))
     finally:

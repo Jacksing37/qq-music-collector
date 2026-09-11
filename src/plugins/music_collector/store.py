@@ -331,12 +331,15 @@ class Store:
 
     # ------------------------------------------------------------ 读取
 
-    async def list_songs(self, group_id: int, window_key: str) -> list[Song]:
+    async def list_songs(
+        self, group_id: int, window_key: str, newest_first: bool = False
+    ) -> list[Song]:
+        order = "sort_order DESC, id DESC" if newest_first else "sort_order ASC, id ASC"
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 f"SELECT {_COLUMNS} FROM songs "
-                "WHERE group_id=? AND window_key=? ORDER BY sort_order ASC, id ASC",
+                f"WHERE group_id=? AND window_key=? ORDER BY {order}",
                 (group_id, window_key),
             ) as cur:
                 rows = await cur.fetchall()
