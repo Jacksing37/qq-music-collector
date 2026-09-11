@@ -992,7 +992,9 @@ class CollectorService:
         - ``netease_link``：网易云歌曲链接；仅当提供有效链接时才重新匹配，
           并把歌名/歌手/专辑覆盖为匹配结果（与手动匹配语义一致）。
         """
-        song = await self.store.get_song_by_index(group_id, window_key, index)
+        song = await self.store.get_song_by_index(
+            group_id, window_key, index, newest_first=(window_key == MASTER_KEY)
+        )
         if song is None or song.row_id is None:
             return {"ok": False, "message": "序号无效或歌曲不存在"}
         upd: dict = {}
@@ -1069,7 +1071,9 @@ class CollectorService:
 
         解析链接 → 取 song_id → 拉详情补全标题/歌手 → 写 netease_id + matched。
         """
-        song = await self.store.get_song_by_index(group_id, window_key, index)
+        song = await self.store.get_song_by_index(
+            group_id, window_key, index, newest_first=(window_key == MASTER_KEY)
+        )
         if song is None or song.row_id is None:
             return {"ok": False, "message": "序号无效或歌曲不存在"}
 
@@ -1194,7 +1198,10 @@ class CollectorService:
         self, group_id: int, window_key: str, indices: Sequence[int]
     ) -> int:
         """按序号批量删除已收集歌曲。"""
-        return await self.store.delete_songs_by_indices(group_id, window_key, indices)
+        # 总库视图是 newest_first 渲染的，序号→row_id 映射必须与之同序，否则删错歌
+        return await self.store.delete_songs_by_indices(
+            group_id, window_key, indices, newest_first=(window_key == MASTER_KEY)
+        )
 
     async def prune_old(self, keep_days: float) -> int:
         """删除早于 now - keep_days 天的收集记录。"""

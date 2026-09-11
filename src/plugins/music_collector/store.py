@@ -496,9 +496,15 @@ class Store:
                 rows = await cur.fetchall()
         return [_row_to_song(r) for r in rows]
 
-    async def get_song_by_index(self, group_id: int, window_key: str, index: int) -> Optional[Song]:
-        """按列表序号（从 1 开始）取一条记录，用于编辑 / 手动匹配定位。"""
-        songs = await self.list_songs(group_id, window_key)
+    async def get_song_by_index(
+        self, group_id: int, window_key: str, index: int, newest_first: bool = False
+    ) -> Optional[Song]:
+        """按列表序号（从 1 开始）取一条记录，用于编辑 / 手动匹配定位。
+
+        ``newest_first`` 必须与渲染该列表时一致（总库视图为 True），否则序号与
+        row_id 映射错位，会定位/操作到错误的歌曲。
+        """
+        songs = await self.list_songs(group_id, window_key, newest_first=newest_first)
         if not (1 <= index <= len(songs)):
             return None
         return songs[index - 1]
@@ -620,10 +626,18 @@ class Store:
         return target
 
     async def delete_songs_by_indices(
-        self, group_id: int, window_key: str, indices: Sequence[int]
+        self,
+        group_id: int,
+        window_key: str,
+        indices: Sequence[int],
+        newest_first: bool = False,
     ) -> int:
-        """按序号（从 1 开始）批量删除，支持不连续与重复序号。返回实际删除条数。"""
-        songs = await self.list_songs(group_id, window_key)
+        """按序号（从 1 开始）批量删除，支持不连续与重复序号。返回实际删除条数。
+
+        ``newest_first`` 必须与渲染该列表时一致（总库视图为 True），否则序号与
+        row_id 映射错位，删错歌曲（勾选的没删掉、反而删了别的）。
+        """
+        songs = await self.list_songs(group_id, window_key, newest_first=newest_first)
         row_ids: set[int] = set()
         for i in indices:
             if 1 <= i <= len(songs) and songs[i - 1].row_id is not None:
