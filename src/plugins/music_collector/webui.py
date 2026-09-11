@@ -579,6 +579,11 @@ async def build_overview(
                 "playlist_url": (arch or {}).get("playlist_url"),
                 "songs": [_song_item(s, i) for i, s in enumerate(songs)],
             })
+        import_groups = set(await service.store.distinct_group_ids())
+        import_groups |= set(service.config.groups or [])
+        import_history = await service.store.list_imports(
+            window_key=MASTER_KEY, limit=20
+        )
         return {
             "window": {"key": MASTER_KEY, "label": "总库", "collecting": True},
             "selected_window": MASTER_KEY,
@@ -586,6 +591,8 @@ async def build_overview(
             "netease_logged_in": service.netease.logged_in,
             "windows": [],
             "groups": groups,
+            "import_groups": sorted(import_groups),
+            "import_history": import_history,
         }
 
     wk = window_key or state.key
@@ -768,6 +775,12 @@ async def dispatch_action(body: dict) -> dict:
             if not url:
                 return {"ok": False, "message": "请输入网易云歌单链接"}
             return await service.import_playlist_to_master(gid, url)
+
+        if action == "undo_master_import":
+            gid = int(body.get("group_id"))
+            raw = body.get("history_id")
+            hid = int(raw) if raw else None
+            return await service.undo_master_import(gid, hid)
 
         return {"ok": False, "message": f"未知操作: {action}"}
     except (ValueError, TypeError) as exc:

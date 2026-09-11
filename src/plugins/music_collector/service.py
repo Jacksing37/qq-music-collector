@@ -324,6 +324,7 @@ class CollectorService:
             return {"ok": False, "message": "歌单为空或读取失败（可能不存在/无权限）"}
         details = await self._song_details_bulk([str(i) for i in ids])
         added = total = 0
+        added_row_ids: list[int] = []
         for cid in ids:
             d = details.get(str(cid))
             if not d or not d.get("name"):
@@ -344,18 +345,43 @@ class CollectorService:
                 duration=dur,
                 created_at=time.time(),
             )
-            ins, _ = await self.store.add_song(
+            ins, stored = await self.store.add_song(
                 group_id, MASTER_KEY, song, src_window="import"
             )
             if ins:
                 added += 1
-        return {
+                if stored.row_id is not None:
+                    added_row_ids.append(stored.row_id)
+        result = {
             "ok": True,
             "added": added,
             "total": total,
             "message": f"已导入 {added}/{total} 首到总库"
             + ("" if added == total else f"（{total - added} 首已存在或信息缺失跳过）"),
         }
+        if added_row_ids:
+            hid = await self.store.record_import(
+                group_id, MASTER_KEY, pid, playlist_url, total, added, added_row_ids
+            )
+            result["history_id"] = hid
+        return result
+
+    async def undo_master_import(
+        self, group_id: int, history_id: Optional[int] = None
+    ) -> dict:
+        """撤回总库歌单导入。
+
+        - 指定 ``history_id``：撤回该次具体导入；
+        - 不指定：撤回该群**最近一次**未撤回的导入。
+        撤回只删除本次新加入总库的歌曲（不影响导入前已存在或后来手动添加的歌），
+        且不会自动改动已生成的网易云歌单（如需同步移除请手动「同步全部歌单」）。
+        """
+        if history_id is not None:
+            return await self.store.undo_import(history_id)
+        recs = await self.store.list_imports(group_id, MASTER_KEY, limit=1)
+        if not recs:
+            return {"ok": False, "message": "该群没有可撤回的导入记录"}
+        return await self.store.undo_import(recs[0]["id"])
 
     async def run_master_archive(
         self, group_id: int, name_override: str = ""

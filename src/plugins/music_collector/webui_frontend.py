@@ -230,9 +230,12 @@ button:disabled{opacity:.5;cursor:not-allowed}
           <button id="mAddBtn" title="手动录入一首歌（可填原平台链接与匹配后的网易云链接）">➕ 手动添加歌曲</button>
         </div>
         <div class="row" style="margin-top:10px">
-          <input id="mImportUrl" placeholder="粘贴网易云歌单链接，如 https://music.163.com/#/playlist?id=123456" style="flex:1;min-width:260px" />
-          <button id="mImportBtn" class="btn-primary" title="从网易云歌单链接批量导入歌曲到总库">📥 从歌单导入总库</button>
+          <label class="muted">目标群：<select id="mImportGroup"></select></label>
+          <input id="mImportUrl" placeholder="粘贴网易云歌单链接，如 https://music.163.com/#/playlist?id=123456" style="flex:1;min-width:200px" />
+          <button id="mImportBtn" class="btn-primary" title="从网易云歌单链接批量导入歌曲到上方所选群的总库">📥 从歌单导入总库</button>
+          <button id="mUndoBtn" title="撤回该群最近一次歌单导入（仅删除本次新加入总库的歌曲，不影响已生成的歌单）">↩ 撤回上次导入</button>
         </div>
+        <div id="mImportHistory" class="muted" style="margin-top:8px"></div>
         <p class="muted">总库把当前群里<strong>所有窗口</strong>的歌曲汇聚去重。有人分享了总库里已存在的歌时，会在群里提示（提示开关与文案在「配置」页的「总库」分组里设置）。下面可对总库做编辑、匹配、拖拽排序、删除，并归档 / 同步到独立的<strong>总库网易云歌单</strong>（命名 / 简介 / 期号等配置同样在「配置」页设置）。</p>
       </div>
       <div id="masterGroups"><div class="empty">加载中…</div></div>
@@ -530,9 +533,39 @@ async function loadMaster(){
     MASTER = await (await api(url)).json();
     const wrap=$("#masterGroups"); wrap.innerHTML="";
     const groups = MASTER.groups||[];
-    if(!groups.length){ wrap.innerHTML=`<div class="empty">总库还是空的。分享歌曲（启用总库后）或点上方「📥 汇总现有窗口到总库」即可填充。</div>`; return; }
-    groups.forEach(g=> wrap.appendChild(renderGroupCard(g, MASTER_KEY)) );
+    if(!groups.length){ wrap.innerHTML=`<div class="empty">总库还是空的。分享歌曲（启用总库后）或点上方「📥 汇总现有窗口到总库」即可填充。</div>`; }
+    else { groups.forEach(g=> wrap.appendChild(renderGroupCard(g, MASTER_KEY)) ); }
+    fillImportGroup();
   }catch(e){ if(e.message!=="unauthorized") console.warn("master 加载失败", e); }
+}
+function fillImportGroup(){
+  const sel=$("#mImportGroup"); if(!sel) return;
+  const groups=(MASTER&&MASTER.import_groups)||[];
+  const def = (MASTER&&MASTER.groups&&MASTER.groups[0]&&MASTER.groups[0].group_id) || (groups[0]||0);
+  sel.innerHTML="";
+  (groups.length?groups:[def]).forEach(gid=>{
+    const op=document.createElement("option"); op.value=gid; op.textContent="群 "+gid; sel.appendChild(op);
+  });
+  if(def) sel.value=def;
+  renderImportHistory();
+}
+function renderImportHistory(){
+  const box=$("#mImportHistory"); if(!box) return;
+  const sel=$("#mImportGroup"); if(!sel) return;
+  const gid=parseInt(sel.value,10);
+  const hist=((MASTER&&MASTER.import_history)||[]).filter(h=>h.group_id===gid);
+  if(!hist.length){ box.innerHTML=`<span class="muted">该群暂无歌单导入记录。</span>`; return; }
+  box.innerHTML=`<div style="margin-bottom:4px">导入历史（本群，撤回仅删除本次新加入总库的歌）：</div>`+
+    hist.map(h=>{
+      const t=fmtDate(h.created_at);
+      const pid=h.playlist_id?`歌单 ${h.playlist_id}`:"";
+      const undone=h.undone?` <span style="color:var(--muted)">(已撤回)</span>`:"";
+      const btn=h.undone?"":`<button data-undo="${h.id}" style="padding:2px 8px;font-size:12px;margin-left:6px">撤回</button>`;
+      return `<div style="margin:3px 0">${t} · ${pid} · 新增 ${h.added}/${h.total} 首 ${undone} ${btn}</div>`;
+    }).join("");
+  box.querySelectorAll("button[data-undo]").forEach(b=> b.onclick=()=>{
+    doAction({action:"undo_master_import", group_id:gid, history_id:parseInt(b.dataset.undo,10)});
+  });
 }
 function renderGroupCard(g, wk){
   const card=document.createElement("div"); card.className="gcard"; card.dataset.wk=wk||""; card.dataset.gid=g.group_id;
@@ -654,14 +687,17 @@ $("#mAddBtn").onclick=()=>{
   ADD_CTX={window_key:MASTER_KEY, group_id:g?g.group_id:0};
   $("#addModal").classList.remove("hidden");
 };
+$("#mImportGroup").onchange=renderImportHistory;
 $("#mImportBtn").onclick=async()=>{
-  const g=(MASTER&&MASTER.groups||[])[0];
-  const gid=g?g.group_id:0;
+  const gid=parseInt($("#mImportGroup").value,10)||0;
   const url=($("#mImportUrl").value||"").trim();
   if(!url){ flashOp("请输入网易云歌单链接","bad"); return; }
   await doAction({action:"import_playlist_master", group_id:gid, url});
   $("#mImportUrl").value="";
-  await loadMaster();
+};
+$("#mUndoBtn").onclick=async()=>{
+  const gid=parseInt($("#mImportGroup").value,10)||0;
+  await doAction({action:"undo_master_import", group_id:gid});
 };
 
 /* ---- 编辑 / 匹配 / 添加 弹窗 ---- */

@@ -106,6 +106,12 @@ class _FakeService:
         async def get_archive(self, gid, wk):
             return self._p._archives.get((gid, wk))
 
+        async def distinct_group_ids(self):
+            return [6001, 6002]
+
+        async def list_imports(self, group_id=None, window_key=MASTER_KEY, limit=20):
+            return []
+
     @property
     def store(self):
         return self._Store(self)

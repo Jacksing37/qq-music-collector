@@ -76,6 +76,21 @@ CREATE TABLE IF NOT EXISTS pending_desc (
     -- 歌曲已被清空时用它重建，保证补写的清单与歌单内容一致
     snapshot      TEXT    NOT NULL DEFAULT '{}'
 );
+
+-- 从网易云歌单导入总库的历史记录，用于「撤回上次导入」
+-- added_row_ids 是本批次新插入的 songs.id（JSON 数组），撤回时只删这些行
+CREATE TABLE IF NOT EXISTS import_history (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id      INTEGER NOT NULL,
+    window_key    TEXT    NOT NULL,
+    playlist_id   TEXT,
+    playlist_url  TEXT,
+    total         INTEGER NOT NULL DEFAULT 0,
+    added         INTEGER NOT NULL DEFAULT 0,
+    added_row_ids TEXT    NOT NULL DEFAULT '[]',
+    created_at    REAL    NOT NULL,
+    undone        INTEGER NOT NULL DEFAULT 0
+);
 """
 
 _COLUMNS = (
@@ -234,6 +249,123 @@ class Store:
                 ),
             )
             await db.commit()
+
+    # ----------------------------------------------------- 歌单导入历史 / 撤回
+    async def record_import(
+        self, group_id: int, window_key: str, playlist_id: Optional[str],
+        playlist_url: str, total: int, added: int, added_row_ids: Sequence[int],
+    ) -> int:
+        """记录一次「从歌单导入总库」的结果，返回 history id（供撤回）。
+
+        ``added_row_ids`` 是本批次**新插入**的 songs.id 列表；撤回时只删这些行，
+        不会误伤导入前已存在或后来手动添加的歌。
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                """
+                INSERT INTO import_history
+                    (group_id, window_key, playlist_id, playlist_url, total, added,
+                     added_row_ids, created_at, undone)
+                VALUES (?,?,?,?,?,?,?,?,0)
+                """,
+                (
+                    group_id, window_key, playlist_id, playlist_url, total, added,
+                    json.dumps(list(added_row_ids), ensure_ascii=False),
+                    time.time(),
+                ),
+            )
+            await db.commit()
+            return cur.lastrowid
+
+    async def list_imports(
+        self, group_id: Optional[int] = None, window_key: str = MASTER_KEY,
+        limit: int = 20,
+    ) -> list[dict]:
+        """列出导入历史（含已撤回），按时间倒序。供 WebUI 展示与撤回。"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            if group_id is None:
+                async with db.execute(
+                    "SELECT * FROM import_history WHERE window_key=? "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (window_key, limit),
+                ) as cur:
+                    rows = await cur.fetchall()
+            else:
+                async with db.execute(
+                    "SELECT * FROM import_history WHERE group_id=? AND window_key=? "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (group_id, window_key, limit),
+                ) as cur:
+                    rows = await cur.fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["added_row_ids"] = json.loads(d.get("added_row_ids") or "[]")
+            except (TypeError, json.JSONDecodeError):
+                d["added_row_ids"] = []
+            out.append(d)
+        return out
+
+    async def get_import(self, history_id: int) -> Optional[dict]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM import_history WHERE id=?", (history_id,)
+            ) as cur:
+                row = await cur.fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d["added_row_ids"] = json.loads(d.get("added_row_ids") or "[]")
+        except (TypeError, json.JSONDecodeError):
+            d["added_row_ids"] = []
+        return d
+
+    async def undo_import(self, history_id: int) -> dict:
+        """撤回一次导入：删除该批次新插入的总库歌曲，并标记记录为已撤回。
+
+        只删 ``added_row_ids`` 中仍存在的行（手动删过的会被跳过）；幂等：
+        已撤回的记录再次调用直接返回提示。撤回不影响已生成的网易云歌单，
+        需要同步以移除请手动点「同步全部歌单」。
+        """
+        rec = await self.get_import(history_id)
+        if not rec:
+            return {"ok": False, "message": "找不到该次导入记录"}
+        if rec.get("undone"):
+            return {"ok": False, "message": "该次导入已撤回过"}
+        row_ids = [int(x) for x in (rec.get("added_row_ids") or [])]
+        async with aiosqlite.connect(self.db_path) as db:
+            removed = 0
+            if row_ids:
+                placeholders = ",".join("?" * len(row_ids))
+                cur = await db.execute(
+                    f"DELETE FROM songs WHERE id IN ({placeholders}) "
+                    f"AND window_key=? AND group_id=?",
+                    (*row_ids, rec["window_key"], rec["group_id"]),
+                )
+                removed = cur.rowcount
+            await db.execute(
+                "UPDATE import_history SET undone=1 WHERE id=?", (history_id,)
+            )
+            await db.commit()
+        added = rec.get("added", 0)
+        return {
+            "ok": True,
+            "removed": removed,
+            "added": added,
+            "message": f"已撤回该次导入，从总库移除 {removed} 首"
+            + ("" if removed == added else "（部分歌曲已被手动删除）"),
+        }
+
+    async def distinct_group_ids(self) -> list[int]:
+        """返回 songs 表中出现过的全部群号（用于「导入到哪个群」下拉）。"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("SELECT DISTINCT group_id FROM songs") as cur:
+                rows = await cur.fetchall()
+        return [int(r[0]) for r in rows]
 
     # ------------------------------------------------------- 简介待补写队列
 

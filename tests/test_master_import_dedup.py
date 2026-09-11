@@ -264,11 +264,81 @@ async def test_master_newest_first():
           f"{[s.title for s in newest]} vs {[s.title for s in oldest]}")
 
 
+async def test_import_undo_and_group():
+    """#5 导入可按群选择，且可撤回上次导入（仅删本次新加的歌）。"""
+    print("\n[5] 按群导入 + 撤回上次导入")
+    tmp = Path(tempfile.mkdtemp())
+    svc, store, api = _make_svc(tmp)
+    await store.init()
+    config_manager.config.master.enabled = True
+
+    async def _track_ids(pid: int) -> list[str]:
+        return ["100", "200", "300"]
+    api.playlist_track_ids = _track_ids
+
+    # ---- 按群导入（群 7005）----
+    gid_a = 7005
+    res = await svc.import_playlist_to_master(
+        gid_a, "https://music.163.com/#/playlist?id=123456"
+    )
+    check("导入到群7005成功", res.get("ok") is True, str(res))
+    check("群7005 总库 3 首", await store.count(gid_a, MASTER_KEY) == 3,
+          str(await store.count(gid_a, MASTER_KEY)))
+    check("返回 history_id", isinstance(res.get("history_id"), int), str(res))
+    hist = await store.list_imports(gid_a, MASTER_KEY)
+    check("导入历史记了 1 条", len(hist) == 1, str(len(hist)))
+    check("历史记录 added_row_ids=3", len(hist[0]["added_row_ids"]) == 3, str(hist[0]))
+    check("历史记录未撤回", hist[0].get("undone") == 0, str(hist[0]))
+
+    # ---- 重复导入同歌单：去重且无新历史 ----
+    res2 = await svc.import_playlist_to_master(
+        gid_a, "https://music.163.com/#/playlist?id=123456"
+    )
+    check("重复导入 added=0", res2.get("added") == 0, str(res2))
+    check("重复导入不写新历史", len(await store.list_imports(gid_a, MASTER_KEY)) == 1,
+          str(len(await store.list_imports(gid_a, MASTER_KEY))))
+
+    # ---- 另一个群（7006）独立导入，互不影响 ----
+    gid_b = 7006
+    await svc.import_playlist_to_master(
+        gid_b, "https://music.163.com/#/playlist?id=987654"
+    )
+    check("群7006 独立导入 3 首", await store.count(gid_b, MASTER_KEY) == 3,
+          str(await store.count(gid_b, MASTER_KEY)))
+    check("群7005 仍为 3 首（不被误清）", await store.count(gid_a, MASTER_KEY) == 3,
+          str(await store.count(gid_a, MASTER_KEY)))
+
+    # ---- 撤回群7005 上次导入（不指定 history_id，撤最近一次）----
+    undo = await svc.undo_master_import(gid_a)
+    check("撤回成功", undo.get("ok") is True, str(undo))
+    check("撤回移除 3 首", undo.get("removed") == 3, str(undo))
+    check("群7005 总库清空", await store.count(gid_a, MASTER_KEY) == 0,
+          str(await store.count(gid_a, MASTER_KEY)))
+    hist2 = await store.list_imports(gid_a, MASTER_KEY)
+    check("历史已标记 undone", hist2[0].get("undone") == 1, str(hist2[0]))
+    # 群7006 不受影响
+    check("群7006 不受影响仍为 3 首", await store.count(gid_b, MASTER_KEY) == 3,
+          str(await store.count(gid_b, MASTER_KEY)))
+
+    # ---- 重复撤回幂等：再次撤群7005 应提示已撤回 ----
+    undo2 = await svc.undo_master_import(gid_a)
+    check("重复撤回返回提示", undo2.get("ok") is False, str(undo2))
+
+    # ---- 按 history_id 精确撤回群7006 ----
+    hb = (await store.list_imports(gid_b, MASTER_KEY))[0]
+    undo3 = await svc.undo_master_import(gid_b, history_id=hb["id"])
+    check("按 history_id 撤回群7006", undo3.get("ok") is True and undo3.get("removed") == 3,
+          str(undo3))
+    check("群7006 总库清空", await store.count(gid_b, MASTER_KEY) == 0,
+          str(await store.count(gid_b, MASTER_KEY)))
+
+
 async def main() -> None:
     await test_sync_matches_other_platform()
     await test_master_dedup_intercepts_window()
     await test_import_playlist_to_master()
     await test_master_newest_first()
+    await test_import_undo_and_group()
     print("\n====================================================")
     print(f"通过 {PASSED} 项，失败 {FAILED} 项")
     if FAILED:
