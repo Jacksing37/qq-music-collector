@@ -567,12 +567,32 @@ function renderImportHistory(){
     doAction({action:"undo_master_import", group_id:gid, history_id:parseInt(b.dataset.undo,10)});
   });
 }
+// 区选（Shift+点击）：记录上次点击的复选框，Shift 点击时把两者之间的范围一并选中/取消
+let LAST_CHK = null;
+function onChkClick(e, chk, gid){
+  const card = chk.closest(".gcard");
+  const all = Array.from(card.querySelectorAll(`.songchk[data-g="${gid}"]`));
+  if (e && e.shiftKey && LAST_CHK && all.indexOf(LAST_CHK) >= 0){
+    const a = all.indexOf(LAST_CHK), b = all.indexOf(chk);
+    const [lo, hi] = a < b ? [a, b] : [b, a];
+    for (let k = lo; k <= hi; k++) all[k].checked = chk.checked;
+  }
+  LAST_CHK = chk;
+  const selall = card.querySelector(`input.selall[data-g="${gid}"]`);
+  if (selall) selall.checked = all.length > 0 && all.every(c=> c.checked);
+}
 function renderGroupCard(g, wk){
   const card=document.createElement("div"); card.className="gcard"; card.dataset.wk=wk||""; card.dataset.gid=g.group_id;
   const pl = g.playlist_url
     ? `<a class="plink" href="${esc(g.playlist_url)}" target="_blank" rel="noreferrer">🔗 网易云歌单</a>`
     : `<span class="muted">（本窗口尚未建歌单，归档或同步后在此显示）</span>`;
-  const ops=`<div class="row" style="margin-bottom:6px">
+  const ops=`<div class="row" style="margin-bottom:6px;gap:6px">
+    <button data-sel="all" data-g="${g.group_id}" title="全选本群所有歌曲">☑ 全选</button>
+    <button data-sel="inv" data-g="${g.group_id}" title="反选本群已勾选状态">⧉ 反选</button>
+    <button data-sel="none" data-g="${g.group_id}" title="清除本群已选中的歌曲">⌫ 清除</button>
+    <span class="muted" style="font-size:12px;align-self:center">按住 Shift 点复选框可<span style="color:var(--accent)">区选</span>一段</span>
+  </div>
+  <div class="row" style="margin-bottom:6px">
     <button data-act="preview" data-g="${g.group_id}" title="预览本窗口歌单样式与简介清单">👁 预览</button>
     <button data-act="archive" data-g="${g.group_id}" title="把本窗口歌曲归档/追加到网易云歌单；若配置「归档后清空」会清空本期，用于一期结束定稿">📦 归档本群</button>
     <button class="btn-primary" data-act="sync" data-g="${g.group_id}" title="让网易云歌单与当前窗口完全一致：窗口有而歌单无的加入，歌单有而窗口已删的移除；不清除本期">🔄 同步到歌单</button>
@@ -602,13 +622,24 @@ function renderGroupCard(g, wk){
     });
   }
   const tbl=`<table class="gtbl"><thead><tr>
-    <th></th><th>#</th><th>歌曲 / 歌手（可拖拽行排序）</th><th>分享者</th><th>平台</th><th>收录日期</th><th>匹配</th><th></th>
+    <th style="width:34px"><input type="checkbox" class="selall" data-g="${g.group_id}" title="全选 / 取消全选本群"></th><th>#</th><th>歌曲 / 歌手（可拖拽行排序）</th><th>分享者</th><th>平台</th><th>收录日期</th><th>匹配</th><th></th>
   </tr></thead><tbody>${rows}</tbody></table>`;
   card.innerHTML=`<div class="gtitle">群 ${g.group_id}<span class="cnt">${g.count} 首</span></div>${ops}${tbl}`;
   card.querySelectorAll("button[data-act]").forEach(b=> b.onclick=()=>groupAction(b.dataset.act,b.dataset.g, wk));
   card.querySelectorAll("button[data-mv]").forEach(b=> b.onclick=()=>moveRow(g.group_id, parseInt(b.dataset.idx,10), parseInt(b.dataset.mv,10), wk));
   card.querySelectorAll("button[data-edit]").forEach(b=> b.onclick=()=>openEdit(g.group_id, parseInt(b.dataset.idx,10), wk));
   card.querySelectorAll("button[data-match]").forEach(b=> b.onclick=()=>openMatch(g.group_id, parseInt(b.dataset.idx,10), wk));
+  // 选择：全选 / 反选 / 清除 / Shift 区选
+  const selall = card.querySelector(`input.selall[data-g="${g.group_id}"]`);
+  const chks = ()=> Array.from(card.querySelectorAll(`.songchk[data-g="${g.group_id}"]`));
+  if (selall) selall.onchange = ()=>{ chks().forEach(c=> c.checked = selall.checked); };
+  card.querySelectorAll('button[data-sel]').forEach(b=> b.onclick=()=>{
+    const mode = b.dataset.sel;
+    const all = chks();
+    all.forEach(c=> c.checked = mode==="all" ? true : mode==="none" ? false : !c.checked);
+    if (selall) selall.checked = all.length>0 && all.every(c=>c.checked);
+  });
+  chks().forEach(chk=> chk.addEventListener("click", e=> onChkClick(e, chk, g.group_id)));
   // 拖拽排序
   card.querySelectorAll("tr.songrow").forEach(tr=>{
     tr.addEventListener("dragstart", e=>{ DRAG_IDX=parseInt(tr.dataset.idx,10); tr.classList.add("dragging"); if(e.dataTransfer){ e.dataTransfer.effectAllowed="move"; } });

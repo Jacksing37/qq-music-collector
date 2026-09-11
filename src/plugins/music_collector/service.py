@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -62,6 +63,8 @@ class CollectorService:
         self.netease = NeteaseAPI(NETEASE_SESSION_PATH)
         self.providers = ProviderRegistry(self.netease)
         self.archiver = Archiver(self.netease, self.store)
+        # 后台任务集合：分享即归档等异步副作用放这里跑，避免阻塞消息回复
+        self._bg_tasks: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------ 基础
 
@@ -186,13 +189,27 @@ class CollectorService:
                     group_id, MASTER_KEY, song.row_id
                 )
 
-        # 分享即归档：本批新收录的歌立即写进当前窗口歌单（静默执行，不刷屏）
+        # 分享即归档：把本批新收录的歌增量同步到当前窗口歌单。
+        # 改为后台执行——归档要对整窗口重新匹配+重排歌单，歌曲多时会很慢，
+        # 不能阻塞消息回复（否则表现为"机器人无反应"）。失败只记日志。
         if result.accepted and self.config.playlist.auto_archive_on_share:
-            await self.auto_archive_songs(group_id, state, result.accepted)
-        # 总库分享即归档：同样静默把总库增量同步到总库歌单
+            self._spawn_bg(self.auto_archive_songs(group_id, state, result.accepted))
+        # 总库分享即归档：仅把新歌增量追加到总库歌单顶部（后台执行，不阻塞回复）
         if result.accepted and self.config.master.enabled and self.config.master.auto_archive:
-            await self.auto_archive_master(group_id)
+            self._spawn_bg(self.auto_archive_master(group_id, result.accepted))
         return result
+
+    def _spawn_bg(self, coro) -> None:
+        """把协程丢到后台执行，不阻塞当前消息处理；异常只记日志，不向上抛。
+
+        离线测试（无事件循环）时静默跳过，由调用方自行 try/except。
+        """
+        try:
+            task = asyncio.ensure_future(coro)
+        except RuntimeError:
+            return
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
 
     def _master_state(self) -> WindowState:
         """构造总库用的窗口状态（歌单命名/简介用，无需真实时间区间）。"""
@@ -232,10 +249,24 @@ class CollectorService:
             sharer_aliases=m.sharer_aliases,
         )
 
-    async def auto_archive_master(self, group_id: int) -> None:
-        """把总库增量归档到总库歌单（静默执行，不刷屏）。"""
+    async def auto_archive_master(self, group_id: int, new_songs: Optional[Sequence[Song]] = None) -> None:
+        """把总库增量归档到总库歌单（静默/后台执行，不刷屏）。
+
+        - 总库歌单已存在：仅把本次新分享的歌追加到顶部（总库 newest_first，新歌天然在顶），
+          不再对整库重排，避免总库变大后每次分享都触发上千次接口调用被限流。
+        - 总库歌单尚不存在（首次）：走全量归档建歌单。
+        """
         try:
             cfg = self._master_playlist_cfg()
+            existing = await self.store.get_archive(group_id, MASTER_KEY)
+            if existing and str(existing.get("playlist_id") or "").isdigit() and new_songs:
+                raw = (existing or {}).get("added_ids") or []
+                # get_archive 返回的 added_ids 可能是 list/set（已解析）或 json 字符串
+                prev_ids = json.loads(raw) if isinstance(raw, str) else list(raw)
+                await self._append_master_playlist(
+                    group_id, list(new_songs), cfg, int(existing["playlist_id"]), prev_ids
+                )
+                return
             all_songs = await self.store.list_songs(group_id, MASTER_KEY, newest_first=True)
             report = await self.archiver.archive(
                 group_id, MASTER_KEY, "总库", all_songs, cfg,
@@ -251,6 +282,74 @@ class CollectorService:
                 logger.warning(f"[music] 总库分享即归档失败 group={group_id}: {report.message}")
         except Exception as exc:
             logger.warning(f"[music] 总库分享即归档异常 group={group_id}: {type(exc).__name__} {exc}")
+
+    async def _append_master_playlist(
+        self,
+        group_id: int,
+        new_songs: list[Song],
+        cfg: "PlaylistConfig",
+        playlist_id: int,
+        prev_ids: Sequence[str],
+    ) -> None:
+        """增量把新歌追加到总库歌单顶部（用于分享即归档，避免整库重排）。
+
+        总库是 newest_first，新分享的歌天然应在最上面；直接按正序追加到顶部即可，
+        无需把整库曲目移除再重加（那在总库很大时是上千次接口调用、极易被限流）。
+        简介仍按全量重写，保证清单与歌单顺序一致。
+        """
+        pairs: list[tuple[str, Song]] = []
+        for s in new_songs:
+            if s.netease_id:
+                pairs.append((s.netease_id, s))
+                continue
+            nid = await self.archiver.match_netease_id(s, cfg)
+            if nid:
+                s.netease_id = nid
+                s.matched = True
+                if s.row_id is not None:
+                    await self.store.mark_matched(s.row_id, nid)
+                pairs.append((nid, s))
+            # 未匹配的非网易云歌不进歌单
+        seen: set[str] = set()
+        ordered: list[str] = []
+        prev_set = set(prev_ids)
+        for tid, _ in pairs:
+            if tid in prev_set or tid in seen:
+                continue
+            seen.add(tid)
+            ordered.append(tid)
+        if not ordered:
+            logger.info(f"[music] 总库分享即归档(增量) group={group_id} 本次无新匹配歌，跳过")
+            return
+        # add_tracks 会把整批倒序插到顶部，故反转提交后顶部即 ordered 正序（newest_first）
+        add_order = list(reversed(ordered))
+        added = 0
+        for i in range(0, len(add_order), cfg.batch_size):
+            batch = add_order[i:i + cfg.batch_size]
+            try:
+                await self.netease.add_tracks(playlist_id, batch)
+                added += len(batch)
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+        merged = sorted(prev_set | set(ordered))
+        all_songs = await self.store.list_songs(group_id, MASTER_KEY, newest_first=True)
+        report = ArchiveReport(total=len(all_songs))
+        report.playlist_id = playlist_id
+        report.playlist_url = self.netease.playlist_url(playlist_id)
+        report.added = added
+        await self.archiver._write_description_full(
+            report, group_id, MASTER_KEY, "总库", all_songs, cfg, playlist_id,
+            start_at=None, end_at=None, desc_songs=all_songs,
+        )
+        await self.store.record_archive(
+            group_id, MASTER_KEY, str(playlist_id), report.playlist_url,
+            len(all_songs), added, 0, added_ids=merged,
+        )
+        logger.info(
+            f"[music] 总库分享即归档(增量) group={group_id} 新增 {added} 首"
+            f"（总库共 {len(all_songs)} 首）"
+        )
 
     async def aggregate_to_master(self, group_id: int) -> int:
         """把该群所有窗口的歌曲一键汇总进总库（跨窗口去重）。返回新增进总库的条数。"""

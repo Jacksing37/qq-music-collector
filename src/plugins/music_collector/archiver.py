@@ -429,8 +429,14 @@ class Archiver:
             report.created_new = False
 
         # 1. 逐首匹配 id
+        # 已匹配过的歌（netease_id 非空）直接复用，跳过搜索与限流等待——
+        # 否则总库/窗口歌曲一多，每次归档都要对整库重新搜索上千次并被网易云限流，
+        # 导致分享即归档在消息处理协程里阻塞数分钟、机器人"毫无反应"。
         matched_pairs: list[tuple[str, Song]] = []
         for song in songs:
+            if song.netease_id:
+                matched_pairs.append((song.netease_id, song))
+                continue
             netease_id = await self.match_netease_id(song, cfg)
             if netease_id:
                 matched_pairs.append((netease_id, song))
