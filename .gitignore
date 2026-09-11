@@ -30,3 +30,4 @@ logs/
 .vscode/
 *.swp
 .DS_Store
+overview.md
