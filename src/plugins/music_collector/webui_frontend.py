@@ -10,11 +10,13 @@ DASHBOARD_HTML = r"""
   --bg:#0b0f1a; --bg2:#111726; --card:rgba(255,255,255,.04); --card-bd:rgba(255,255,255,.08);
   --txt:#e8edf6; --muted:#8b97ad; --accent:#6ea8fe; --accent2:#a78bfa; --ok:#34d399; --bad:#f87171;
   --input:rgba(255,255,255,.06); --shadow:0 10px 30px rgba(0,0,0,.35); --side:#0e1320;
+  color-scheme: dark;
 }
 [data-theme="light"]{
   --bg:#f4f6fb; --bg2:#ffffff; --card:rgba(20,30,60,.03); --card-bd:rgba(20,30,60,.1);
   --txt:#1a2233; --muted:#5b6678; --accent:#3b6fe0; --accent2:#7c5cf0; --ok:#0f9d63; --bad:#d8453b;
   --input:rgba(20,30,60,.05); --shadow:0 10px 30px rgba(20,30,60,.1); --side:#eef1f8;
+  color-scheme: light;
 }
 *{box-sizing:border-box}
 body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
@@ -29,6 +31,8 @@ button:hover{border-color:var(--accent);transform:translateY(-1px)}
 input,select,textarea{width:100%;background:var(--input);border:1px solid var(--card-bd);color:var(--txt);
   border-radius:10px;padding:9px 11px;font:inherit;transition:.18s}
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(110,168,254,.18)}
+/* 暗色主题下拉选项需显式配色，否则原生弹层文字与背景同色看不清 */
+select option,select optgroup{background:var(--bg2);color:var(--txt)}
 textarea{resize:vertical;font-family:ui-monospace,monospace;font-size:13px}
 label.chk{display:inline-flex;align-items:center;gap:10px;cursor:pointer;font-size:15px}
 input[type=checkbox]{width:18px;height:18px;accent-color:var(--accent)}
@@ -191,7 +195,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
           <button id="opStart">▶ 强制开始</button>
           <button id="opStop">⏸ 强制停止</button>
           <button id="opAuto">↺ 恢复自动</button>
-          <button id="opArchiveAll" class="btn-primary">📦 归档当前窗口全部</button>
+          <button id="opArchiveAll" class="btn-primary" title="把当前窗口全部歌曲写入网易云歌单（新建或追加）；不删除窗口歌曲">📦 归档当前窗口全部</button>
         </div>
       </div>
       <div class="card">
@@ -206,9 +210,9 @@ button:disabled{opacity:.5;cursor:not-allowed}
         <h2><span class="dot"></span>收集管理</h2>
         <div class="row">
           <label class="muted">窗口：<select id="cWinSel"></select></label>
-          <button id="cAddBtn">➕ 手动添加歌曲</button>
-          <button id="cArchiveBtn" class="btn-primary">📦 归档本窗口全部</button>
-          <button id="cSyncAllBtn">🔄 同步全部歌单</button>
+          <button id="cAddBtn" title="手动录入一首歌（可填原平台链接与匹配后的网易云链接）">➕ 手动添加歌曲</button>
+          <button id="cArchiveBtn" class="btn-primary" title="把本窗口全部歌曲写入网易云歌单（新建或追加）；不删除窗口歌曲">📦 归档本窗口全部</button>
+          <button id="cSyncAllBtn" title="按各窗口当前歌曲对账歌单：补齐缺失、移除已删歌曲，不清除窗口">🔄 同步全部歌单</button>
         </div>
         <p class="muted">在下方各群卡片里可编辑、手动匹配、调整顺序、删除，并对单个群「同步到歌单」（增+删+简介）。</p>
       </div>
@@ -220,14 +224,14 @@ button:disabled{opacity:.5;cursor:not-allowed}
       <div class="card">
         <h2><span class="dot"></span>总库（跨窗口去重）</h2>
         <div class="row">
-          <button id="mAggBtn">📥 汇总现有窗口到总库</button>
-          <button id="mArchiveBtn" class="btn-primary">📦 归档总库全部</button>
-          <button id="mSyncBtn">🔄 同步全部歌单</button>
-          <button id="mAddBtn">➕ 手动添加歌曲</button>
+          <button id="mAggBtn" title="把该群所有窗口的歌曲汇聚去重进总库">📥 汇总现有窗口到总库</button>
+          <button id="mArchiveBtn" class="btn-primary" title="把总库全部歌曲写入独立的「总库歌单」（新建或追加）">📦 归档总库全部</button>
+          <button id="mSyncBtn" title="按总库当前歌曲对账总库歌单">🔄 同步全部歌单</button>
+          <button id="mAddBtn" title="手动录入一首歌（可填原平台链接与匹配后的网易云链接）">➕ 手动添加歌曲</button>
         </div>
         <div class="row" style="margin-top:10px">
           <input id="mImportUrl" placeholder="粘贴网易云歌单链接，如 https://music.163.com/#/playlist?id=123456" style="flex:1;min-width:260px" />
-          <button id="mImportBtn" class="btn-primary">📥 从歌单导入总库</button>
+          <button id="mImportBtn" class="btn-primary" title="从网易云歌单链接批量导入歌曲到总库">📥 从歌单导入总库</button>
         </div>
         <p class="muted">总库把当前群里<strong>所有窗口</strong>的歌曲汇聚去重。有人分享了总库里已存在的歌时，会在群里提示（提示开关与文案在「配置」页的「总库」分组里设置）。下面可对总库做编辑、匹配、拖拽排序、删除，并归档 / 同步到独立的<strong>总库网易云歌单</strong>（命名 / 简介 / 期号等配置同样在「配置」页设置）。</p>
       </div>
@@ -536,11 +540,11 @@ function renderGroupCard(g, wk){
     ? `<a class="plink" href="${esc(g.playlist_url)}" target="_blank" rel="noreferrer">🔗 网易云歌单</a>`
     : `<span class="muted">（本窗口尚未建歌单，归档或同步后在此显示）</span>`;
   const ops=`<div class="row" style="margin-bottom:6px">
-    <button data-act="preview" data-g="${g.group_id}">👁 预览</button>
-    <button data-act="archive" data-g="${g.group_id}">📦 归档本群</button>
-    <button class="btn-primary" data-act="sync" data-g="${g.group_id}">🔄 同步到歌单</button>
-    <button data-act="del" data-g="${g.group_id}" class="btn-danger">删除选中</button>
-    <button data-act="clear" data-g="${g.group_id}" class="btn-danger">清空本窗口</button>
+    <button data-act="preview" data-g="${g.group_id}" title="预览本窗口歌单样式与简介清单">👁 预览</button>
+    <button data-act="archive" data-g="${g.group_id}" title="把本窗口歌曲归档/追加到网易云歌单；若配置「归档后清空」会清空本期，用于一期结束定稿">📦 归档本群</button>
+    <button class="btn-primary" data-act="sync" data-g="${g.group_id}" title="让网易云歌单与当前窗口完全一致：窗口有而歌单无的加入，歌单有而窗口已删的移除；不清除本期">🔄 同步到歌单</button>
+    <button data-act="del" data-g="${g.group_id}" class="btn-danger" title="删除选中的歌曲（从窗口移除，不影响歌单）">删除选中</button>
+    <button data-act="clear" data-g="${g.group_id}" class="btn-danger" title="清空本窗口全部歌曲（不删歌单）">清空本窗口</button>
   </div>
   <div class="row plrow"><span class="plabel">网易云歌单：</span>${pl}</div>`;
   let rows="";
@@ -891,11 +895,13 @@ ALIASES_HTML = r"""<!DOCTYPE html>
   --bg:#0b0f1a; --bg2:#111726; --card:rgba(255,255,255,.04); --card-bd:rgba(255,255,255,.08);
   --txt:#e8edf6; --muted:#8b97ad; --accent:#6ea8fe; --accent2:#a78bfa; --ok:#34d399; --bad:#f87171;
   --input:rgba(255,255,255,.06); --shadow:0 10px 30px rgba(0,0,0,.35);
+  color-scheme: dark;
 }
 [data-theme="light"]{
   --bg:#f4f6fb; --bg2:#ffffff; --card:rgba(20,30,60,.03); --card-bd:rgba(20,30,60,.1);
   --txt:#1a2233; --muted:#5b6678; --accent:#3b6fe0; --accent2:#7c5cf0; --ok:#0f9d63; --bad:#d8453b;
   --input:rgba(20,30,60,.05); --shadow:0 10px 30px rgba(20,30,60,.1);
+  color-scheme: light;
 }
 *{box-sizing:border-box}
 body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;

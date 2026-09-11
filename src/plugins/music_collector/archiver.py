@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
@@ -42,7 +43,10 @@ _ARTIST_SPLIT_RE = re.compile(r"[、/&,，×xX＆]|\bfeat\.?\b|\bft\.?\b", re.I)
 
 
 def normalize_title(text: str) -> str:
-    text = (text or "").lower()
+    # NFKC 归一化：把组合字符（ビ = ヒ+゙）转成预组合字符（ビ），
+    # 并统一全角/半角等，避免「同歌不同写法」导致匹配失败。
+    text = unicodedata.normalize("NFKC", text or "")
+    text = text.lower()
     text = _BRACKET_RE.sub("", text)
     return _NOISE_RE.sub("", text)
 
@@ -110,25 +114,39 @@ def _pick_best(
 
     strict=True   歌名精确相等 + 歌手有交集（配置默认）
     strict=False  歌名相等或互相包含（宽松）
-    strict=None   只要求歌名精确相等 —— 跨语言歌手名（Apple 英文名 vs
-                  网易云中文名）或歌手信息缺失时的兜底，靠 score 的
-                  时长加分偏向原版。
+    strict=None   歌名一致，或歌名是候选歌名前缀且歌手有交集 —— 兜底处理
+                  「X feat. Y」「X (remix)」等变体（组合/预组合字符差异已由
+                  normalize_title 的 NFKC 归一化抹平）。
     """
     src_t = normalize_title(song.title)
+    src_a = artist_set(song.artists)
     best: Optional[dict] = None
     best_score = -1
     for cand in candidates:
-        dst_t = normalize_title(str(cand.get("name", "")))
+        cand_name = str(cand.get("name", ""))
+        dst_t = normalize_title(cand_name)
         if not dst_t:
             continue
+        dst_a = artist_set(
+            "、".join(a.get("name", "") for a in (cand.get("ar") or cand.get("artists") or []))
+        )
         if strict is True:
             if not is_acceptable(song, cand, True):
                 continue
         elif strict is False:
             if not is_acceptable(song, cand, False):
                 continue
-        else:  # strict is None：只认歌名完全一致
-            if dst_t != src_t:
+        else:  # strict is None：歌名一致，或歌名是候选前缀且歌手有交集
+            if dst_t == src_t:
+                pass
+            elif src_t and dst_t.startswith(src_t):
+                # 仅当歌手有交集（或原歌手未知）时接受，避免仅凭歌名前缀误匹配
+                if src_a and not (
+                    src_a & dst_a
+                    or any(a in b or b in a for a in src_a for b in dst_a)
+                ):
+                    continue
+            else:
                 continue
         s = score_candidate(song, cand)
         if s > best_score:
