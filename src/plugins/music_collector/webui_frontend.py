@@ -616,7 +616,7 @@ function renderGroupCard(g, wk){
     <button data-act="preview" data-g="${g.group_id}" title="预览本窗口歌单样式与简介清单">👁 预览</button>
     <button data-act="archive" data-g="${g.group_id}" title="把本窗口歌曲归档/追加到网易云歌单；若配置「归档后清空」会清空本期，用于一期结束定稿">📦 归档本群</button>
     <button class="btn-primary" data-act="sync" data-g="${g.group_id}" title="让网易云歌单与当前窗口完全一致：窗口有而歌单无的加入，歌单有而窗口已删的移除；不清除本期">🔄 同步到歌单</button>
-    <button data-act="agg_master" data-g="${g.group_id}" title="把当前窗口本群歌曲去重汇总进总库（不影响当前窗口），用于跨窗口/跨期累积成总歌单">📥 汇总到总库</button>
+    <button data-act="aggregate_window_to_master" data-g="${g.group_id}" title="把当前窗口本群歌曲去重汇总进总库（不影响当前窗口），用于跨窗口/跨期累积成总歌单">📥 汇总到总库</button>
     <button data-act="del" data-g="${g.group_id}" class="btn-danger" title="删除选中的歌曲（从窗口移除，不影响歌单）">删除选中</button>
     <button data-act="clear" data-g="${g.group_id}" class="btn-danger" title="清空本窗口全部歌曲（不删歌单）">清空本窗口</button>
   </div>

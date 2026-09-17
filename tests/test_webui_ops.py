@@ -118,6 +118,12 @@ class _FakeService:
         self.clear_idx_calls.append((gid, wk, list(indices))); return len(indices)
     async def preview_playlist_name(self, gid): return self.preview_name
     async def rebuild_description(self, gid): return self.preview_desc
+    async def aggregate_window_to_master(self, gid, wk):
+        self.agg_window_calls = getattr(self, "agg_window_calls", [])
+        self.agg_window_calls.append((gid, wk)); return 5
+    async def aggregate_to_master(self, gid):
+        self.agg_calls = getattr(self, "agg_calls", [])
+        self.agg_calls.append(gid); return 7
 
 
 def _patch(service):
@@ -233,6 +239,23 @@ def test_dispatch_unknown_and_bad_param():
     r = asyncio.get_event_loop().run_until_complete(
         dispatch_action({"action": "archive", "group_id": "abc"}))
     assert not r["ok"] and "参数错误" in r["message"]
+
+
+def test_dispatch_aggregate_actions_wired():
+    """「汇总到总库」按钮前后端 action 名必须贯通：前端发 aggregate_window_to_master，
+    后端须识别并调用 service.aggregate_window_to_master(gid, wk)；
+    原「汇总现有窗口」按钮发 master_aggregate -> service.aggregate_to_master(gid)。
+    两者不得混用，否则会报「未知操作」或汇总错窗口。"""
+    svc = _FakeService(); _patch(svc)
+    import asyncio
+    r = asyncio.get_event_loop().run_until_complete(
+        dispatch_action({"action": "aggregate_window_to_master", "group_id": 123, "window_key": "2026-W33"}))
+    assert r["ok"] and "当前窗口" in r["message"]
+    assert svc.agg_window_calls == [(123, "2026-W33")]
+    r = asyncio.get_event_loop().run_until_complete(
+        dispatch_action({"action": "master_aggregate", "group_id": 123}))
+    assert r["ok"] and "历史歌曲" in r["message"]
+    assert svc.agg_calls == [123]
 
 
 def test_song_item_includes_created_at():
