@@ -378,6 +378,30 @@ class CollectorService:
                     added += 1
         return added
 
+    async def aggregate_window_to_master(
+        self, group_id: int, window_key: str
+    ) -> int:
+        """把指定窗口某群的歌曲去重汇总进总库。返回新增进总库的条数。
+
+        与 ``aggregate_to_master``（汇总该群*所有*窗口）不同，这里只处理单个窗口，
+        供收集管理页「汇总到总库」按钮按当前窗口增量归档使用；不改动当前窗口。
+        """
+        songs = await self.store.list_songs(group_id, window_key)
+        added = 0
+        for s in songs:
+            song = Song(
+                platform=s.platform, song_id=s.song_id, title=s.title,
+                artists=s.artists, album=s.album, cover=s.cover, url=s.url,
+                duration=s.duration, sharer_id=s.sharer_id, sharer_name=s.sharer_name,
+                netease_id=s.netease_id, matched=s.matched, created_at=s.created_at,
+            )
+            ins, _ = await self.store.add_song(
+                group_id, MASTER_KEY, song, src_window=window_key
+            )
+            if ins:
+                added += 1
+        return added
+
     _PLAYLIST_RE = re.compile(
         r"music\.163\.com/(?:#/)?(?:m/)?playlist[/\?]?[^\s#]*?id=(\d+)", re.I
     )

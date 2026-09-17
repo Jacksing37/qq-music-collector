@@ -556,22 +556,30 @@ def _song_item(song, index: int) -> dict:
 
 
 async def build_overview(
-    window_key: typing.Optional[str] = None, scope: str = "window"
+    window_key: typing.Optional[str] = None, scope: str = "window",
+    query: typing.Optional[str] = None, date: typing.Optional[str] = None,
 ) -> dict:
     """汇总当前收集情况：每个群收集了哪些歌，按窗口分桶。
 
     返回纯字典，便于前端渲染与单测。``window_key`` 省略时使用当前窗口。
     ``scope="master"`` 时改为汇总各群的**总库**（跨窗口去重后的群级歌曲库）。
+    ``query`` / ``date`` 为可选的搜索条件，用于 WebUI 在库内检索歌曲；命中为空
+    的群在搜索时直接隐藏，避免无意义的空卡片。
     """
     from .store import MASTER_KEY
 
+    filtering = bool(query or date)
     state = service.current_window()
     if scope == "master":
         # 总库视角：每个有总库歌曲的群，列出其总库内容与已建的总库歌单链接
         gids = await service.store.groups_in_window(MASTER_KEY)
         groups: list[dict] = []
         for gid in gids:
-            songs = await service.store.list_songs(gid, MASTER_KEY, newest_first=True)
+            songs = await service.store.search_songs(
+                gid, MASTER_KEY, query or "", date, newest_first=True
+            )
+            if filtering and not songs:
+                continue
             arch = await service.store.get_archive(gid, MASTER_KEY)
             groups.append({
                 "group_id": gid,
@@ -607,7 +615,9 @@ async def build_overview(
         gids = await service.store.groups_in_window(wk)
     groups = []
     for gid in gids:
-        songs = await service.store.list_songs(gid, wk)
+        songs = await service.store.search_songs(gid, wk, query or "", date)
+        if filtering and not songs:
+            continue
         arch = await service.store.get_archive(gid, wk)
         groups.append({
             "group_id": gid,
@@ -648,6 +658,12 @@ async def dispatch_action(body: dict) -> dict:
             gid = int(body.get("group_id"))
             n = await service.aggregate_to_master(gid)
             return {"ok": True, "message": f"已把 {n} 首历史歌曲汇总进总库"}
+
+        if action == "aggregate_window_to_master":
+            gid = int(body.get("group_id"))
+            wk = (body.get("window_key") or service.current_window().key)
+            n = await service.aggregate_window_to_master(gid, wk)
+            return {"ok": True, "message": f"已把当前窗口 {n} 首汇总进总库"}
 
         if action == "archive":
             gid = int(body.get("group_id"))
@@ -792,7 +808,9 @@ async def _api_overview(request: Request):
         raise HTTPException(status_code=401, detail="unauthorized")
     wk = request.query_params.get("window_key") or None
     scope = request.query_params.get("scope") or "window"
-    return JSONResponse(await build_overview(wk, scope=scope))
+    query = request.query_params.get("q") or None
+    date = request.query_params.get("date") or None
+    return JSONResponse(await build_overview(wk, scope=scope, query=query, date=date))
 
 
 async def _api_action(request: Request):

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import time
 from pathlib import Path
@@ -492,6 +493,48 @@ class Store:
                 f"SELECT {_COLUMNS} FROM songs "
                 f"WHERE group_id=? AND window_key=? ORDER BY {order}",
                 (group_id, window_key),
+            ) as cur:
+                rows = await cur.fetchall()
+        return [_row_to_song(r) for r in rows]
+
+    async def search_songs(
+        self, group_id: int, window_key: str, query: str = "",
+        date: Optional[str] = None, newest_first: bool = False,
+    ) -> list[Song]:
+        """按关键词 / 日期过滤某窗口某群的歌曲，用于 WebUI 搜索。
+
+        - ``query`` 不区分大小写，模糊匹配 title / artists / sharer_name /
+          song_id / netease_id；传空串表示不过滤。
+        - ``date`` 形如 ``'YYYY-MM-DD'``（服务器本地时区，与前端表格展示一致），
+          只返回该天收录的歌；格式非法则忽略。
+        """
+        clauses = ["group_id=?", "window_key=?"]
+        params: list[object] = [group_id, window_key]
+        if query:
+            like = f"%{query}%"
+            clauses.append(
+                "(title LIKE ? OR artists LIKE ? OR sharer_name LIKE ? "
+                "OR song_id LIKE ? OR netease_id LIKE ?)"
+            )
+            params.extend([like, like, like, like, like])
+        if date:
+            try:
+                y, m, d = (int(x) for x in date.split("-"))
+                start = time.mktime(
+                    datetime.datetime(y, m, d, 0, 0, 0).timetuple()
+                )
+                clauses.append("created_at >= ? AND created_at < ?")
+                params.append(start)
+                params.append(start + 86400)
+            except (ValueError, TypeError):
+                pass
+        order = "sort_order DESC, id DESC" if newest_first else "sort_order ASC, id ASC"
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"SELECT {_COLUMNS} FROM songs "
+                f"WHERE {' AND '.join(clauses)} ORDER BY {order}",
+                params,
             ) as cur:
                 rows = await cur.fetchall()
         return [_row_to_song(r) for r in rows]

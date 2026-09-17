@@ -103,6 +103,10 @@ class _FakeService:
         async def list_songs(self, gid, wk, newest_first=False):
             return self._p._master_songs if wk == MASTER_KEY else []
 
+        async def search_songs(self, gid, wk, query="", date=None, newest_first=False):
+            # 测试不覆盖搜索，直接透传 list_songs 结果
+            return await self.list_songs(gid, wk, newest_first=newest_first)
+
         async def get_archive(self, gid, wk):
             return self._p._archives.get((gid, wk))
 

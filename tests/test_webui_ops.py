@@ -86,6 +86,21 @@ class _FakeService:
         def __init__(self, parent): self._p = parent
         async def groups_in_window(self, wk): return list(self._p._songs.keys())
         async def list_songs(self, gid, wk): return self._p._songs.get(gid, [])
+        async def search_songs(self, gid, wk, query="", date=None, newest_first=False):
+            songs = self._p._songs.get(gid, [])
+            q = (query or "").lower()
+            if not q:
+                return songs
+            out = []
+            for s in songs:
+                hay = " ".join([
+                    getattr(s, "title", "") or "", getattr(s, "artists", "") or "",
+                    getattr(s, "sharer_name", "") or "", str(getattr(s, "song_id", "") or ""),
+                    str(getattr(s, "netease_id", "") or ""),
+                ]).lower()
+                if q in hay:
+                    out.append(s)
+            return out
         async def get_archive(self, gid, wk): return getattr(self._p, "_archives", {}).get((gid, wk))
     @property
     def store(self): return self._Store(self)

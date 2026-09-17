@@ -31,6 +31,8 @@ button:hover{border-color:var(--accent);transform:translateY(-1px)}
 input,select,textarea{width:100%;background:var(--input);border:1px solid var(--card-bd);color:var(--txt);
   border-radius:10px;padding:9px 11px;font:inherit;transition:.18s}
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(110,168,254,.18)}
+[data-theme="dark"] input[type="date"]{color-scheme:dark}
+[data-theme="dark"] input[type="date"]::-webkit-calendar-picker-indicator{filter:invert(.85);cursor:pointer}
 /* 暗色主题下拉选项需显式配色，否则原生弹层文字与背景同色看不清 */
 select option,select optgroup{background:var(--bg2);color:var(--txt)}
 textarea{resize:vertical;font-family:ui-monospace,monospace;font-size:13px}
@@ -214,6 +216,11 @@ button:disabled{opacity:.5;cursor:not-allowed}
           <button id="cArchiveBtn" class="btn-primary" title="把本窗口全部歌曲写入网易云歌单（新建或追加）；不删除窗口歌曲">📦 归档本窗口全部</button>
           <button id="cSyncAllBtn" title="按各窗口当前歌曲对账歌单：补齐缺失、移除已删歌曲，不清除窗口">🔄 同步全部歌单</button>
         </div>
+        <div class="row" style="margin-top:10px;gap:8px">
+          <input id="cSearch" placeholder="搜索歌曲 / ID / 分享者…" style="flex:1;min-width:160px">
+          <input id="cDate" type="date" title="按收录日期筛选（本地时区）" style="width:auto">
+          <button id="cClearSearch" title="清除筛选条件">✕ 清除</button>
+        </div>
         <p class="muted">在下方各群卡片里可编辑、手动匹配、调整顺序、删除，并对单个群「同步到歌单」（增+删+简介）。</p>
       </div>
       <div id="collectGroups"><div class="empty">加载中…</div></div>
@@ -234,6 +241,11 @@ button:disabled{opacity:.5;cursor:not-allowed}
           <input id="mImportUrl" placeholder="粘贴网易云歌单链接，如 https://music.163.com/#/playlist?id=123456" style="flex:1;min-width:200px" />
           <button id="mImportBtn" class="btn-primary" title="从网易云歌单链接批量导入歌曲到上方所选群的总库">📥 从歌单导入总库</button>
           <button id="mUndoBtn" title="撤回该群最近一次歌单导入（仅删除本次新加入总库的歌曲，不影响已生成的歌单）">↩ 撤回上次导入</button>
+        </div>
+        <div class="row" style="margin-top:10px;gap:8px">
+          <input id="mSearch" placeholder="搜索总库歌曲 / ID / 分享者…" style="flex:1;min-width:160px">
+          <input id="mDate" type="date" title="按收录日期筛选（本地时区）" style="width:auto">
+          <button id="mClearSearch" title="清除筛选条件">✕ 清除</button>
         </div>
         <div id="mImportHistory" class="muted" style="margin-top:8px"></div>
         <p class="muted">总库把当前群里<strong>所有窗口</strong>的歌曲汇聚去重。有人分享了总库里已存在的歌时，会在群里提示（提示开关与文案在「配置」页的「总库」分组里设置）。下面可对总库做编辑、匹配、拖拽排序、删除，并归档 / 同步到独立的<strong>总库网易云歌单</strong>（命名 / 简介 / 期号等配置同样在「配置」页设置）。</p>
@@ -517,7 +529,11 @@ async function doAction(body){
 /* ---- 收集管理 ---- */
 async function loadCollect(){
   try{
-    const url = "/api/music-admin/overview" + (CUR_WIN?("?window_key="+encodeURIComponent(CUR_WIN)):"");
+    const q = $("#cSearch").value.trim();
+    const d = $("#cDate").value.trim();
+    let url = "/api/music-admin/overview" + (CUR_WIN?("?window_key="+encodeURIComponent(CUR_WIN)):"");
+    if(q) url += "&q="+encodeURIComponent(q);
+    if(d) url += "&date="+encodeURIComponent(d);
     COLL = await (await api(url)).json();
     CUR_WIN = COLL.selected_window || (COLL.windows[0]&&COLL.windows[0].key) || null;
     fillWinSel($("#cWinSel"), CUR_WIN);
@@ -529,7 +545,11 @@ async function loadCollect(){
 }
 async function loadMaster(){
   try{
-    const url = "/api/music-admin/overview?scope=master";
+    const q = $("#mSearch").value.trim();
+    const d = $("#mDate").value.trim();
+    let url = "/api/music-admin/overview?scope=master";
+    if(q) url += "&q="+encodeURIComponent(q);
+    if(d) url += "&date="+encodeURIComponent(d);
     MASTER = await (await api(url)).json();
     const wrap=$("#masterGroups"); wrap.innerHTML="";
     const groups = MASTER.groups||[];
@@ -596,6 +616,7 @@ function renderGroupCard(g, wk){
     <button data-act="preview" data-g="${g.group_id}" title="预览本窗口歌单样式与简介清单">👁 预览</button>
     <button data-act="archive" data-g="${g.group_id}" title="把本窗口歌曲归档/追加到网易云歌单；若配置「归档后清空」会清空本期，用于一期结束定稿">📦 归档本群</button>
     <button class="btn-primary" data-act="sync" data-g="${g.group_id}" title="让网易云歌单与当前窗口完全一致：窗口有而歌单无的加入，歌单有而窗口已删的移除；不清除本期">🔄 同步到歌单</button>
+    <button data-act="agg_master" data-g="${g.group_id}" title="把当前窗口本群歌曲去重汇总进总库（不影响当前窗口），用于跨窗口/跨期累积成总歌单">📥 汇总到总库</button>
     <button data-act="del" data-g="${g.group_id}" class="btn-danger" title="删除选中的歌曲（从窗口移除，不影响歌单）">删除选中</button>
     <button data-act="clear" data-g="${g.group_id}" class="btn-danger" title="清空本窗口全部歌曲（不删歌单）">清空本窗口</button>
   </div>
@@ -696,6 +717,17 @@ $("#cSyncAllBtn").onclick=async()=>{
   for(const gid of gids){ await doAction({action:"sync", group_id:gid}); }
 };
 $("#cAddBtn").onclick=()=>{ ADD_CTX={window_key:(COLL&&COLL.selected_window)||"", group_id:(COLL&&COLL.groups[0]?COLL.groups[0].group_id:0)}; $("#addModal").classList.remove("hidden"); };
+
+/* 搜索框：关键词实时过滤（防抖）+ 日期筛选；清除按钮重置两者 */
+function bindSearch(inputId, dateId, clearId, reloadFn){
+  const inp=$(inputId), dt=$(dateId), clr=$(clearId);
+  let t=null;
+  inp.addEventListener("input", ()=>{ clearTimeout(t); t=setTimeout(reloadFn, 250); });
+  dt.addEventListener("change", reloadFn);
+  clr.onclick=()=>{ inp.value=""; dt.value=""; reloadFn(); };
+}
+bindSearch("#cSearch","#cDate","#cClearSearch", loadCollect);
+bindSearch("#mSearch","#mDate","#mClearSearch", loadMaster);
 
 /* 总库页头部操作 */
 $("#mAggBtn").onclick=async()=>{
