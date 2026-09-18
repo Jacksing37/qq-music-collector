@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 import time
 from pathlib import Path
@@ -12,6 +13,8 @@ from typing import Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
+
+logger = logging.getLogger("music_collector.config")
 
 # 项目根目录（.../qq-music-collector）
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -355,19 +358,63 @@ class AppConfig(BaseModel):
 
 
 class ConfigManager:
-    """单例式配置管理器，负责加载 / 保存 / 热更新。"""
+    """单例式配置管理器，负责加载 / 保存 / 热更新。
+
+    多进程 / 手工编辑的自我保护：
+
+    - **自动重载**：读取 ``config`` 时比对配置文件 mtime，发现被外部改过就先
+      重新加载。否则运行中的进程会一直用启动时的旧配置（典型症状：网页端改了
+      歌单名模板 / 期号，实际归档仍按旧值走，表现为「设置不生效」）。
+    - **合并写入**：``update`` 写盘前先重载磁盘最新值，只覆盖本次要改的那个
+      键。否则一个持旧内存的进程会把**整份**配置写回去，把别的进程刚写好的
+      期号、模板等一起回退（典型症状：新窗口期号还是上一期的数字）。
+    """
 
     def __init__(self, path: Path = CONFIG_PATH) -> None:
         self.path = path
         self._config: AppConfig = AppConfig()
+        #: 上次读/写该文件时的 mtime，用于检测外部改动
+        self._mtime: float = 0.0
+        #: 是否已经 ``load()`` 过。没加载过时保持代码默认值，不做自动重载
+        #: （否则测试/离线脚本会意外读到真实的 data/config.yaml）
+        self._loaded: bool = False
+
+    def _disk_mtime(self) -> float:
+        try:
+            return self.path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def reload_if_changed(self) -> bool:
+        """磁盘上的配置比内存里新时自动重载；返回是否发生了重载。
+
+        配置写坏（手工编辑语法错误）时保留内存里的旧配置，只记一条警告，
+        免得把正在运行的服务打挂。
+        """
+        if not self._loaded:
+            return False
+        mtime = self._disk_mtime()
+        if mtime <= self._mtime:
+            return False
+        try:
+            self.load()
+        except Exception as exc:  # noqa: BLE001 — 坏配置不应中断服务
+            self._mtime = mtime  # 避免每次访问都重试解析同一个坏文件
+            logger.warning(f"[music] 配置文件解析失败，继续使用内存中的旧配置: {exc}")
+            return False
+        logger.info("[music] 检测到配置文件被外部修改，已自动重载")
+        return True
 
     @property
     def config(self) -> AppConfig:
+        self.reload_if_changed()
         return self._config
 
     def load(self) -> AppConfig:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        # 标记「已加载」，此后 config 访问才会做外部改动自动重载
+        self._loaded = True
 
         if not self.path.exists():
             if EXAMPLE_CONFIG_PATH.exists():
@@ -379,6 +426,7 @@ class ConfigManager:
 
         raw = yaml.safe_load(self.path.read_text(encoding="utf-8")) or {}
         self._config = AppConfig.model_validate(raw)
+        self._mtime = self._disk_mtime()
         return self._config
 
     def save(self) -> None:
@@ -390,6 +438,7 @@ class ConfigManager:
         for attempt in range(5):
             try:
                 self.path.write_text(text, encoding="utf-8")
+                self._mtime = self._disk_mtime()
                 return
             except PermissionError as exc:
                 last_err = exc
@@ -398,7 +447,13 @@ class ConfigManager:
             raise last_err
 
     def update(self, dotted_key: str, value: object) -> None:
-        """按 `window.weekly.start` 这样的点分路径更新并落盘。"""
+        """按 `window.weekly.start` 这样的点分路径更新并落盘。
+
+        写盘前先 ``reload_if_changed``：如果配置在别处（网页端 / 另一个进程 /
+        手工编辑）被改过，先合并那些改动，只覆盖本次这一个键，避免把旧内存
+        整份写回去、连带回退别人刚写好的期号 / 模板等。
+        """
+        self.reload_if_changed()
         parts = dotted_key.split(".")
         data = self._config.model_dump(mode="json")
         cursor = data

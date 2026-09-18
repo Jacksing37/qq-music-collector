@@ -206,6 +206,8 @@ class ArchiveReport:
     unmatched: list[Song] = field(default_factory=list)
     #: 本次是否新建了歌单；False 表示复用了当前窗口已存在的歌单追加
     created_new: bool = True
+    #: 复用已有歌单时是否按显式指定改了名（用于消耗一次性歌单名）
+    renamed: bool = False
     #: 简介是否成功写入网易云
     desc_ok: bool = False
     #: 简介写入失败原因（成功时是命中的通道名）
@@ -462,22 +464,27 @@ class Archiver:
         # 2. 与歌单内已有歌曲求差集：只处理真正的新歌
         new_ids = [tid for tid in ordered_unique if tid not in added_set]
 
+        # 占位符上下文：新建时用来起名，复用改名时也要用
+        context = build_context(
+            group_id=group_id,
+            window_label=window_label,
+            start_at=start_at,
+            end_at=end_at,
+            count=len(ordered_unique),
+            total=len(songs),
+            seq=cfg.seq,
+            songs=songs,
+            emoji_style=cfg.emoji_style,
+            aliases=cfg.sharer_aliases,
+        )
+        #: 用户显式指定的歌单名（``/music archive 名字``、一次性歌单名），没有则为空
+        explicit = (name_override or cfg.pending_name or "").strip()
+        explicit = render_template(explicit, context).strip() if explicit else ""
+
         # 新建歌单（仅首次归档时）
         if reused_playlist_id is None:
-            context = build_context(
-                group_id=group_id,
-                window_label=window_label,
-                start_at=start_at,
-                end_at=end_at,
-                count=len(ordered_unique),
-                total=len(songs),
-                seq=cfg.seq,
-                songs=songs,
-                emoji_style=cfg.emoji_style,
-                aliases=cfg.sharer_aliases,
-            )
-            name = (name_override or cfg.pending_name or cfg.name_template).strip()
-            name = render_template(name, context) or f"群歌单 {window_label}"
+            name = explicit or render_template(cfg.name_template, context).strip() \
+                or f"群歌单 {window_label}"
             report.playlist_name = name
             try:
                 playlist_id = await self.api.create_playlist(name, cfg.privacy)
@@ -490,8 +497,22 @@ class Archiver:
             report.created_new = True
         else:
             playlist_id = reused_playlist_id
-            # 复用场景不重新生成歌单名；archives 表不存名字，用窗口标签兜底展示
-            report.playlist_name = f"群歌单 {window_label}"
+            stored_name = str((existing or {}).get("playlist_name") or "")
+            if explicit and hasattr(self.api, "rename_playlist"):
+                # 显式指定了名字：复用的歌单也要真的改名。否则「改完歌单名再归档」
+                # 看起来毫无效果（歌单名仍是上一次的名字）。
+                renamed, note = await self.api.rename_playlist(playlist_id, explicit)
+                if renamed:
+                    report.playlist_name = explicit
+                    report.renamed = True
+                else:
+                    report.playlist_name = stored_name or explicit
+                    logger.warning(
+                        f"[music] 复用歌单改名失败 playlist={playlist_id} -> {note}"
+                    )
+            else:
+                # 没有显式名字：显示歌单的真实名字（历史记录里存的），拿不到再退回窗口标签
+                report.playlist_name = stored_name or f"群歌单 {window_label}"
 
         if not new_ids:
             # 没有新歌可追加：简介仍按当前窗口全量重写一次（保持清单最新）
@@ -508,6 +529,7 @@ class Archiver:
                 group_id, window_key, str(playlist_id), report.playlist_url,
                 report.total, report.added, len(report.unmatched),
                 added_ids=sorted(added_set),
+                playlist_name=report.playlist_name,
             )
             return report
 
@@ -549,6 +571,7 @@ class Archiver:
             group_id, window_key, str(playlist_id), report.playlist_url,
             report.total, added, len(report.unmatched),
             added_ids=sorted(merged_ids),
+            playlist_name=report.playlist_name,
         )
         return report
 

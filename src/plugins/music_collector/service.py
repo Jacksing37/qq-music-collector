@@ -523,11 +523,11 @@ class CollectorService:
             group_id, MASTER_KEY, "总库", songs, cfg,
             start_at=None, end_at=None, name_override=name_override,
         )
-        if report.ok and report.created_new:
-            if cfg.pending_name and not name_override:
+        if report.ok:
+            if report.created_new:
+                self._consume_naming("master", cfg, name_override)
+            elif report.renamed and cfg.pending_name and not name_override:
                 config_manager.update("master.pending_name", "")
-            if cfg.seq_auto_increment:
-                config_manager.update("master.seq", cfg.seq + 1)
         return report
 
     async def sync_master_playlist(self, group_id: int) -> dict:
@@ -546,10 +546,7 @@ class CollectorService:
             if not report.ok:
                 return {"ok": False, "message": report.message or "建歌单失败"}
             if report.created_new:
-                if cfg.pending_name:
-                    config_manager.update("master.pending_name", "")
-                if cfg.seq_auto_increment:
-                    config_manager.update("master.seq", cfg.seq + 1)
+                self._consume_naming("master", cfg)
             arch = await self.store.get_archive(group_id, MASTER_KEY)
             if not arch:
                 return {"ok": False, "message": "建歌单后未读到归档记录"}
@@ -687,6 +684,24 @@ class CollectorService:
 
     # ------------------------------------------------------------ 归档
 
+    def _consume_naming(
+        self, scope: str, cfg_seen: PlaylistConfig, name_override: str = ""
+    ) -> None:
+        """归档**新建**歌单后消耗一次性歌单名 / 自增期号。
+
+        ``scope`` 为配置前缀（``playlist`` 普通收集 / ``master`` 总库）。
+
+        基准值是**重新读到的最新配置**而不是归档开始时那份：归档过程要跑若干
+        网络请求，期间网页端可能刚改过配置、或另一个协程已经自增过。若还按
+        开始时那份写回去，就会出现「期号没变」甚至把别人的改动一起回退。
+        期号取 ``max(最新, 本次) + 1``，只会跳过不会重复。
+        """
+        latest = self.config.master if scope == "master" else self.config.playlist
+        if latest.pending_name and not name_override:
+            config_manager.update(f"{scope}.pending_name", "")
+        if latest.seq_auto_increment:
+            config_manager.update(f"{scope}.seq", max(int(latest.seq), int(cfg_seen.seq)) + 1)
+
     async def preview_playlist_name(
         self, group_id: int, window: Optional[WindowState] = None
     ) -> str:
@@ -727,10 +742,10 @@ class CollectorService:
             # 只有「新建歌单」才消耗一次性歌单名 / 自增期号；
             # 复用已有歌单追加时不改动命名与期号。
             if report.created_new:
-                if cfg.pending_name and not name_override:
-                    config_manager.update("playlist.pending_name", "")
-                if cfg.seq_auto_increment:
-                    config_manager.update("playlist.seq", cfg.seq + 1)
+                self._consume_naming("playlist", cfg, name_override)
+            elif report.renamed and cfg.pending_name and not name_override:
+                # 复用歌单按「一次性歌单名」改过名，该名同样要消耗，否则每次归档都会再改一次
+                config_manager.update("playlist.pending_name", "")
             # 归档（结束收集）后自动清空本期已收集歌曲
             if self.config.clear.after_archive:
                 removed = await self.store.delete_window(group_id, state.key)
@@ -1160,10 +1175,7 @@ class CollectorService:
             if not report.ok:
                 return {"ok": False, "message": report.message or "建歌单失败"}
             if report.created_new:
-                if cfg.pending_name:
-                    config_manager.update("playlist.pending_name", "")
-                if cfg.seq_auto_increment:
-                    config_manager.update("playlist.seq", cfg.seq + 1)
+                self._consume_naming("playlist", cfg)
             arch = await self.store.get_archive(group_id, state.key)
             if not arch:
                 return {"ok": False, "message": "建歌单后未读到归档记录"}

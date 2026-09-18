@@ -386,6 +386,11 @@ class NeteaseAPI:
     async def create_playlist(self, name: str, privacy: bool = False) -> int:
         if not self.logged_in:
             raise NeteaseError(-2, "网易云未登录，请先执行 /music cookie <MUSIC_U>")
+        name = (name or "").strip()
+        if not name:
+            # 空名字网易云会建成默认的「用户xxx的歌单」，歌单名就"静默丢失"了。
+            # 与其建出一个名字不对的歌单，不如直接失败并把原因交给调用方。
+            raise NeteaseError(-1, "歌单名为空，已阻止创建（请检查「歌单名模板」配置）")
         payload = {"name": name[:40], "privacy": 10 if privacy else 0, "type": "NORMAL"}
         last_error = "所有通道都失败"
         for label, call in (
@@ -401,9 +406,79 @@ class NeteaseAPI:
             pid = data.get("id") or (data.get("playlist") or {}).get("id")
             if pid:
                 logger.debug(f"[netease] 建歌单成功（{label}）id={pid}")
+                await self._ensure_playlist_name(int(pid), name[:40])
                 return int(pid)
             last_error = f"{label}: {data.get('message') or data}"
         raise NeteaseError(-1, f"创建歌单失败 -> {last_error}")
+
+    async def _ensure_playlist_name(self, playlist_id: int, name: str) -> None:
+        """创建后核对歌单名：网易云偶发忽略 name（建成「用户xxx的歌单」），此时补一次改名。
+
+        只做补救、不影响建歌单成败：读不回或改名失败都只记日志。
+        """
+        try:
+            actual = await self.playlist_name(playlist_id)
+        except Exception:
+            return
+        if not actual or actual == name:
+            return
+        logger.warning(
+            f"[netease] 歌单名未按预期生效（实际 {actual!r}），尝试改名 -> {name!r} playlist={playlist_id}"
+        )
+        await self.rename_playlist(playlist_id, name)
+
+    async def playlist_name(self, playlist_id: int) -> str:
+        """读回歌单名（创建 / 改名的写后校验用）。"""
+        detail = await self.playlist_detail(int(playlist_id))
+        return str((detail or {}).get("name") or "")
+
+    async def rename_playlist(self, playlist_id: int, name: str) -> tuple[bool, str]:
+        """改歌单名（``/playlist/update/name``），返回 ``(是否成功, 说明)``。
+
+        逐通道降级并写后读回校验——该接口在部分环境会返回 200 却并不生效，
+        所以必须回读确认真改了，否则就当这次通道失败、换下一个通道。
+        """
+        name = (name or "").strip()
+        if not name:
+            return False, "歌单名为空，跳过改名"
+        if not self.logged_in:
+            return False, "网易云未登录"
+        pid = str(playlist_id)
+        short = name[:40]
+        attempts = [
+            ("linuxapi", lambda: self._linux_post(
+                "/playlist/update/name", {"id": pid, "name": short})),
+            ("api", lambda: self._api_post(
+                "/playlist/update/name", {"id": pid, "name": short})),
+            ("weapi", lambda: self._post(
+                "/playlist/update/name", {"id": pid, "name": short})),
+            ("eapi", lambda: self._eapi_post(
+                "/playlist/update/name", {"id": pid, "name": short})),
+        ]
+        errors: list[str] = []
+        for i, (label, call) in enumerate(attempts):
+            if i:
+                # 紧挨着连发容易触发 406「操作频繁」，错开一秒
+                await asyncio.sleep(1.0)
+            try:
+                data = await call()
+            except Exception as exc:
+                errors.append(f"{label}:{exc}")
+                continue
+            code = data.get("code", 200)
+            if code != 200:
+                errors.append(f"{label}:code={code} {data.get('message') or data.get('msg') or ''}".strip())
+                continue
+            try:
+                actual = await self.playlist_name(int(playlist_id))
+            except Exception:
+                actual = ""
+            if actual == short:
+                logger.info(f"[netease] 歌单改名成功（{label}）playlist={playlist_id}")
+                return True, label
+            errors.append(f"{label}:接口返回 200 但读回不一致")
+        logger.warning(f"[netease] 歌单改名失败 playlist={playlist_id} -> {' | '.join(errors[:4])}")
+        return False, " | ".join(errors[:4]) or "改名失败"
 
     async def add_tracks(self, playlist_id: int, track_ids: list[str]) -> dict[str, Any]:
         if not track_ids:
