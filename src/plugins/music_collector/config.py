@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import time
 from pathlib import Path
@@ -18,7 +19,9 @@ logger = logging.getLogger("music_collector.config")
 
 # 项目根目录（.../qq-music-collector）
 ROOT_DIR = Path(__file__).resolve().parents[3]
-DATA_DIR = ROOT_DIR / "data"
+#: 数据目录。可用环境变量 ``MUSIC_DATA_DIR`` 覆盖：测试脚本靠它把 config.yaml /
+#: collector.db / 登录态全部落到临时目录，**避免回归测试写坏真实的 data/**。
+DATA_DIR = Path(os.environ.get("MUSIC_DATA_DIR") or (ROOT_DIR / "data")).expanduser()
 CACHE_DIR = DATA_DIR / "cache"
 CONFIG_PATH = DATA_DIR / "config.yaml"
 EXAMPLE_CONFIG_PATH = ROOT_DIR / "config.example.yaml"

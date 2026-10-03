@@ -291,6 +291,11 @@ Wk.86 线上学习歌单，共 12 首。
 > 插件包导入时会 `require("nonebot_plugin_apscheduler")`，所以测试脚本里必须先
 > `nonebot.init(driver="~fastapi")` 才能 import 插件模块 —— 新增测试时照抄现有脚本的开头即可。
 
+> `run_all.py` 会把环境变量 `MUSIC_DATA_DIR` 指到一个临时目录，测试进程读写的
+> `config.yaml` / `collector.db` / 网易云登录态全部落在那里，**不会动真实的 `data/`**。
+> 单独直跑某个脚本时若想同样隔离，自己带上这个变量即可：
+> `MUSIC_DATA_DIR=/tmp/music-test .venv\Scripts\python tests\xxx.py`
+
 ---
 
 ## 部署到服务器

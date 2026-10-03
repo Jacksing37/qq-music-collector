@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -62,10 +63,16 @@ def main() -> int:
         return 1
 
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8")
+    # 把所有测试进程的 data/（config.yaml / collector.db / 网易云登录态）挪到临时目录。
+    # 否则某些用例会拿真实的 data/config.yaml 去自增期号、覆盖模板与歌单名，
+    # 跑完一次回归就把本机配置改花（归档类用例尤其容易踩）。
+    env["MUSIC_DATA_DIR"] = tempfile.mkdtemp(prefix="music-test-data-")
     passed: list[str] = []
     failed: list[tuple[str, str]] = []
 
-    print(f"共 {len(scripts)} 个脚本，解释器 {sys.executable}\n" + "-" * 56)
+    print(f"共 {len(scripts)} 个脚本，解释器 {sys.executable}")
+    print(f"测试数据目录 {env['MUSIC_DATA_DIR']}（不触碰真实 data/）")
+    print("-" * 56)
     started = time.perf_counter()
 
     for script in scripts:
