@@ -257,6 +257,36 @@ class MasterConfig(BaseModel):
     sharer_aliases: dict[str, str] = Field(default_factory=dict)
 
 
+class NeteaseConfig(BaseModel):
+    """网易云登录态维护（掉登录后自动重登）。
+
+    网易云的 `MUSIC_U` cookie 会过期 / 被风控，失效后所有写接口统一返回
+    code=301「需要登录」。此时若开了 ``auto_relogin``，写简介/建歌单失败会
+    自动尝试续期或重新登录，再重试一次，避免整天卡在「简介写入失败待补写」。
+
+    两条重登路径：
+    1. **续期**（``/login/token/refresh``）：用现有 cookie 续期，不需要账号密码，
+       cookie 还没彻底失效时最省事；
+    2. **账密登录**（``/login/cellphone``）：需要 ``phone`` + 密码。密码可填明文
+       ``password``（本地配置文件里保存）或直接填 ``password_md5`` 避免明文。
+
+    ⚠️ 配置里存的是账号凭证，请确保 ``data/config.yaml`` 只有自己可读。
+    """
+
+    #: 写接口失败且判定为登录态失效时，自动续期 / 重新登录后重试
+    auto_relogin: bool = True
+    #: 登录手机号（留空则只做 cookie 续期，不做账密登录）
+    phone: str = ""
+    #: 登录密码（明文，仅保存在本机配置文件）
+    password: str = ""
+    #: 登录密码的 md5（十六进制小写）；填了它就不用填 password
+    password_md5: str = ""
+    #: 手机号国家码
+    countrycode: str = "86"
+    #: 两次自动重登尝试的最小间隔（秒），防止风控期疯狂重试
+    relogin_cooldown: int = 300
+
+
 class CardConfig(BaseModel):
     """音乐卡片发送策略。
 
@@ -348,6 +378,7 @@ class AppConfig(BaseModel):
     debug_detect: bool = False
     window: WindowConfig = Field(default_factory=WindowConfig)
     playlist: PlaylistConfig = Field(default_factory=PlaylistConfig)
+    netease: NeteaseConfig = Field(default_factory=NeteaseConfig)
     card: CardConfig = Field(default_factory=CardConfig)
     render: RenderConfig = Field(default_factory=RenderConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)

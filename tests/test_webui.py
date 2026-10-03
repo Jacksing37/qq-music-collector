@@ -130,6 +130,23 @@ def test_apply_updates_rollback_save_failure_no_500(tmp_path: Path):
     config_manager.load()
 
 
+def test_netease_section_and_secret_fields():
+    """「网易云登录」分组要在配置页出现，密码字段要按 secret 渲染。"""
+    keys = _all_keys()
+    for expected in ("netease.auto_relogin", "netease.phone",
+                     "netease.password", "netease.password_md5",
+                     "netease.countrycode", "netease.relogin_cooldown"):
+        assert expected in keys, f"schema 缺少 {expected}"
+
+    sec = next((s for s in W.SCHEMA if s["key"] == "netease"), None)
+    assert sec is not None, "缺少 netease 分组"
+    assert sec["title"] == "网易云登录", sec["title"]
+
+    assert W.KEY_INDEX["netease.password"]["secret"] is True
+    assert W.KEY_INDEX["netease.password_md5"]["secret"] is True
+    assert W.KEY_INDEX["netease.phone"]["secret"] is False
+
+
 if __name__ == "__main__":
     import tempfile
 
@@ -143,4 +160,5 @@ if __name__ == "__main__":
     test_current_values_map_whole_dict()
     test_apply_updates_map(_tmp)
     test_apply_updates_rollback_save_failure_no_500(_tmp)
+    test_netease_section_and_secret_fields()
     print("webui tests OK")

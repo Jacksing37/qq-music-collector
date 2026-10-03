@@ -54,6 +54,10 @@ _LINUX_KEY = b"rFgB&h#%2?^eDg:Q"
 
 _BASE62 = string.ascii_letters + string.digits
 
+#: 多通道降级时相邻两次请求之间错开的秒数（网易云对同接口连发很敏感，
+#: 挨着发容易触发 406「操作频繁」）。测试里可置 0 避免空等。
+CHANNEL_GAP_SECONDS = 1.0
+
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -150,7 +154,7 @@ class NeteaseAPI:
     BASE = "https://music.163.com"
     EAPI_BASE = "https://interface.music.163.com"
 
-    def __init__(self, session_path: Path) -> None:
+    def __init__(self, session_path: Path, relogin_cfg=None) -> None:
         self.session_path = Path(session_path)
         self._cookies: dict[str, str] = {
             "os": "pc",
@@ -159,6 +163,11 @@ class NeteaseAPI:
             "deviceId": "".join(random.choice(_BASE62) for _ in range(32)),
         }
         self._lock = asyncio.Lock()
+        #: 取「自动重登」配置的回调（每次调用现取，便于配置热更新）。None=不自动重登
+        self._relogin_cfg = relogin_cfg
+        #: 上次自动重登尝试的单调时钟，用于冷却（初值 -inf：进程刚起时不因
+        #: 「系统开机不足 cooldown 秒」被误判进冷却）
+        self._last_relogin: float = -float("inf")
         self._load_session()
 
     # ------------------------------------------------------------ session
@@ -381,6 +390,113 @@ class NeteaseAPI:
             return int(profile["userId"])
         return None
 
+    # ------------------------------------------------------------ 登录态维护 / 自动重登
+
+    def _cfg(self):
+        """现取「自动重登」配置（回调形式，便于配置热更新）；未接入时返回 None。"""
+        if self._relogin_cfg is None:
+            return None
+        try:
+            return self._relogin_cfg()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _password_md5(cfg) -> str:
+        """取密码的 md5：优先用配置里的 password_md5，否则把明文 md5 一下。"""
+        given = (getattr(cfg, "password_md5", "") or "").strip().lower()
+        if len(given) == 32 and all(c in "0123456789abcdef" for c in given):
+            return given
+        raw = getattr(cfg, "password", "") or ""
+        return hashlib.md5(raw.encode("utf-8")).hexdigest() if raw else ""
+
+    @staticmethod
+    def _is_auth_error(text: str) -> bool:
+        """失败原因是否属于「登录态失效」（网易云失效后统一返回 301）。"""
+        t = text or ""
+        return ("code=301" in t) or ("需要登录" in t) or ("未登录" in t)
+
+    async def refresh_token(self) -> bool:
+        """用现有 cookie 续期（``/login/token/refresh``），不需要账号密码。"""
+        if not self.logged_in:
+            return False
+        for label, call in (
+            ("weapi", lambda: self._post("/login/token/refresh", {})),
+            ("eapi", lambda: self._eapi_post("/login/token/refresh", {})),
+        ):
+            try:
+                data = await call()
+            except Exception as exc:
+                logger.debug(f"[netease] token 续期通道 {label} 失败: {exc}")
+                continue
+            if data.get("code") == 200:
+                self._save_session()
+                logger.info(f"[netease] 登录态续期成功（{label}）")
+                return True
+        return False
+
+    async def login_with_password(self) -> tuple[bool, str]:
+        """手机号 + 密码重新登录；未配置手机号/密码时返回失败与原因。"""
+        cfg = self._cfg()
+        phone = (getattr(cfg, "phone", "") or "").strip() if cfg else ""
+        pw_md5 = self._password_md5(cfg) if cfg else ""
+        if not phone or not pw_md5:
+            return False, "未配置 netease.phone / password（或 password_md5）"
+        payload = {
+            "phone": phone,
+            "countrycode": (getattr(cfg, "countrycode", "") or "86"),
+            "password": pw_md5,
+            "rememberLogin": "true",
+        }
+        last = "所有通道都失败"
+        for label, call in (
+            ("weapi", lambda: self._post("/login/cellphone", payload)),
+            ("eapi", lambda: self._eapi_post("/login/cellphone", payload)),
+            ("linuxapi", lambda: self._linux_post("/login/cellphone", payload, os_name="pc")),
+        ):
+            try:
+                data = await call()
+            except Exception as exc:
+                last = f"{label}: {exc}"
+                continue
+            code = data.get("code")
+            if code == 200:
+                self._save_session()
+                logger.info(f"[netease] 账密登录成功（{label}）")
+                return True, label
+            last = f"{label}: code={code} {data.get('message') or data.get('msg') or ''}".strip()
+            if code in (501, 502):  # 账号不存在 / 密码错误，换通道也一样
+                break
+        return False, last
+
+    async def ensure_logged_in(self, *, force: bool = False, ignore_cooldown: bool = False) -> bool:
+        """确保登录态可用：失效时先续期，仍不行再用账密重登。返回是否已恢复。
+
+        - ``force=False``：cookie 在且真实有效就直接返回，不做多余请求；
+        - ``force=True``：跳过乐观判断，直接走「续期 → 账密」流程；
+        - ``ignore_cooldown=True``：忽略冷却（网页端手动点「重新登录」时用）；
+        - ``relogin_cooldown`` 秒内的重复尝试会被跳过（防风控期疯狂重试）。
+        """
+        cfg = self._cfg()
+        auto = bool(getattr(cfg, "auto_relogin", True)) if cfg is not None else False
+        if not auto and not ignore_cooldown:
+            return self.logged_in
+        if not force and self.logged_in and await self.session_valid():
+            return True
+        cooldown = int(getattr(cfg, "relogin_cooldown", 300) or 0)
+        now = time.monotonic()
+        if cooldown > 0 and not ignore_cooldown and now - self._last_relogin < cooldown:
+            logger.info("[netease] 自动重登处于冷却期，本次跳过")
+            return False
+        self._last_relogin = now
+        if await self.refresh_token() and await self.session_valid():
+            return True
+        ok, note = await self.login_with_password()
+        if ok and await self.session_valid():
+            return True
+        logger.warning(f"[netease] 自动重新登录未成功：{note}")
+        return False
+
     # ------------------------------------------------------------ 歌单接口
 
     async def create_playlist(self, name: str, privacy: bool = False) -> int:
@@ -392,24 +508,37 @@ class NeteaseAPI:
             # 与其建出一个名字不对的歌单，不如直接失败并把原因交给调用方。
             raise NeteaseError(-1, "歌单名为空，已阻止创建（请检查「歌单名模板」配置）")
         payload = {"name": name[:40], "privacy": 10 if privacy else 0, "type": "NORMAL"}
-        last_error = "所有通道都失败"
-        for label, call in (
-            ("linuxapi", lambda: self._linux_post("/playlist/create", payload)),
-            ("api", lambda: self._api_post("/playlist/create", payload)),
-            ("weapi", lambda: self._post_checked("/playlist/create", payload)),
-        ):
-            try:
-                data = await call()
-            except Exception as exc:
-                last_error = f"{label}: {exc}"
-                continue
-            pid = data.get("id") or (data.get("playlist") or {}).get("id")
-            if pid:
-                logger.debug(f"[netease] 建歌单成功（{label}）id={pid}")
-                await self._ensure_playlist_name(int(pid), name[:40])
-                return int(pid)
-            last_error = f"{label}: {data.get('message') or data}"
-        raise NeteaseError(-1, f"创建歌单失败 -> {last_error}")
+
+        async def _try_once() -> tuple[Optional[int], str]:
+            """跑一遍所有通道；返回 (歌单 id 或 None, 失败原因)。"""
+            last = "所有通道都失败"
+            for label, call in (
+                ("linuxapi", lambda: self._linux_post("/playlist/create", payload)),
+                ("api", lambda: self._api_post("/playlist/create", payload)),
+                ("weapi", lambda: self._post_checked("/playlist/create", payload)),
+            ):
+                try:
+                    data = await call()
+                except Exception as exc:
+                    last = f"{label}: {exc}"
+                    continue
+                pid = data.get("id") or (data.get("playlist") or {}).get("id")
+                if pid:
+                    logger.debug(f"[netease] 建歌单成功（{label}）id={pid}")
+                    return int(pid), ""
+                last = f"{label}: code={data.get('code')} {data.get('message') or data}".strip()
+            return None, last
+
+        pid, last_error = await _try_once()
+        if pid is None and self._is_auth_error(last_error):
+            # 登录态失效（301）：自动续期/重登后整体重试一次
+            if await self.ensure_logged_in(force=True):
+                logger.info("[netease] 已自动重新登录，重试建歌单")
+                pid, last_error = await _try_once()
+        if pid is None:
+            raise NeteaseError(-1, f"创建歌单失败 -> {last_error}")
+        await self._ensure_playlist_name(pid, name[:40])
+        return pid
 
     async def _ensure_playlist_name(self, playlist_id: int, name: str) -> None:
         """创建后核对歌单名：网易云偶发忽略 name（建成「用户xxx的歌单」），此时补一次改名。
@@ -459,7 +588,7 @@ class NeteaseAPI:
         for i, (label, call) in enumerate(attempts):
             if i:
                 # 紧挨着连发容易触发 406「操作频繁」，错开一秒
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(CHANNEL_GAP_SECONDS)
             try:
                 data = await call()
             except Exception as exc:
@@ -656,48 +785,63 @@ class NeteaseAPI:
                 "/playlist/desc/update", {"id": pid, "desc": desc})),
         ]
 
-        errors: list[str] = []
-        for i, (label, call) in enumerate(attempts):
-            if i:
-                # 各通道紧挨着连发容易触发 406「操作频繁」频控，错开一秒
-                await asyncio.sleep(1.0)
-            try:
-                data = await call()
-            except Exception as exc:
-                errors.append(f"{label}:{exc}")
-                continue
-            sub = data.get("/api/playlist/desc/update")
-            code = (sub or {}).get("code") if isinstance(sub, dict) else data.get("code")
-            if code != 200:
-                message = ""
-                if isinstance(sub, dict):
-                    message = str(sub.get("message") or sub.get("msg") or "")
-                message = message or str(data.get("message") or data.get("msg") or "")
-                errors.append(f"{label}:code={code} {message}".strip())
-                continue
-            # 写后读回校验：必须和刚写的内容对得上，避免"返回 200 其实没写进去"
-            try:
-                current = (await self.playlist_description(playlist_id)).strip()
-            except Exception:
-                current = ""
-            if current and (current == desc.strip() or current[:40] == desc.strip()[:40]):
-                logger.info(f"[netease] 简介写入成功（{label}）playlist={playlist_id}")
-                return True, label
-            errors.append(f"{label}:接口返回 200 但读回不一致")
+        async def _attempt_all() -> tuple[bool, str, list[str]]:
+            """跑一遍所有通道；返回 (是否成功, 命中的通道, 失败原因列表)。"""
+            errs: list[str] = []
+            for i, (label, call) in enumerate(attempts):
+                if i:
+                    # 各通道紧挨着连发容易触发 406「操作频繁」频控，错开一秒
+                    await asyncio.sleep(CHANNEL_GAP_SECONDS)
+                try:
+                    data = await call()
+                except Exception as exc:
+                    errs.append(f"{label}:{exc}")
+                    continue
+                sub = data.get("/api/playlist/desc/update")
+                code = (sub or {}).get("code") if isinstance(sub, dict) else data.get("code")
+                if code != 200:
+                    message = ""
+                    if isinstance(sub, dict):
+                        message = str(sub.get("message") or sub.get("msg") or "")
+                    message = message or str(data.get("message") or data.get("msg") or "")
+                    errs.append(f"{label}:code={code} {message}".strip())
+                    continue
+                # 写后读回校验：必须和刚写的内容对得上，避免"返回 200 其实没写进去"
+                try:
+                    current = (await self.playlist_description(playlist_id)).strip()
+                except Exception:
+                    current = ""
+                if current and (current == desc.strip() or current[:40] == desc.strip()[:40]):
+                    logger.info(f"[netease] 简介写入成功（{label}）playlist={playlist_id}")
+                    return True, label, errs
+                errs.append(f"{label}:接口返回 200 但读回不一致")
+            return False, "", errs
 
-        # linuxapi 返回 301 = 需要登录，多半是 MUSIC_U 过期/被风控。
-        # 此时不再罗列一堆频控错误，直接给用户明确下一步。
-        if any("code=301" in e for e in errors):
-            try:
-                valid = await self.session_valid()
-            except Exception:
-                valid = False
-            if not valid:
-                return (
-                    False,
-                    "网易云登录态已失效（MUSIC_U 过期或被风控），"
-                    "请私聊机器人重新执行 /music cookie <MUSIC_U>",
-                )
+        ok, note, errors = await _attempt_all()
+        if ok:
+            return True, note
+
+        # 登录态失效（301 / 需要登录）：自动续期或账密重登后，整轮重试一次。
+        # 网易云 cookie 会过期/被风控，人工重新粘贴 cookie 很麻烦，这里自动兜。
+        if any(self._is_auth_error(e) for e in errors):
+            if await self.ensure_logged_in(force=True):
+                logger.info("[netease] 已自动重新登录，重试写简介")
+                ok2, note2, errors2 = await _attempt_all()
+                if ok2:
+                    return True, f"{note2}（自动重登后）"
+                errors = errors2
+            else:
+                try:
+                    valid = await self.session_valid()
+                except Exception:
+                    valid = False
+                if not valid:
+                    return (
+                        False,
+                        "网易云登录态已失效（MUSIC_U 过期或被风控），"
+                        "自动重登未成功（可在配置页填 netease.phone/password 开启账密重登），"
+                        "也可私聊机器人执行 /music cookie <MUSIC_U>",
+                    )
 
         # 顺带把名字补一次（改名通道和简介不同，不影响成败判定）
         if name:

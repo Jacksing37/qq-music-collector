@@ -60,7 +60,11 @@ class CollectResult:
 class CollectorService:
     def __init__(self) -> None:
         self.store = Store(DB_PATH)
-        self.netease = NeteaseAPI(NETEASE_SESSION_PATH)
+        # relogin_cfg 传回调而不是值：每次用到时现取配置，配置页改了立刻生效
+        self.netease = NeteaseAPI(
+            NETEASE_SESSION_PATH,
+            relogin_cfg=lambda: config_manager.config.netease,
+        )
         self.providers = ProviderRegistry(self.netease)
         self.archiver = Archiver(self.netease, self.store)
         # 后台任务集合：分享即归档等异步副作用放这里跑，避免阻塞消息回复

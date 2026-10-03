@@ -49,6 +49,7 @@ SECTION_TITLES = {
     "clear": "歌曲记录清理",
     "intro": "自我介绍",
     "reply": "收录回复模板",
+    "netease": "网易云登录",
 }
 
 # dotted_key -> (label, hint, multiline?)
@@ -162,6 +163,40 @@ for _k, _v in list(FIELD_META.items()):
         FIELD_META["master." + _k[len("playlist."):]] = (_label, _hint, _multi)
 
 
+# -------------------------------------------------------------------- 网易云登录字段元信息
+
+FIELD_META["netease.auto_relogin"] = (
+    "掉登录自动重登",
+    "写歌单简介/建歌单返回「需要登录」时，自动续期 cookie 或用手机号密码重新登录后重试（无需人工粘贴 cookie）",
+    False,
+)
+FIELD_META["netease.phone"] = (
+    "登录手机号",
+    "留空则只做 cookie 续期，不做账密重登",
+    False,
+)
+FIELD_META["netease.password"] = (
+    "登录密码",
+    "明文保存在 data/config.yaml；也可以只填下面的 password_md5。⚠️ 请确保配置文件只有自己可读（Linux: chmod 600 data/config.yaml）",
+    False,
+)
+FIELD_META["netease.password_md5"] = (
+    "密码 MD5",
+    "32 位十六进制小写；填了它就不用填上面的明文密码",
+    False,
+)
+FIELD_META["netease.countrycode"] = (
+    "手机号国家码",
+    "大陆填 86",
+    False,
+)
+FIELD_META["netease.relogin_cooldown"] = (
+    "重登冷却(秒)",
+    "两次自动重登尝试的最小间隔，避免风控期疯狂重试；<=0 表示不限制",
+    False,
+)
+
+
 # -------------------------------------------------------------------- schema
 
 def _is_basemodel(tp: object) -> bool:
@@ -220,6 +255,8 @@ def _field_desc(parent: str, fname: str, finfo, dotted_parent: str) -> dict:
         "label": label,
         "hint": hint,
         "multiline": multiline,
+        # 密码 / cookie 类字段在表单里用 password 输入框，避免旁窥
+        "secret": ("password" in fname) or ("cookie" in fname),
     }
 
 
@@ -532,6 +569,16 @@ async def _api_account(request: Request):
     if action == "logout":
         service.netease.clear_session()
         return JSONResponse({"ok": True, **await netease_account_status()})
+    if action == "relogin":
+        # 手动触发：续期 → 账密重登；忽略冷却，方便排查时连点
+        ok = await service.netease.ensure_logged_in(force=True, ignore_cooldown=True)
+        note = (
+            "已重新登录成功"
+            if ok
+            else "重新登录未成功：请检查 netease.phone / password（或 password_md5），"
+                 "或直接粘贴新的 MUSIC_U"
+        )
+        return JSONResponse({"ok": bool(ok), "message": note, **await netease_account_status()})
     return JSONResponse({"ok": False, "message": f"未知操作: {action}"}, status_code=400)
 
 

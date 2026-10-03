@@ -289,6 +289,10 @@ button:disabled{opacity:.5;cursor:not-allowed}
       <div class="card">
         <h2><span class="dot"></span>网易云账号登录</h2>
         <div id="accStatus" class="muted">加载中…</div>
+        <div class="row end" style="margin-top:12px">
+          <button id="accRelogin" title="用配置里的手机号+密码（或 cookie 续期）重新登录一次">重新登录</button>
+        </div>
+        <p class="muted" style="margin-top:8px">开启「掉登录自动重登」后，写歌单简介遇到「需要登录」会自动续期 / 重登并重试；这里是手动触发一次。手机号密码在配置页的「网易云登录」里填。</p>
         <div id="accLogin" class="hidden" style="margin-top:14px">
           <p class="muted">粘贴浏览器 Cookie 里的 <code>MUSIC_U=xxxx</code>（只要 xx 部分也行）。建议私聊机器人用 <code>/music cookie</code> 设置。</p>
           <input id="accCookie" placeholder="MUSIC_U=xxxx 或仅 xxxx">
@@ -853,7 +857,7 @@ function fieldControl(f, value){
     inp.oninput=()=>markDirty(f.key,inp.value); wrap.appendChild(inp);
   } else {
     if(f.multiline){ const ta=document.createElement("textarea"); ta.value=value??""; ta.oninput=()=>markDirty(f.key,ta.value); wrap.appendChild(ta); }
-    else { const inp=document.createElement("input"); inp.type="text"; inp.value=value??""; inp.oninput=()=>markDirty(f.key,inp.value); wrap.appendChild(inp); }
+    else { const inp=document.createElement("input"); inp.type=f.secret?"password":"text"; inp.value=value??""; inp.oninput=()=>markDirty(f.key,inp.value); wrap.appendChild(inp); }
   }
   return wrap;
 }
@@ -973,6 +977,15 @@ $("#accLoginBtn").onclick=async()=>{
 $("#accLogout").onclick=async()=>{
   try{ const j=await (await api("/api/music-admin/account",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"logout"})})).json();
     if(j.ok){ renderAccount(j); loadStatus(); } } catch(e){}
+};
+$("#accRelogin").onclick=async()=>{
+  const btn=$("#accRelogin"); const old=btn.textContent; btn.disabled=true; btn.textContent="重登中…";
+  try{
+    const j=await (await api("/api/music-admin/account",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"relogin"})})).json();
+    toast(j.message || (j.ok?"已重新登录":"重新登录失败"), j.ok?"ok":"bad");
+    renderAccount(j);
+  }catch(e){ toast("重新登录失败: "+e.message,"bad"); }
+  finally{ btn.disabled=false; btn.textContent=old; }
 };
 
 /* ---- 启动 ---- */
