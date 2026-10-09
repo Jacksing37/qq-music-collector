@@ -90,6 +90,15 @@ playlist:
   # 分享即归档：每收到一批新歌分享，立即把新歌追加进当前窗口的歌单
   #（自动复用已建歌单，不新建、不消耗期号）。默认关闭；开启后静默执行，结果只记日志
   auto_archive_on_share: false
+  # 同一窗口内**同一用户只收录第一首**：该用户本期首次分享即占位，之后再分享的歌
+  # 不入榜（也不进总库），只回一条提示（文案见 reply.sharer_limit_text）。
+  # 判定基准是「首次分享」而非「首次成功收录」——首发那首即使因重复 / 无法匹配没进榜，
+  # 名额同样算用掉，避免同一个人反复试探多占坑。
+  one_per_sharer: true
+  # 非网易云歌曲在**分享时**立即探测能否匹配到网易云；匹配不到就把提示附在收录消息里
+  #（文案见 reply.unmatched_text），让分享者当场知道不会进本期歌单，而不是等归档报告。
+  # 关闭后省掉这次预搜索（归档阶段仍会正常匹配）。
+  notify_unmatched: true
 
 # ---------------------------------------------------------------------------
 # 网易云登录态维护：掉登录后自动重新登录。
@@ -205,6 +214,8 @@ reply:
   #   {platform} 来源平台 {url} 链接           {duration} 时长
   #   {artists_line} 整行「歌手: xxx」，无歌手时整行消失
   #   {album_line}   整行「专辑: xxx」，无专辑时整行消失
+  #   {unmatched_line} 整行「网易云搜不到」提示，能匹配到网易云时整行消失
+  #                   （文案取自下面的 unmatched_text）
   #   {song}     歌曲详情块（歌名 + 歌手 / 专辑 / 来源 / 时长）
   #   {playlist} 当前群当前窗口的网易云歌单（名称 + 链接），
   #              本期还没归档时用下面的 playlist_empty_text 代替
@@ -213,8 +224,20 @@ reply:
     已收录 · 本期第 {index} 首
     {title}
     {artists_line}{album_line}来源: {platform}
+    {unmatched_line}
   # {playlist} 在本期尚未归档时的替代文案
   playlist_empty_text: （本期歌单还没生成）
+  # 歌曲在网易云搜不到时，附在**收录消息同一条**里的提示（不额外刷屏）。
+  # 只在 playlist.notify_unmatched 打开、且确实搜不到时出现。
+  # 占位符：{title} 歌名 {artists} 歌手 {platform} 来源平台
+  #         {nick} 分享者 {index} 本期序号 {count} 本期已收录数 {window} 窗口文案
+  unmatched_text: '⚠️ 这首在网易云没搜到，不会进本期歌单（可找管理员手动匹配）'
+  # 同一用户本期重复分享时的提示文案（见 playlist.one_per_sharer）。
+  # 占位符：{nick} 本次分享者（已套昵称映射）
+  #         {title} 其本期**首发**的歌名   {artists} 首发歌歌手
+  #         {platform} 首发歌来源平台      {index} 首发歌本期序号（首发没进榜时为 —）
+  #         {count} 本期已收录首数         {window} 窗口文案
+  sharer_limit_text: ' 本期你已经分享过《{title}》了，要更换的话请找管理员'
 
 # 被 @ 时的自我介绍（/music intro 可改；\n 在命令行里表示换行）
 intro:

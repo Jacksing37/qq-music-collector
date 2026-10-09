@@ -140,8 +140,10 @@ async def test_handle_segments_master_dup():
         return _song("777", "全新歌")
 
     svc.providers.resolve = _resolve2
+    # 换一个 user_id：同一用户本期再次分享会被 one_per_sharer 拦下，这里要验的是
+    # 「全新歌正常入总库」，必须用另一个人来发。
     r2 = await svc.handle_segments(
-        gid, [{"type": "text", "data": {"text": "https://music.163.com/song?id=777"}}], 123, "王五"
+        gid, [{"type": "text", "data": {"text": "https://music.163.com/song?id=777"}}], 456, "王五"
     )
     check("全新歌入总库不报重复", len(r2.master_duplicated) == 0, str(r2.master_duplicated))
     check("全新歌同时进入总库", await store.count(gid, MASTER_KEY) == 2, str(await store.count(gid, MASTER_KEY)))

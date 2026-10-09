@@ -17,7 +17,7 @@ from nonebot.rule import Rule
 require("nonebot_plugin_apscheduler")
 
 from .bot_utils import safe_send_group, send_music_card  # noqa: E402
-from .models import Song  # noqa: E402
+from .models import PLATFORM_NAMES, Song  # noqa: E402
 from .naming import build_context, render_template, resolve_alias  # noqa: E402
 from .scheduler import reload_jobs  # noqa: E402
 from .service import service  # noqa: E402
@@ -161,7 +161,7 @@ async def handle_at(bot: Bot, event: GroupMessageEvent) -> None:
     await safe_send_group(bot, event.group_id, message)
 
 
-def _format_accept(song: Song, index: int) -> str:
+def _format_accept(song: Song, index: int, unmatched_notice: str = "") -> str:
     """内置（默认）收录回复格式。自定义模板关闭时用它。"""
     lines = [f" 已收录 · 本期第 {index} 首", song.title]
     if song.artists:
@@ -169,6 +169,8 @@ def _format_accept(song: Song, index: int) -> str:
     if song.album:
         lines.append(f"专辑: {song.album}")
     lines.append(f"来源: {song.platform_name}")
+    if unmatched_notice:
+        lines.append(unmatched_notice)
     return "\n".join(lines)
 
 
@@ -248,12 +250,15 @@ async def build_master_dup_text(
     return render_template(cfg.notify_template, context)
 
 
-async def build_accept_text(song: Song, index: int, group_id: int) -> str:
-    """生成收录回复文案（自定义模板开启时走模板，否则用内置格式）。"""
-    cfg = service.config.reply
-    if not cfg.enabled:
-        return _format_accept(song, index)
+async def build_accept_text(
+    song: Song, index: int, group_id: int, unmatched: bool = False
+) -> str:
+    """生成收录回复文案（自定义模板开启时走模板，否则用内置格式）。
 
+    ``unmatched=True`` 表示这首歌已在网易云搜过、确认搜不到（不会进本期歌单），
+    此时按 ``reply.unmatched_text`` 渲染一条提示，**并入同一条消息**，不额外刷屏。
+    """
+    cfg = service.config.reply
     state = service.current_window()
     try:
         count = await service.store.count(group_id, state.key)
@@ -263,6 +268,17 @@ async def build_accept_text(song: Song, index: int, group_id: int) -> str:
         song.sharer_name or str(song.sharer_id), song.sharer_id,
         service.config.playlist.sharer_aliases,
     )
+    notice = ""
+    if unmatched:
+        notice = render_template(cfg.unmatched_text, {
+            "title": song.title,
+            "artists": song.artists,
+            "platform": song.platform_name,
+            "nick": nick,
+            "index": str(index),
+            "count": str(count),
+            "window": state.label,
+        }).strip()
     context = {
         "index": str(index),
         "nick": nick,
@@ -274,12 +290,68 @@ async def build_accept_text(song: Song, index: int, group_id: int) -> str:
         "duration": song.duration_text,
         "artists_line": f"歌手: {song.artists}\n" if song.artists else "",
         "album_line": f"专辑: {song.album}\n" if song.album else "",
+        # 无法匹配的提示整行；匹配成功时整行为空，模板里不留痕迹
+        "unmatched_line": f"{notice}\n" if notice else "",
         "song": _song_detail_block(song),
         "playlist": await _playlist_placeholder(group_id, state.key),
         "count": str(count),
         "window": state.label,
     }
-    return render_template(cfg.accept_text, context)
+    if not cfg.enabled:
+        return _format_accept(song, index, notice)
+    text = render_template(cfg.accept_text, context)
+    # 老配置的 accept_text 里没有 {unmatched_line}：把提示补在末尾，
+    # 保证「无法匹配」这条信息不会因为用户没改模板而消失。
+    if notice and "{unmatched_line}" not in (cfg.accept_text or ""):
+        text = f"{text.rstrip()}\n{notice}"
+    return text.rstrip()
+
+
+async def build_sharer_limit_text(song: Song, first: dict, group_id: int) -> str:
+    """同一用户本期重复分享时的提示文案（模板见 ``reply.sharer_limit_text``）。
+
+    占位符：
+      {nick}      本次分享者（已套昵称映射）
+      {title}     其本期**首发**的歌名   {artists} 首发歌歌手
+      {platform}  首发歌来源平台
+      {index}     首发歌在本期的序号（首发那首没进榜时为 —）
+      {count}     本期已收录首数         {window} 窗口文案
+    """
+    cfg = service.config.reply
+    aliases = service.config.playlist.sharer_aliases
+    state = service.current_window()
+    nick = resolve_alias(
+        song.sharer_name or str(song.sharer_id), song.sharer_id, aliases
+    )
+    try:
+        count = await service.store.count(group_id, state.key)
+    except Exception:
+        count = 0
+
+    # 首发占位记录的平台存的是原始 key（qq / kugou…），展示前转成中文名
+    raw_platform = str((first or {}).get("platform") or "")
+    index_text = "—"
+    try:
+        first_song = await service.store.first_song_of_sharer(
+            group_id, state.key, song.sharer_id
+        )
+        if first_song is not None and first_song.row_id is not None:
+            pos = await service.store.position_of(group_id, state.key, first_song.row_id)
+            if pos:
+                index_text = str(pos)
+    except Exception:  # 查库异常不该让提示发不出去
+        pass
+
+    context = {
+        "nick": nick,
+        "title": str((first or {}).get("title") or "（未知歌曲）"),
+        "artists": str((first or {}).get("artists") or ""),
+        "platform": PLATFORM_NAMES.get(raw_platform, raw_platform),
+        "index": index_text,
+        "count": str(count),
+        "window": state.label,
+    }
+    return render_template(cfg.sharer_limit_text, context)
 
 
 async def _reply_song(
@@ -320,14 +392,35 @@ async def handle_music_share(bot: Bot, event: GroupMessageEvent) -> None:
     cfg = service.config
 
     # 文字 @+提示始终发送；卡片是否回发由 reply_card 单独控制
+    # 无法匹配到网易云的歌：提示并入收录消息同一条，不额外刷屏
+    unmatched_ids = {id(song) for song in result.unmatched}
     for song in result.accepted:
         index = result.index_of.get(id(song), 0)
+        is_unmatched = id(song) in unmatched_ids
         try:
-            text = await build_accept_text(song, index, group_id)
+            text = await build_accept_text(
+                song, index, group_id, unmatched=is_unmatched
+            )
         except Exception as exc:
             logger.warning(f"[music] 收录回复渲染失败，回退内置格式: {exc}")
-            text = _format_accept(song, index)
+            text = _format_accept(
+                song, index,
+                cfg.reply.unmatched_text.strip() if is_unmatched else "",
+            )
         await _reply_song(bot, event, text, song, with_card=cfg.reply_card)
+
+    # 同一用户本期已经分享过：只收录第一首，其余回一条可自定义的提示
+    for song, first in result.sharer_limited:
+        try:
+            text = await build_sharer_limit_text(song, first, group_id)
+        except Exception as exc:
+            logger.warning(f"[music] 同用户限一首提示渲染失败，回退内置格式: {exc}")
+            text = (
+                f" 本期你已经分享过《{(first or {}).get('title') or '歌曲'}》了，"
+                "要更换的话请找管理员"
+            )
+        # 被拦下的歌不入榜，发卡片只会让人误以为收录了，所以只发文字
+        await _reply_song(bot, event, text, song, with_card=False)
 
     if cfg.notify_duplicate:
         for song in result.duplicated:

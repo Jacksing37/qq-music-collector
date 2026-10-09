@@ -103,7 +103,9 @@ async def test_same_window_dup_with_master():
               str(await store.count(gid, MASTER_KEY)))
 
         # 第二次分享同一首（同一窗口）：应判为同窗口重复 -> duplicated
-        r2 = await svc.handle_segments(gid, [{"type": "text", "data": {"text": "https://music.163.com/song?id=555"}}], 123, "李四")
+        # 注意用**另一个** user_id：同一用户重复分享会被 one_per_sharer 拦成
+        # 「本期已经分享过」提示（见下方 [D]），这里要验的是跨人重复检测。
+        r2 = await svc.handle_segments(gid, [{"type": "text", "data": {"text": "https://music.163.com/song?id=555"}}], 456, "李四")
         check("重复分享不再收录(accepted=0)", len(r2.accepted) == 0, str(r2.accepted))
         check("重复分享记 duplicated（notify_duplicate 据此发消息）",
               len(r2.duplicated) == 1, str(r2.duplicated))
@@ -157,7 +159,7 @@ async def test_same_window_dup_without_master():
     try:
         r1 = await svc.handle_segments(gid, [{"type": "text", "data": {"text": "https://music.163.com/song?id=555"}}], 123, "张三")
         check("首次分享被收录", len(r1.accepted) == 1, str(r1.accepted))
-        r2 = await svc.handle_segments(gid, [{"type": "text", "data": {"text": "https://music.163.com/song?id=555"}}], 123, "李四")
+        r2 = await svc.handle_segments(gid, [{"type": "text", "data": {"text": "https://music.163.com/song?id=555"}}], 456, "李四")
         check("重复分享记 duplicated", len(r2.duplicated) == 1, str(r2.duplicated))
         check("重复分享不重复收录", len(r2.accepted) == 0, str(r2.accepted))
     finally:

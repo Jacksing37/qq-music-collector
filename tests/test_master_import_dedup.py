@@ -189,8 +189,9 @@ async def test_master_dedup_intercepts_window():
     async def _resolve_777(link):
         return _song("777", "全新歌")
     svc.providers.resolve = _resolve_777
+    # 换一个 user_id：同一用户本期再次分享会被 one_per_sharer 拦下（见 test_dup_notify）
     r2 = await svc.handle_segments(
-        gid, [{"type": "text", "data": {"text": "https://music.163.com/song?id=777"}}], 123, "王五"
+        gid, [{"type": "text", "data": {"text": "https://music.163.com/song?id=777"}}], 456, "王五"
     )
     check("全新歌入窗口", len(r2.accepted) == 1, str(r2.accepted))
     check("全新歌不报重复", len(r2.master_duplicated) == 0, str(r2.master_duplicated))

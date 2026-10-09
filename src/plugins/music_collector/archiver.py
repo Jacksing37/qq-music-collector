@@ -35,7 +35,9 @@ except Exception:  # pragma: no cover
     logger = logging.getLogger("music_collector.archiver")
 
 # 搜索限速，避免触发风控
-_SEARCH_INTERVAL = 0.35
+SEARCH_INTERVAL = 0.35
+#: 兼容旧引用（模块内部历史上用私有名）
+_SEARCH_INTERVAL = SEARCH_INTERVAL
 
 _BRACKET_RE = re.compile(r"[（(\[【｛{].*?[)）\]】｝}]")
 _NOISE_RE = re.compile(r"[\s\-_·・,，.。'\"’“”!！?？/\\|~～]+")

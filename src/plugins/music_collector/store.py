@@ -94,6 +94,24 @@ CREATE TABLE IF NOT EXISTS import_history (
     created_at    REAL    NOT NULL,
     undone        INTEGER NOT NULL DEFAULT 0
 );
+
+-- 「同一窗口同一用户只收录第一首」的**占位**记录。
+-- 关键点：占位发生在「分享」这一刻，而不是「收录成功」那一刻——所以不能靠
+-- songs 表反推（首发那首可能因重复 / 无法匹配没进榜，甚至属于别人）。
+-- 每个 (group, window, sharer) 只会有一行，记下首发歌名，供提示文案使用。
+CREATE TABLE IF NOT EXISTS sharer_claims (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id     INTEGER NOT NULL,
+    window_key   TEXT    NOT NULL,
+    sharer_id    INTEGER NOT NULL,
+    sharer_name  TEXT    NOT NULL DEFAULT '',
+    title        TEXT    NOT NULL DEFAULT '',
+    artists      TEXT    NOT NULL DEFAULT '',
+    platform     TEXT    NOT NULL DEFAULT '',
+    created_at   REAL    NOT NULL,
+    UNIQUE(group_id, window_key, sharer_id)
+);
+CREATE INDEX IF NOT EXISTS idx_claims_window ON sharer_claims(group_id, window_key);
 """
 
 _COLUMNS = (
@@ -706,10 +724,14 @@ class Store:
         return len(row_ids)
 
     async def delete_window(self, group_id: int, window_key: str) -> int:
-        """清空某个群在某个窗口下的全部已收集歌曲。"""
+        """清空某个群在某个窗口下的全部已收集歌曲（含该窗口的分享占位记录）。"""
         async with aiosqlite.connect(self.db_path) as db:
             cur = await db.execute(
                 "DELETE FROM songs WHERE group_id=? AND window_key=?",
+                (group_id, window_key),
+            )
+            await db.execute(
+                "DELETE FROM sharer_claims WHERE group_id=? AND window_key=?",
                 (group_id, window_key),
             )
             await db.commit()
@@ -719,8 +741,78 @@ class Store:
         """删除早于 ``before_ts`` 的收集记录（按创建时间）。用于定时清理。"""
         async with aiosqlite.connect(self.db_path) as db:
             cur = await db.execute("DELETE FROM songs WHERE created_at < ?", (before_ts,))
+            await db.execute(
+                "DELETE FROM sharer_claims WHERE created_at < ?", (before_ts,)
+            )
             await db.commit()
         return cur.rowcount
+
+    # ------------------------------------------------------ 同一用户本期占位
+
+    async def get_sharer_claim(
+        self, group_id: int, window_key: str, sharer_id: int
+    ) -> Optional[dict]:
+        """取某用户在某窗口的首发占位记录；没有则 None。
+
+        返回的 dict 含 ``title`` / ``artists`` / ``platform`` / ``created_at``，
+        提示文案里的「你已经分享过《…》」就是用这里的首发歌名。
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM sharer_claims "
+                "WHERE group_id=? AND window_key=? AND sharer_id=?",
+                (group_id, window_key, sharer_id),
+            ) as cur:
+                row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def add_sharer_claim(
+        self,
+        group_id: int,
+        window_key: str,
+        sharer_id: int,
+        title: str,
+        artists: str = "",
+        platform: str = "",
+        sharer_name: str = "",
+    ) -> bool:
+        """登记首发占位。返回 True 表示本次真的占上了（此前没有记录）。
+
+        并发分享同一窗口时用 ``INSERT OR IGNORE`` 兜底：只有第一个写进去的
+        算占位成功，后来者会拿到 False 并被拦截。
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "INSERT OR IGNORE INTO sharer_claims "
+                "(group_id, window_key, sharer_id, sharer_name, title, artists, platform, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    group_id, window_key, sharer_id, sharer_name,
+                    title, artists, platform, time.time(),
+                ),
+            )
+            await db.commit()
+        return cur.rowcount > 0
+
+    async def first_song_of_sharer(
+        self, group_id: int, window_key: str, sharer_id: int
+    ) -> Optional[Song]:
+        """该用户在该窗口**已收录**的第一首歌（按 id 升序）。没有则 None。
+
+        仅用于给提示文案补 {index}（首发占位的那首歌可能在别人名下、也可能
+        压根没入榜，此时返回 None，序号显示为 —）。
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"SELECT {_COLUMNS} FROM songs "
+                "WHERE group_id=? AND window_key=? AND sharer_id=? "
+                "ORDER BY id ASC LIMIT 1",
+                (group_id, window_key, sharer_id),
+            ) as cur:
+                row = await cur.fetchone()
+        return _row_to_song(row) if row else None
 
     async def windows_with_counts(
         self, group_id: Optional[int] = None

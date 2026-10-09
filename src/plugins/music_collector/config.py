@@ -131,6 +131,16 @@ class PlaylistConfig(BaseModel):
     #: （自动复用已建歌单，不新建、不消耗期号）。默认关闭；开启后静默执行，
     #: 结果只在日志记录，不额外刷屏。
     auto_archive_on_share: bool = False
+    #: 同一窗口内**同一用户只收录第一首**：该用户本期首次分享即占位，之后再分享
+    #: 的歌不入榜（也不会进总库），只回一条提示（文案见 reply.sharer_limit_text）。
+    #: 判定基准是「首次分享」而不是「首次成功收录」——首发那首即使因重复 / 无法
+    #: 匹配没进榜，名额同样算已用掉，避免同一个人反复试探。
+    one_per_sharer: bool = True
+    #: 非网易云歌曲在**分享时**就立即探测能否匹配到网易云；匹配不到就在收录消息里
+    #: 附带一条提示（文案见 reply.unmatched_text），让分享者当场知道这首歌不会
+    #: 进本期歌单，而不是等到归档后的报告里才看到。
+    #: 关闭后不做这次预探测（省一次搜索请求），匹配仍会在归档阶段进行。
+    notify_unmatched: bool = True
 
 
 #: 自我介绍默认文案。占位符见 naming.py，另有 {nick} {count} {state} {playlist}
@@ -146,7 +156,8 @@ DEFAULT_INTRO = (
 DEFAULT_ACCEPT = (
     " 已收录 · 本期第 {index} 首\n"
     "{title}\n"
-    "{artists_line}{album_line}来源: {platform}"
+    "{artists_line}{album_line}来源: {platform}\n"
+    "{unmatched_line}"
 )
 
 
@@ -163,6 +174,8 @@ class ReplyConfig(BaseModel):
     #:   {url}          歌曲链接      {duration}  时长 mm:ss
     #:   {artists_line} 整行「歌手: xxx」，无歌手时整行消失
     #:   {album_line}   整行「专辑: xxx」，无专辑时整行消失
+    #:   {unmatched_line} 整行「无法匹配到网易云」提示，匹配成功时整行消失
+    #:                   （文案取自 reply.unmatched_text）
     #:   {song}         歌曲详情块（歌名 + 歌手 / 专辑 / 来源 / 时长）
     #:   {playlist}     当前群当前窗口的网易云歌单（名称 + 链接），
     #:                  本期还没归档时用 playlist_empty_text 代替
@@ -171,6 +184,17 @@ class ReplyConfig(BaseModel):
     accept_text: str = DEFAULT_ACCEPT
     #: {playlist} 在本期尚未归档时的替代文案
     playlist_empty_text: str = "（本期歌单还没生成）"
+    #: 歌曲无法匹配到网易云时，附在收录消息里的提示（并入同一条消息，不额外刷屏）。
+    #: 只在 playlist.notify_unmatched 打开、且该歌确实搜不到时才出现。
+    #: 占位符：{title} 歌名 {artists} 歌手 {platform} 来源平台
+    #:         {nick} 分享者 {index} 本期序号 {count} 本期已收录数 {window} 窗口文案
+    unmatched_text: str = "⚠️ 这首在网易云没搜到，不会进本期歌单（可找管理员手动匹配）"
+    #: 同一用户本期重复分享时的提示文案（见 playlist.one_per_sharer）。
+    #: 占位符：{nick} 本次分享者（已套昵称映射）
+    #:         {title} 其本期**首发**的歌名   {artists} 首发歌歌手
+    #:         {platform} 首发歌来源平台      {index} 首发歌本期序号（不在榜单里时为 —）
+    #:         {count} 本期已收录首数         {window} 窗口文案
+    sharer_limit_text: str = " 本期你已经分享过《{title}》了，要更换的话请找管理员"
 
 
 class IntroConfig(BaseModel):

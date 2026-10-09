@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Sequence
 
-from .archiver import Archiver, ArchiveReport, songs_from_snapshot
+from .archiver import SEARCH_INTERVAL, Archiver, ArchiveReport, songs_from_snapshot
 from .cache import CleanResult, clean_caches
 from .config import (
     CACHE_DIR,
@@ -49,12 +49,19 @@ class CollectResult:
         self.duplicated: list[Song] = []    # 同窗口重复分享
         self.master_duplicated: list[Song] = []  # 跨窗口重复（总库已存在）
         self.unidentified: list[Song] = []  # 没认出来的链接，不入榜
+        #: 收录了、但网易云搜不到（不会进歌单），需要在收录消息里附提示
+        self.unmatched: list[Song] = []
+        #: 同一用户本期重复分享被拦下的歌 -> (被拦的歌, 首发占位记录)
+        self.sharer_limited: list[tuple[Song, dict]] = []
         self.index_of: dict[int, int] = {}        # id(song) -> 本窗口榜单序号
         self.master_index_of: dict[int, int] = {}  # id(song) -> 总库序号
 
     @property
     def any_music(self) -> bool:
-        return bool(self.accepted or self.duplicated or self.unidentified)
+        return bool(
+            self.accepted or self.duplicated or self.unidentified
+            or self.sharer_limited or self.unmatched
+        )
 
 
 class CollectorService:
@@ -147,6 +154,12 @@ class CollectorService:
         if not links:
             return result
 
+        cfg = self.config
+        pl = cfg.playlist
+        #: 本批消息里已经占位的分享者 -> 首发占位记录。
+        #: 同一条消息里贴了多首时，也只有第一首能过（其余按已分享处理）。
+        claims_in_batch: dict[int, dict] = {}
+
         for link in links:
             song = await self.providers.resolve(link)
             song.sharer_id = sharer_id
@@ -156,6 +169,37 @@ class CollectorService:
             if not song.title or song.title == "未识别歌曲":
                 result.unidentified.append(song)
                 continue
+
+            # 同一窗口同一用户只收录第一首。
+            # 注意占位发生在「分享」而非「收录成功」这一刻：首发那首即使因重复 /
+            # 无法匹配没进榜，名额也算用掉了（否则同一人可以靠反复试探多占坑）。
+            if pl.one_per_sharer:
+                first = claims_in_batch.get(sharer_id)
+                if first is None:
+                    first = await self.store.get_sharer_claim(
+                        group_id, state.key, sharer_id
+                    )
+                if first is None:
+                    claimed = await self.store.add_sharer_claim(
+                        group_id, state.key, sharer_id,
+                        song.title, song.artists, song.platform, sharer_name,
+                    )
+                    if claimed:
+                        claims_in_batch[sharer_id] = {
+                            "title": song.title,
+                            "artists": song.artists,
+                            # 存原始平台 key，与库里 sharer_claims.platform 保持一致，
+                            # 展示层再用 PLATFORM_NAMES 转中文
+                            "platform": song.platform,
+                        }
+                    else:
+                        # 并发抢位失败（另一条消息同时占上了）
+                        first = await self.store.get_sharer_claim(
+                            group_id, state.key, sharer_id
+                        )
+                if first is not None:
+                    result.sharer_limited.append((song, first))
+                    continue
 
             # 总库：启用后先判定该歌是否已存在于群级总库（跨窗口去重）。
             # 若总库早已存在，则不再写入当前窗口，避免同一首歌在多个窗口重复收录，
@@ -184,6 +228,25 @@ class CollectorService:
             inserted, stored = await self.store.add_song(group_id, state.key, song)
             if inserted:
                 result.accepted.append(stored)
+                # 顺手预探测「能不能进网易云歌单」：非网易云来源的歌在归档阶段才做
+                # 跨平台搜索，失败时分享者当场是感知不到的（只看到「已收录」），
+                # 于是这里提前搜一次，搜不到就附一条提示（并入收录消息）。
+                if pl.notify_unmatched and not stored.netease_id:
+                    nid = (
+                        await self.archiver.match_netease_id(stored, pl)
+                        if pl.cross_platform_match
+                        else None
+                    )
+                    if nid:
+                        stored.netease_id = nid
+                        stored.matched = True
+                        if stored.row_id is not None:
+                            await self.store.mark_matched(stored.row_id, nid)
+                    else:
+                        result.unmatched.append(stored)
+                    if stored.platform != "netease":
+                        # 与归档阶段用同一限速，避免连贴多首时被网易云风控
+                        await asyncio.sleep(SEARCH_INTERVAL)
             else:
                 result.duplicated.append(stored)
             if master_dup_stored is not None:
@@ -203,10 +266,10 @@ class CollectorService:
         # 分享即归档：把本批新收录的歌增量同步到当前窗口歌单。
         # 改为后台执行——归档要对整窗口重新匹配+重排歌单，歌曲多时会很慢，
         # 不能阻塞消息回复（否则表现为"机器人无反应"）。失败只记日志。
-        if result.accepted and self.config.playlist.auto_archive_on_share:
+        if result.accepted and pl.auto_archive_on_share:
             self._spawn_bg(self.auto_archive_songs(group_id, state, result.accepted))
         # 总库分享即归档：仅把新歌增量追加到总库歌单顶部（后台执行，不阻塞回复）
-        if result.accepted and self.config.master.enabled and self.config.master.auto_archive:
+        if result.accepted and cfg.master.enabled and cfg.master.auto_archive:
             self._spawn_bg(self.auto_archive_master(group_id, result.accepted))
         return result
 
@@ -291,6 +354,8 @@ class CollectorService:
                 )
             else:
                 logger.warning(f"[music] 总库分享即归档失败 group={group_id}: {report.message}")
+            # 关键：这条路径也会「新建歌单」，必须同样消耗期号 / 一次性名
+            self._after_archive("master", cfg, report)
         except Exception as exc:
             logger.warning(f"[music] 总库分享即归档异常 group={group_id}: {type(exc).__name__} {exc}")
 
@@ -527,11 +592,7 @@ class CollectorService:
             group_id, MASTER_KEY, "总库", songs, cfg,
             start_at=None, end_at=None, name_override=name_override,
         )
-        if report.ok:
-            if report.created_new:
-                self._consume_naming("master", cfg, name_override)
-            elif report.renamed and cfg.pending_name and not name_override:
-                config_manager.update("master.pending_name", "")
+        self._after_archive("master", cfg, report, name_override)
         return report
 
     async def sync_master_playlist(self, group_id: int) -> dict:
@@ -549,8 +610,7 @@ class CollectorService:
             )
             if not report.ok:
                 return {"ok": False, "message": report.message or "建歌单失败"}
-            if report.created_new:
-                self._consume_naming("master", cfg)
+            self._after_archive("master", cfg, report)
             arch = await self.store.get_archive(group_id, MASTER_KEY)
             if not arch:
                 return {"ok": False, "message": "建歌单后未读到归档记录"}
@@ -662,6 +722,10 @@ class CollectorService:
                 )
             else:
                 logger.warning(f"[music] 分享即归档失败 group={group_id}: {report.message}")
+            # 关键：本期歌单通常是**这里**建出来的（auto_archive_on_share 打开时），
+            # 不在这里消耗期号的话，定时归档再跑时 created_new 已是 False，
+            # 期号就永远不自增（线上真实踩过这个坑）。
+            self._after_archive("playlist", cfg, report)
         except Exception as exc:
             logger.warning(f"[music] 分享即归档异常 group={group_id}: {type(exc).__name__} {exc}")
 
@@ -687,6 +751,30 @@ class CollectorService:
         return text, images, songs
 
     # ------------------------------------------------------------ 归档
+
+    def _after_archive(
+        self,
+        scope: str,
+        cfg_seen: PlaylistConfig,
+        report: ArchiveReport,
+        name_override: str = "",
+    ) -> None:
+        """**所有**归档路径的统一收尾：新建歌单就消耗期号 / 一次性名。
+
+        存在的意义是防漏：期号只有在「新建歌单」那一次才会自增，而线上的
+        ``auto_archive_on_share`` 会让每期的歌单在**当周第一次分享**时就被建出来
+        （走 ``auto_archive_songs``），等到定时归档再跑时记录已存在、
+        ``created_new=False``。如果自动归档那条路径漏掉这一步，期号就永远不自增，
+        表现为「每周歌单名都是同一个数字，得手动改」。
+        所以把收尾集中到这里，新增归档路径时只要记得调用它即可。
+        """
+        if not report.ok:
+            return
+        if report.created_new:
+            self._consume_naming(scope, cfg_seen, name_override)
+        elif report.renamed and cfg_seen.pending_name and not name_override:
+            # 复用歌单按「一次性歌单名」改过名，该名同样要消耗，否则每次都再改一次
+            config_manager.update(f"{scope}.pending_name", "")
 
     def _consume_naming(
         self, scope: str, cfg_seen: PlaylistConfig, name_override: str = ""
@@ -742,18 +830,13 @@ class CollectorService:
             end_at=state.end_at or state.archive_at,
             name_override=name_override,
         )
-        if report.ok:
-            # 只有「新建歌单」才消耗一次性歌单名 / 自增期号；
-            # 复用已有歌单追加时不改动命名与期号。
-            if report.created_new:
-                self._consume_naming("playlist", cfg, name_override)
-            elif report.renamed and cfg.pending_name and not name_override:
-                # 复用歌单按「一次性歌单名」改过名，该名同样要消耗，否则每次归档都会再改一次
-                config_manager.update("playlist.pending_name", "")
+        # 只有「新建歌单」才消耗一次性歌单名 / 自增期号；复用已有歌单追加时不改动
+        # 命名与期号。统一走 _after_archive，避免某条归档路径漏掉自增。
+        self._after_archive("playlist", cfg, report, name_override)
+        if report.ok and self.config.clear.after_archive:
             # 归档（结束收集）后自动清空本期已收集歌曲
-            if self.config.clear.after_archive:
-                removed = await self.store.delete_window(group_id, state.key)
-                logger.info(f"[music] 归档后已自动清空本期 {removed} 首")
+            removed = await self.store.delete_window(group_id, state.key)
+            logger.info(f"[music] 归档后已自动清空本期 {removed} 首")
         return report
 
     # ------------------------------------------------------------ 简介补写
@@ -1178,8 +1261,7 @@ class CollectorService:
             )
             if not report.ok:
                 return {"ok": False, "message": report.message or "建歌单失败"}
-            if report.created_new:
-                self._consume_naming("playlist", cfg)
+            self._after_archive("playlist", cfg, report)
             arch = await self.store.get_archive(group_id, state.key)
             if not arch:
                 return {"ok": False, "message": "建歌单后未读到归档记录"}
