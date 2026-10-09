@@ -24,6 +24,7 @@ from .config import (
     config_manager,
 )
 from . import detector
+from . import logbuffer
 from .detector import detect_from_segments
 from .models import MusicLink, Song
 from .naming import build_context, render_template
@@ -90,6 +91,11 @@ class CollectorService:
 
     async def setup(self) -> None:
         config_manager.load()
+        # 日志捕获尽早装上：之后的启动日志才能被网页端「日志」页看到
+        try:
+            logbuffer.configure_from(self.config.logs)
+        except Exception as exc:  # noqa: BLE001 - 日志页坏掉不该拖垮启动
+            logger.warning(f"[music] 日志缓冲初始化失败（网页端日志页将不可用）: {exc}")
         detector.set_debug(self.config.debug_detect)
         await self.store.init()
         if self.config.cache.enabled and self.config.cache.clean_on_start:

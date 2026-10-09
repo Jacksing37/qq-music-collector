@@ -31,6 +31,7 @@ from pydantic import BaseModel
 from pydantic_core import PydanticUndefined
 
 from .config import AppConfig, config_manager
+from . import logbuffer
 from .models import PLATFORM_NAMES
 from .store import MASTER_KEY
 from .naming import resolve_alias
@@ -50,6 +51,7 @@ SECTION_TITLES = {
     "intro": "自我介绍",
     "reply": "收录回复模板",
     "netease": "网易云登录",
+    "logs": "运行日志",
 }
 
 # dotted_key -> (label, hint, multiline?)
@@ -165,6 +167,25 @@ for _k, _v in list(FIELD_META.items()):
         _label, _hint, _multi = _v
         _label = _label.replace("歌单", "总库歌单")
         FIELD_META["master." + _k[len("playlist."):]] = (_label, _hint, _multi)
+
+
+# -------------------------------------------------------------------- 运行日志字段元信息
+
+FIELD_META["logs.lines"] = (
+    "日志保留条数",
+    "内存里保留多少条日志（50 ~ 200000），满了丢最旧的。约 1000 条 ≈ 200KB 内存",
+    False,
+)
+FIELD_META["logs.level"] = (
+    "日志记录等级",
+    "记录的最低等级：TRACE/DEBUG/INFO/SUCCESS/WARNING/ERROR/CRITICAL。排查问题时临时降到 DEBUG，看完记得调回 INFO",
+    False,
+)
+FIELD_META["logs.file"] = (
+    "日志落盘路径",
+    "额外把日志写到该文件（相对路径基于项目根目录），按 5MB 轮转、保留 3 份，可跨重启留存；留空表示不落盘。内存缓冲不受影响",
+    False,
+)
 
 
 # -------------------------------------------------------------------- 网易云登录字段元信息
@@ -381,6 +402,11 @@ def apply_updates(values: dict[str, object]) -> tuple[bool, dict[str, str]]:
             reload_jobs()
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[music] WebUI 更新后重载定时失败: {exc}")
+    if any(k.startswith("logs.") for k in values):
+        try:
+            logbuffer.configure_from(config_manager.config.logs)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[music] 更新后重配日志缓冲失败: {exc}")
     return True, {}
 
 
@@ -877,6 +903,41 @@ async def _api_action(request: Request):
     return JSONResponse(res, status_code=200 if res.get("ok") else 400)
 
 
+async def _api_logs(request: Request):
+    """运行日志：GET 取（按等级 / 关键词过滤），POST 清空内存缓冲。
+
+    数据源是进程内的环形缓冲（见 ``logbuffer``），所以只含**本次启动后**的日志。
+    """
+    if not _token_ok(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    if request.method == "POST":
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        action = (body or {}).get("action") or "clear"
+        if action != "clear":
+            return JSONResponse({"ok": False, "message": f"未知操作: {action}"}, status_code=400)
+        removed = logbuffer.clear()
+        return JSONResponse(
+            {"ok": True, "message": f"已清空 {removed} 条日志", "removed": removed, **logbuffer.stats()}
+        )
+
+    qp = request.query_params
+    raw_limit = qp.get("limit")
+    try:
+        limit = int(raw_limit) if raw_limit else None
+    except (TypeError, ValueError):
+        limit = None
+    return JSONResponse({
+        "ok": True,
+        "logs": logbuffer.snapshot(level=qp.get("level"), query=qp.get("q"), limit=limit),
+        "stats": logbuffer.stats(),
+        "levels": list(logbuffer.LEVELS),
+    })
+
+
 def register_webui() -> None:
     """在 NoneBot 的 FastAPI 应用上挂载管理界面。于插件启动钩子里调用。"""
     global _TOKEN
@@ -908,6 +969,7 @@ def register_webui() -> None:
     app.add_api_route("/api/music-admin/action", _api_action, methods=["POST"])
     app.add_api_route("/api/music-admin/admin", _api_admin, methods=["GET", "POST"])
     app.add_api_route("/api/music-admin/account", _api_account, methods=["GET", "POST"])
+    app.add_api_route("/api/music-admin/logs", _api_logs, methods=["GET", "POST"])
     logger.info("[music] WebUI 已挂载: http://<本机IP>:8080/music-admin  (需 token 访问)")
 
 

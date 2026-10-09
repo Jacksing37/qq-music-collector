@@ -341,6 +341,23 @@ class CardConfig(BaseModel):
     cooldown_minutes: int = 10
 
 
+class LogsConfig(BaseModel):
+    """运行日志缓冲（网页端「日志」页的数据源）。
+
+    NoneBot 把日志打到 stdout，进程里没有可读的日志文件（服务器上由 systemd
+    收进 journald），所以这里在内存里留一个定长环形缓冲，供网页端查看。
+    缓冲只含**本次进程启动后**的日志；需要跨重启留存就把 ``file`` 配上。
+    """
+
+    #: 内存里保留的日志条数（50 ~ 200000）。满了丢最旧的
+    lines: int = 2000
+    #: 记录的最低等级：TRACE/DEBUG/INFO/SUCCESS/WARNING/ERROR/CRITICAL
+    level: str = "INFO"
+    #: 额外落盘的文件路径（相对路径基于项目根目录）；留空表示不落盘。
+    #: 按 5MB 轮转、保留最近 3 份
+    file: str = ""
+
+
 class CacheConfig(BaseModel):
     """缓存图片自动回收。"""
 
@@ -413,6 +430,7 @@ class AppConfig(BaseModel):
     intro: IntroConfig = Field(default_factory=IntroConfig)
     reply: ReplyConfig = Field(default_factory=ReplyConfig)
     master: MasterConfig = Field(default_factory=MasterConfig)
+    logs: LogsConfig = Field(default_factory=LogsConfig)
 
 
 class ConfigManager:

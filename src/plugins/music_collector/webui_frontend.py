@@ -151,6 +151,28 @@ pre.runs{margin:10px 0 0;font-size:12px;color:var(--muted);white-space:pre-wrap;
   border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 button:disabled{opacity:.5;cursor:not-allowed}
+
+/* 运行日志 */
+.log-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.log-toolbar select,.log-toolbar input{width:auto}
+.log-toolbar input#logSearch{flex:1;min-width:180px}
+.log-toolbar label.chk{font-size:13px;color:var(--muted);gap:6px}
+.log-toolbar label.chk input{width:16px;height:16px}
+.log-view{background:var(--input);border:1px solid var(--card-bd);border-radius:14px;padding:10px 12px;
+  height:min(62vh,620px);overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;line-height:1.6}
+.log-line{white-space:pre-wrap;word-break:break-word;padding:3px 0;border-bottom:1px dashed var(--card-bd)}
+.log-line:last-child{border-bottom:none}
+.log-line .lt{color:var(--muted);margin-right:8px}
+.log-line .ll{display:inline-block;min-width:64px;font-weight:600;margin-right:8px}
+.log-line .ln{color:var(--muted);margin-right:8px}
+.log-line .lex{display:block;margin:4px 0 2px;padding-left:10px;border-left:2px solid var(--bad);color:var(--bad);white-space:pre-wrap}
+.log-lv-TRACE .ll,.log-lv-DEBUG .ll{color:var(--muted)}
+.log-lv-INFO .ll{color:var(--accent)}
+.log-lv-SUCCESS .ll{color:var(--ok)}
+.log-lv-WARNING .ll{color:#eab308}
+[data-theme="light"] .log-lv-WARNING .ll{color:#a16207}
+.log-lv-ERROR .ll,.log-lv-CRITICAL .ll{color:var(--bad)}
+.log-line.log-lv-ERROR,.log-line.log-lv-CRITICAL{background:rgba(248,113,113,.06)}
 </style>
 </head>
 <body>
@@ -173,6 +195,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
     <button class="nav" data-page="aliases">✏ 昵称映射</button>
     <button class="nav" data-page="admin">🛡 管理员</button>
     <button class="nav" data-page="account">🔑 网易云账号</button>
+    <button class="nav" data-page="logs">📜 运行日志</button>
   </aside>
 
   <main class="content">
@@ -304,9 +327,27 @@ button:disabled{opacity:.5;cursor:not-allowed}
       </div>
     </section>
 
+    <!-- 运行日志 -->
+    <section id="page-logs" class="page hidden">
+      <div class="card">
+        <h2><span class="dot"></span>运行日志</h2>
+        <div class="log-toolbar">
+          <label class="muted">级别 <select id="logLevel" title="只看该等级及以上"></select></label>
+          <input id="logSearch" placeholder="搜索关键词（消息 / 模块名 / 异常堆栈）…">
+          <label class="chk"><input type="checkbox" id="logAuto" checked> 自动刷新（3 秒）</label>
+          <div class="spacer"></div>
+          <button id="logRefresh">↻ 刷新</button>
+          <button id="logCopy" title="把当前筛选结果复制到剪贴板">⧉ 复制</button>
+          <button id="logClear" class="btn-danger" title="清空服务器内存里的日志缓冲（落盘文件不受影响）">🗑 清空</button>
+        </div>
+        <div id="logMeta" class="muted" style="margin-bottom:8px"></div>
+        <div class="log-view" id="logView"><div class="empty">加载中…</div></div>
+        <p class="muted" style="margin-top:10px">这里只显示<strong>本次进程启动后</strong>的日志（内存环形缓冲，重启即清空）。条目数、最低等级、是否额外落盘文件，在「配置」页的<strong>运行日志</strong>分组里改，保存后立即生效。</p>
+      </div>
+    </section>
+
   </main>
 </div>
-
 <!-- 底部保存条（仅配置页显示） -->
 <div class="footbar hidden" id="footbar">
   <span class="count" id="dirtyCount"></span>
@@ -393,6 +434,7 @@ const LS_KEY = "mwc_token";
 let TOKEN = localStorage.getItem(LS_KEY) || "";
 let ORIG = {}, DIRTY = {};
 let CUR_WIN = null, OV = null, COLL = null, MASTER = null, ADD_CTX = null;
+let LOG_TIMER = null, LOG_SEARCH_T = null, LOGS_LAST = [];
 const MASTER_KEY = "__master__";
 function getColl(wk){ return wk===MASTER_KEY ? MASTER : COLL; }
 const $ = (s, r=document) => r.querySelector(s);
@@ -425,6 +467,7 @@ $("#tokenInput").addEventListener("keydown", e=>{ if(e.key==="Enter") $("#tokenO
 
 /* ---- 侧边栏切换 ---- */
 function switchPage(name){
+  stopLogTimer();   // 离开日志页就停掉轮询
   document.querySelectorAll(".nav").forEach(b=>b.classList.toggle("active", b.dataset.page===name));
   document.querySelectorAll(".page").forEach(s=>s.classList.add("hidden"));
   $("#page-"+name).classList.remove("hidden");
@@ -436,6 +479,7 @@ function switchPage(name){
   if(name==="aliases") loadAliases();
   if(name==="admin") loadAdmin();
   if(name==="account") loadAccount();
+  if(name==="logs"){ loadLogs(); startLogTimer(); }
 }
 document.querySelectorAll(".nav").forEach(b=> b.onclick=()=>switchPage(b.dataset.page));
 
@@ -986,6 +1030,99 @@ $("#accRelogin").onclick=async()=>{
     renderAccount(j);
   }catch(e){ toast("重新登录失败: "+e.message,"bad"); }
   finally{ btn.disabled=false; btn.textContent=old; }
+};
+
+/* ---- 运行日志 ---- */
+function stopLogTimer(){ if(LOG_TIMER){ clearInterval(LOG_TIMER); LOG_TIMER=null; } }
+function startLogTimer(){ stopLogTimer(); if($("#logAuto").checked) LOG_TIMER=setInterval(()=>loadLogs(true), 3000); }
+
+/* 复制到剪贴板：WebUI 常挂在 http://<内网IP>:8080 上，不是安全上下文，
+   navigator.clipboard 会直接不存在，所以必须有 execCommand 兜底。 */
+function copyText(text){
+  if(navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
+  return new Promise((resolve,reject)=>{
+    const ta=document.createElement("textarea");
+    ta.value=text; ta.setAttribute("readonly",""); ta.style.position="fixed"; ta.style.left="-9999px";
+    document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, ta.value.length);
+    try{ document.execCommand("copy") ? resolve() : reject(new Error("浏览器拒绝了复制")); }
+    catch(e){ reject(e); }
+    finally{ document.body.removeChild(ta); }
+  });
+}
+
+async function loadLogs(silent){
+  const lv=$("#logLevel").value||"";
+  const q=$("#logSearch").value.trim();
+  let url="/api/music-admin/logs?limit=2000";
+  if(lv) url+="&level="+encodeURIComponent(lv);
+  if(q) url+="&q="+encodeURIComponent(q);
+  try{
+    const j=await (await api(url)).json();
+    fillLogLevels(j.levels);
+    renderLogs(j.logs||[], j.stats||{});
+  }catch(e){
+    if(e.message==="unauthorized") return;
+    if(!silent) toast("日志加载失败："+e.message,"bad");
+  }
+}
+
+function fillLogLevels(levels){
+  const sel=$("#logLevel");
+  if(sel.dataset.filled==="1" || !levels || !levels.length) return;
+  sel.innerHTML='<option value="">全部</option>'+levels.map(l=>`<option value="${esc(l)}">${esc(l)} 及以上</option>`).join("");
+  sel.value="";     // 默认全部：缓冲里本来就只有 ≥ 配置等级的日志
+  sel.dataset.filled="1";
+}
+
+function renderLogs(items, st){
+  LOGS_LAST=items;
+  const view=$("#logView");
+  const atBottom = view.scrollTop + view.clientHeight >= view.scrollHeight - 28;
+  if(!items.length){
+    view.innerHTML='<div class="empty">（没有匹配的日志）</div>';
+  }else{
+    view.innerHTML=items.map(l=>{
+      const exc = l.exc ? `<span class="lex">${esc(l.exc)}</span>` : "";
+      return `<div class="log-line log-lv-${esc(l.level)}">`
+        + `<span class="lt">${esc((l.time||"").slice(11))}</span>`
+        + `<span class="ll">${esc(l.level)}</span>`
+        + `<span class="ln">${esc(l.name)}</span>`
+        + `<span class="lm">${esc(l.message)}</span>${exc}</div>`;
+    }).join("");
+  }
+  const bits=[];
+  if(st.installed===false) bits.push("⚠ 日志捕获未生效（请检查启动日志）");
+  bits.push(`本次启动共 ${st.total||0} 条`);
+  bits.push(`缓冲 ${st.size||0}/${st.capacity||0}`);
+  if(st.level) bits.push(`记录等级 ≥ ${st.level}`);
+  bits.push(st.file ? ("落盘 "+st.file) : "未落盘文件");
+  if(st.started_at) bits.push("自 "+new Date(st.started_at*1000).toLocaleString()+" 起");
+  $("#logMeta").textContent=bits.join(" · ");
+  if(atBottom) view.scrollTop=view.scrollHeight;   // 原来就在底部才自动跟随，避免打断翻看
+}
+
+$("#logRefresh").onclick=()=>loadLogs();
+$("#logLevel").onchange=()=>loadLogs(true);
+$("#logAuto").onchange=startLogTimer;
+$("#logSearch").addEventListener("input",()=>{
+  clearTimeout(LOG_SEARCH_T);
+  LOG_SEARCH_T=setTimeout(()=>loadLogs(true), 300);
+});
+$("#logCopy").onclick=async()=>{
+  if(!LOGS_LAST.length){ toast("没有可复制的内容"); return; }
+  const text=LOGS_LAST.map(l=>`${l.time} [${l.level}] ${l.name} | ${l.message}`+(l.exc?("\n"+l.exc):"")).join("\n");
+  try{ await copyText(text); toast(`已复制 ${LOGS_LAST.length} 条日志`,"ok"); }
+  catch(e){ toast("复制失败："+(e.message||e),"bad"); }
+};
+$("#logClear").onclick=async()=>{
+  const btn=$("#logClear"); btn.disabled=true;
+  try{
+    const j=await (await api("/api/music-admin/logs",{method:"POST",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"clear"})})).json();
+    toast(j.message||"已清空", j.ok?"ok":"bad");
+    loadLogs(true);
+  }catch(e){ toast("清空失败："+e.message,"bad"); }
+  finally{ btn.disabled=false; }
 };
 
 /* ---- 启动 ---- */

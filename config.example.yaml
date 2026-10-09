@@ -252,3 +252,16 @@ intro:
   skip_commands: true   # 消息带 /music 命令时不发自我介绍
   skip_music: true      # 消息带音乐分享时不发自我介绍（那是分享不是提问）
   always_reply: true    # 收集关闭 / 不在收集期时，是否仍然回应自我介绍
+
+# 运行日志（网页端「日志」页的数据源）
+# 说明：NoneBot 把日志打到 stdout，服务端由 systemd 收进 journald，进程里读不到；
+# 所以这里在内存里留一份定长环形缓冲给网页端看。只含**本次进程启动后**的日志。
+logs:
+  # 内存里保留的条数（50 ~ 200000），满了丢最旧的。约 1000 条 ≈ 200KB 内存
+  lines: 2000
+  # 记录的最低等级：TRACE / DEBUG / INFO / SUCCESS / WARNING / ERROR / CRITICAL
+  # 页面上的级别筛选是在**已记录**的范围内过滤，想看 DEBUG 得先把这里调低
+  level: INFO
+  # 额外落盘一份（相对路径基于项目根目录），按 5MB 轮转、保留最近 3 份，可跨重启留存
+  # 留空 = 不写文件（服务器上如果想长期留档，可以填 data/logs/bot.log）
+  file: ''
