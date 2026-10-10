@@ -60,7 +60,11 @@ input[type=checkbox]{width:18px;height:18px;accent-color:var(--accent)}
 .nav:hover{background:var(--input);transform:none}
 .nav.active{background:linear-gradient(135deg,rgba(110,168,254,.18),rgba(167,139,250,.18));
   border:1px solid var(--card-bd);color:var(--txt);font-weight:600}
-.content{flex:1;padding:22px 24px 120px;overflow:auto}
+/* ⚠️ 这里必须是 overflow:visible：一旦给 .content 设了非 visible 的 overflow，它就变成
+   「最近的滚动容器」，而真正滚动的是 body —— 于是 .content 里的 position:sticky 全部失效
+   （配置页的「配置对象」条与分组跳转栏会一滚就跑掉）。sidebar 之所以吸得住，就是因为它是
+   .layout 的直接子元素、不在 .content 里。表格的横向滚动交给 .gcard 自己做。 */
+.content{flex:1;padding:22px 24px 120px;overflow:visible}
 .page{max-width:1000px;margin:0 auto}
 .card{background:var(--card);border:1px solid var(--card-bd);border-radius:18px;padding:18px 20px;
   margin-bottom:16px;box-shadow:var(--shadow)}
@@ -85,7 +89,9 @@ pre.runs{margin:10px 0 0;font-size:12px;color:var(--muted);white-space:pre-wrap;
 .fctrl.dirty input,.fctrl.dirty select,.fctrl.dirty textarea{border-color:var(--accent2)}
 
 /* 收集管理表格 */
-.gcard{background:var(--input);border:1px solid var(--card-bd);border-radius:14px;padding:14px 16px;margin-bottom:14px}
+/* overflow-x 是为了让过宽的表格在卡片内部横滚（.content 已不能当滚动容器用） */
+.gcard{background:var(--input);border:1px solid var(--card-bd);border-radius:14px;padding:14px 16px;margin-bottom:14px;
+  overflow-x:auto;-webkit-overflow-scrolling:touch}
 .gtitle{font-size:15px;font-weight:600}.gtitle .cnt{font-size:12px;color:var(--muted);font-weight:400;margin-left:8px}
 /* 群卡片可折叠：标题行永远可见（手机上默认收起，点一下展开本群并收起其他群） */
 .gtitle{cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -188,7 +194,10 @@ button:disabled{opacity:.5;cursor:not-allowed}
 /* 配置页：吸顶栈（「配置对象」条 + 分组跳转栏），滚动时都跟着走 */
 .cfg-bar{position:sticky;top:var(--cfg-stick);z-index:22;display:flex;align-items:center;gap:10px;
   flex-wrap:wrap;padding:8px 12px;margin-bottom:8px;background:var(--bg2);
-  border:1px solid var(--card-bd);border-radius:14px;box-shadow:var(--shadow)}
+  border:1px solid var(--card-bd);border-radius:14px;
+  /* 第二层 0 0 0 8px 是页面底色的「包围环」，用来糊住它与跳转栏之间那 8px 缝隙，
+     免得滚动时下面的内容从缝里穿过去（var(--bg) 与页面底色一致，平时看不出来） */
+  box-shadow:var(--shadow),0 0 0 8px var(--bg)}
 .cfg-bar .cb-label{font-size:13px;color:var(--muted);white-space:nowrap}
 .cfg-bar select{width:auto;min-width:150px;padding:6px 10px}
 .cfg-bar .cb-hint{font-size:12px;color:var(--muted)}
@@ -250,8 +259,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
   .cfg-nav{padding:9px 10px;gap:6px}
   .cfg-nav-btn{padding:5px 10px;font-size:12px}
   .stat-grid{grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}
-  /* 表格：容器横向滚动，别把列挤成一团 */
-  .gcard{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  /* 表格：窄屏把列撑开，横向滚动交给 .gcard 的通用规则 */
   .gtbl{min-width:600px}
   .log-view{height:min(58vh,520px);font-size:12px}
   .log-toolbar{gap:8px}
@@ -1018,11 +1026,19 @@ $("#pvClose").onclick=closePreview; $("#pvMask").onclick=closePreview;
 document.addEventListener("keydown", e=>{ if(e.key==="Escape") closePreview(); });
 
 /* ---- 配置表单 ---- */
-/* 吸顶栈：量出「配置对象」条的真实高度写进 --cfg-bar-h，跳转栏才知道该贴在哪 */
+/* 吸顶栈：--cfg-stick 是「页面顶部已经被谁占掉多少」（宽屏=顶栏，窄屏=吸顶的横向导航条），
+   --cfg-bar-h 是「配置对象」条的高度 + 它与跳转栏之间的 8px 缝，跳转栏据此紧贴在它下面。
+   两个值都实测，避免写死高度在小屏/缩放时对不齐。 */
 function syncStickyOffsets(){
+  const root=document.documentElement.style;
+  const tb=document.querySelector(".topbar"), sb=document.querySelector(".sidebar");
+  const stick = isNarrow()
+    ? (sb ? sb.getBoundingClientRect().height : 0)      /* 窄屏：顶栏不吸顶，占位的是横向导航条 */
+    : (tb ? tb.getBoundingClientRect().height : 0);     /* 宽屏：顶栏吸顶 */
+  if(stick>0) root.setProperty("--cfg-stick", Math.round(stick)+"px");
   const bar=$("#cfgBar");
   const h = bar && !bar.classList.contains("hidden") ? bar.offsetHeight : 0;
-  document.documentElement.style.setProperty("--cfg-bar-h", (h+8)+"px");
+  root.setProperty("--cfg-bar-h", (h+8)+"px");
 }
 window.addEventListener("resize", ()=>{ syncStickyOffsets(); if($("#cfgGroupSel")) buildGroupSelOptions(); });
 
@@ -1192,8 +1208,12 @@ function buildAccountBlock(){
 let CFG_NAV=[];
 function syncCfgNav(){
   if(!CFG_NAV.length) return;
+  /* 判定线取「顶栏 + 跳转栏」下沿再往下一点，而不是写死 130px，小屏/缩放时才不会串位 */
+  const cs=getComputedStyle(document.documentElement);
+  const stack=(parseFloat(cs.getPropertyValue("--cfg-stick"))||0)+(parseFloat(cs.getPropertyValue("--cfg-bar-h"))||0);
+  const line=stack+78;
   let active=0;
-  CFG_NAV.forEach((it,i)=>{ if(it.card.getBoundingClientRect().top<=130) active=i; });
+  CFG_NAV.forEach((it,i)=>{ if(it.card.getBoundingClientRect().top<=line) active=i; });
   CFG_NAV.forEach((it,i)=>it.btn.classList.toggle("active", i===active));
 }
 window.addEventListener("scroll",()=>{ if(!$("#page-config").classList.contains("hidden")) syncCfgNav(); },{passive:true});
