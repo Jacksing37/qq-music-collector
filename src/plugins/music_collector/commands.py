@@ -87,6 +87,10 @@ HELP_TEXT = """音乐收集机器人 · 命令一览（每条命令不带参数�
 /music debug on|off    识别过程详细日志
 /music export          导出榜单文本（手动建歌单用）
 
+【小技巧】
+「⚠️ 在网易云没搜到」的歌：**引用机器人那条提示消息** + 贴正确的网易云歌曲链接，
+即可把这首歌绑定上去补进本期歌单（分享者本人或管理员都行）。
+
 【时间格式】weekly: MON 20:00 ｜ daily: 23:00 ｜ once: 2026-08-10 00:00
 【命名占位符】{seq}{slash}{yy}{m}{d}{week}{window}{count}{sharers}{group}
 例：/music name Wk.{seq}线上学习{slash}  →  Wk.86线上学习26/8/7"""

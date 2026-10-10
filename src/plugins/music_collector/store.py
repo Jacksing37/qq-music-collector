@@ -115,6 +115,19 @@ CREATE TABLE IF NOT EXISTS sharer_claims (
     UNIQUE(group_id, window_key, sharer_id)
 );
 CREATE INDEX IF NOT EXISTS idx_claims_window ON sharer_claims(group_id, window_key);
+
+-- 机器人发出的「收录 / 无法匹配」提示消息 -> 歌曲行 的映射。
+-- 群里**引用**这条消息并贴上网易云链接，就能精确回填这首歌的匹配
+-- （见 service.match_unmatched_by_row）。必须落库而不是放内存：重启 / 部署后
+-- 群里那条旧消息还在，引用它得仍然能定位到歌。随 prune_old 按时间清理。
+CREATE TABLE IF NOT EXISTS song_notices (
+    message_id  TEXT    PRIMARY KEY,
+    group_id    INTEGER NOT NULL,
+    window_key  TEXT    NOT NULL,
+    row_id      INTEGER NOT NULL,
+    created_at  REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_song_notices_group ON song_notices(group_id, message_id);
 """
 
 _COLUMNS = (
@@ -592,6 +605,16 @@ class Store:
             return None
         return songs[index - 1]
 
+    async def get_song_by_row(self, row_id: int) -> Optional[Song]:
+        """按主键 row_id 直接取一条歌曲（引用消息回填匹配时用，无序号歧义）。"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"SELECT {_COLUMNS} FROM songs WHERE id=?", (row_id,)
+            ) as cur:
+                row = await cur.fetchone()
+        return _row_to_song(row) if row else None
+
     # 允许通过 update_song_meta 修改的字段白名单
     _EDITABLE = (
         "title", "artists", "album", "sharer_name", "sharer_id",
@@ -797,8 +820,61 @@ class Store:
             await db.execute(
                 "DELETE FROM sharer_claims WHERE created_at < ?", (before_ts,)
             )
+            # 引用消息映射跟着一起清，否则表会随收集无限长大
+            await db.execute(
+                "DELETE FROM song_notices WHERE created_at < ?", (before_ts,)
+            )
             await db.commit()
         return cur.rowcount
+
+    # ------------------------------------------- 提示消息 -> 歌曲（引用回填匹配）
+
+    async def record_song_notice(
+        self,
+        message_id: str,
+        group_id: int,
+        window_key: str,
+        row_id: int,
+        created_at: Optional[float] = None,
+    ) -> None:
+        """记下「机器人发的这条提示消息对应库里哪首歌」，供群里引用时反查。
+
+        ``message_id`` 是 OneBot 发消息后返回的 id；同一首歌会有多条提示
+        （文字 + 卡片），各自一行，引用任意一条都能定位。
+        """
+        mid = str(message_id or "").strip()
+        if not mid or row_id is None:
+            return
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO song_notices"
+                "(message_id, group_id, window_key, row_id, created_at) VALUES(?,?,?,?,?)",
+                (mid, group_id, window_key, row_id,
+                 float(created_at if created_at is not None else time.time())),
+            )
+            await db.commit()
+
+    async def resolve_song_notice(
+        self, message_id: str, group_id: Optional[int] = None
+    ) -> Optional[dict]:
+        """由被引用消息 id 反查它对应的歌曲记录；查不到返回 None。
+
+        返回 ``{message_id, group_id, window_key, row_id, created_at}``。
+        带上 ``group_id`` 时只在同群内匹配，避免极端情况下消息 id 串群。
+        """
+        mid = str(message_id or "").strip()
+        if not mid:
+            return None
+        sql = "SELECT * FROM song_notices WHERE message_id=?"
+        params: list[object] = [mid]
+        if group_id is not None:
+            sql += " AND group_id=?"
+            params.append(group_id)
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, tuple(params)) as cur:
+                row = await cur.fetchone()
+        return dict(row) if row else None
 
     # ------------------------------------------------------ 同一用户本期占位
 

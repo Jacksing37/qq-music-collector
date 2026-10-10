@@ -10,8 +10,16 @@ import time
 
 from nonebot import get_driver, on_message, require
 from nonebot.adapters import Event
-from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageSegment
+from nonebot.adapters.onebot.v11 import (
+    GROUP_ADMIN,
+    GROUP_OWNER,
+    Bot,
+    GroupMessageEvent,
+    Message,
+    MessageSegment,
+)
 from nonebot.log import logger
+from nonebot.permission import SUPERUSER
 from nonebot.plugin import PluginMetadata
 from nonebot.rule import Rule
 
@@ -382,22 +390,178 @@ async def build_sharer_limit_text(song: Song, first: dict, group_id: int) -> str
 
 
 async def _reply_song(
-    bot: Bot, event: GroupMessageEvent, text: str, song: Song, with_card: bool = True
+    bot: Bot, event: GroupMessageEvent, text: str, song: Song,
+    with_card: bool = True, track: bool = False,
 ) -> None:
-    """@分享者 + 文字说明，随后单独补一条音乐卡片（失败自动降级为文字）。"""
+    """@分享者 + 文字说明，随后单独补一条音乐卡片（失败自动降级为文字）。
+
+    ``track=True`` 时把这条消息的 id 登记进 ``song_notices``：群里**引用**它 +
+    贴网易云链接，就能回填这首歌的匹配（见下面的 ``handle_match_reply``）。
+    """
     msg = Message(MessageSegment.at(event.user_id)) + MessageSegment.text(text)
     try:
-        await bot.send(event, msg)
+        resp = await bot.send(event, msg)
     except Exception as exc:
         logger.warning(f"[music] 回复失败: {exc}")
         return
     trace_out(message_preview(msg), f"群{event.group_id}")
+    if track:
+        await _remember_notice(resp, event.group_id, song)
     if not with_card:
         return
     # 卡片单独发一条：签名服务挂掉时内部会自动降到自定义卡片 / 文字兜底
     way = await send_music_card(bot, event, song, service.cfg(event.group_id).card)
     trace_out(f"卡片《{song.title}》[{way}]", f"群{event.group_id}")
     logger.debug(f"[music] 《{song.title}》卡片发送方式: {way}")
+
+
+def _message_id_of(resp: object) -> str:
+    """从 OneBot ``send`` 的返回里取消息 id（不同实现给 dict 或类 dict 对象）。"""
+    if isinstance(resp, dict):
+        mid = resp.get("message_id")
+    else:
+        mid = getattr(resp, "message_id", None)
+    return "" if mid is None else str(mid)
+
+
+async def _remember_notice(resp: object, group_id: int, song: Song) -> None:
+    """登记「刚发出的这条提示消息」对应库里的哪首歌，供群里引用时反查。
+
+    只在 ``song.row_id`` 有值（确实入库了）时记；任何异常都只记 debug 日志——
+    这是锦上添花的能力，绝不能因为它失败而影响正常回复。
+    """
+    mid = _message_id_of(resp)
+    if not mid or song is None or song.row_id is None:
+        return
+    try:
+        await service.store.record_song_notice(
+            mid, group_id, song.window_key, song.row_id
+        )
+    except Exception as exc:
+        logger.debug(f"[music] 登记提示消息映射失败: {exc}")
+
+
+# ------------------------------------------------ 引用「没法匹配」的提示来指定匹配
+#
+# 场景：机器人回「⚠️ 这首在网易云没搜到…」后，分享者（或管理员）在群里**引用那条
+# 消息**、贴上正确的网易云歌曲链接 —— 就把这首歌绑定到该链接。
+# OneBot V11 适配器收到引用时会把被引用消息取回来塞进 ``event.reply``（含
+# ``message_id``），我们靠 ``song_notices`` 表把它反查成库里的歌。
+# 本响应器 ``block=True`` 且优先级高于分享监听（99），所以这条链接不会被
+# ``_looks_like_music`` 当成一次新分享重复收录。
+
+#: 消息里出现这些片段就认为「带网易云链接」，再交给 service 精确解析
+_NETEASE_LINK_HINTS = ("music.163.com", "163cn.tv")
+
+
+async def _is_admin(bot: Bot, event: GroupMessageEvent) -> bool:
+    """超管 / 群管理员 / 群主。"""
+    if await SUPERUSER(bot, event):
+        return True
+    return await GROUP_ADMIN(bot, event) or await GROUP_OWNER(bot, event)
+
+
+def _reply_match_text(event: GroupMessageEvent) -> str:
+    """取消息的纯文本（网易云链接常混在文字里）。"""
+    return event.message.extract_plain_text()
+
+
+async def _looks_like_match_reply(bot: Bot, event: GroupMessageEvent) -> bool:
+    """规则：引用了机器人某条歌曲提示 + 消息里带网易云链接 + 功能开着。"""
+    reply = getattr(event, "reply", None)
+    if reply is None:
+        return False
+    if not service.cfg(event.group_id).playlist.reply_match:
+        return False
+    text = _reply_match_text(event)
+    if not any(h in text for h in _NETEASE_LINK_HINTS):
+        return False
+    notice = await service.store.resolve_song_notice(
+        getattr(reply, "message_id", ""), event.group_id
+    )
+    return notice is not None
+
+
+match_reply_listener = on_message(rule=Rule(_looks_like_match_reply), priority=4, block=True)
+
+
+@match_reply_listener.handle()
+async def handle_match_reply(bot: Bot, event: GroupMessageEvent) -> None:
+    group_id = event.group_id
+    reply = getattr(event, "reply", None)
+    notice = await service.store.resolve_song_notice(
+        getattr(reply, "message_id", ""), group_id
+    )
+    if notice is None:  # 规则与处理之间被清理掉的竞态，静默放过
+        return
+    try:
+        song = await service.store.get_song_by_row(int(notice["row_id"]))
+    except Exception:
+        song = None
+    if song is None or song.row_id is None:
+        return
+
+    cfg = service.cfg(group_id)
+    nick = event.sender.card or event.sender.nickname or str(event.user_id)
+    context = {
+        "nick": nick,
+        "title": song.title,
+        "artists": song.artists,
+        "matched_title": "",
+        "matched_artists": "",
+        "reason": "",
+        "window": service.current_window(group_id).label,
+    }
+
+    # 权限：管理员 或 这首歌的分享者；其余人回提示（本条消息被 block，不会当新分享收录）
+    allowed = (
+        await _is_admin(bot, event) or int(event.user_id) == int(song.sharer_id or 0)
+    )
+    if not allowed:
+        text = render_template(cfg.reply.match_deny_text, context)
+        await _reply_song(bot, event, text, song, with_card=False)
+        return
+
+    if song.netease_id:
+        context["reason"] = "这首歌已经匹配到网易云了，无需再指定"
+        text = render_template(cfg.reply.match_fail_text, context)
+        await _reply_song(bot, event, text, song, with_card=False)
+        return
+
+    result = await service.match_unmatched_by_row(song.row_id, _reply_match_text(event))
+    if not result.get("ok"):
+        context["reason"] = str(result.get("message") or "未知原因")
+        text = render_template(cfg.reply.match_fail_text, context)
+        await _reply_song(bot, event, text, song, with_card=False)
+        return
+
+    matched = result.get("song")
+    context["matched_title"] = getattr(matched, "title", "") or song.title
+    context["matched_artists"] = getattr(matched, "artists", "") or ""
+    text = render_template(cfg.reply.match_ok_text, context)
+    await _reply_song(bot, event, text, song, with_card=False)
+    logger.info(
+        f"[music] 群{group_id} {nick}({event.user_id}) 引用回填匹配："
+        f"《{song.title}》-> {getattr(matched, 'netease_id', '')}"
+    )
+    await _sync_after_match(group_id, matched)
+
+
+async def _sync_after_match(group_id: int, song: Song) -> None:
+    """匹配成功后把这首补进本期歌单（当前窗口仍在收集期、且开了「分享即归档」时）。
+
+    后台执行、失败只记日志，不阻塞回复。引用的是旧窗口的歌时不动歌单。
+    """
+    try:
+        cfg = service.cfg(group_id)
+        state = service.current_window(group_id)
+        if not (cfg.playlist.auto_archive_on_share and state.collecting):
+            return
+        if song is None or song.window_key != state.key:
+            return
+        service._spawn_bg(service.auto_archive_songs(group_id, state, [song]))
+    except Exception as exc:
+        logger.debug(f"[music] 回填匹配后同步歌单失败: {exc}")
 
 
 @music_listener.handle()
@@ -442,7 +606,7 @@ async def handle_music_share(bot: Bot, event: GroupMessageEvent) -> None:
                 song, index,
                 cfg.reply.unmatched_text.strip() if is_unmatched else "",
             )
-        await _reply_song(bot, event, text, song, with_card=cfg.reply_card)
+        await _reply_song(bot, event, text, song, with_card=cfg.reply_card, track=True)
 
     # 同一用户本期已经分享过：只收录第一首，其余回一条可自定义的提示
     for song, first in result.sharer_limited:

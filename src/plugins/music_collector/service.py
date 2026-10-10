@@ -1301,6 +1301,50 @@ class CollectorService:
             "song": {"title": title, "artists": artists, "netease_id": sid, "matched": True},
         }
 
+    async def match_unmatched_by_row(self, row_id: int, netease_link: str) -> dict:
+        """群里「引用机器人的提示消息 + 贴网易云链接」的手动匹配。
+
+        与网页端 ``match_song`` 同源（都走 ``_resolve_netease_link`` 拉详情），区别：
+        - 定位方式用 ``row_id``（由被引用消息反查得到），不经过会随排序漂移的序号；
+        - **只对尚未匹配的歌生效**：已经匹配过的直接拒绝，避免误覆盖（要改错的
+          用网页端「手动匹配」）。
+        返回里带 ``song``（含 window_key），调用方据此决定要不要后台同步歌单。
+        """
+        song = await self.store.get_song_by_row(row_id)
+        if song is None or song.row_id is None:
+            return {"ok": False, "message": "这首歌已经不在库里了（可能被删除或已清理）"}
+        if song.window_key == MASTER_KEY:
+            return {"ok": False, "message": "总库里的歌请到网页端手动匹配"}
+        if song.netease_id:
+            return {
+                "ok": False,
+                "message": f"《{song.title}》已经匹配到网易云了，无需再指定",
+                "song": song,
+            }
+        try:
+            sid, title, artists, album = await self._resolve_netease_link(
+                netease_link,
+                fallback_title=song.title,
+                fallback_artists=song.artists,
+                fallback_album=song.album,
+            )
+        except ValueError as exc:
+            return {"ok": False, "message": str(exc), "song": song}
+        await self.store.update_song_meta(
+            song.row_id,
+            netease_id=sid,
+            matched=1,
+            title=title,
+            artists=artists,
+            album=album,
+        )
+        song.netease_id = sid
+        song.matched = True
+        song.title = title
+        song.artists = artists
+        song.album = album
+        return {"ok": True, "message": "已绑定", "song": song}
+
     async def reorder_songs(
         self, group_id: int, window_key: str, ordered_indices: list[int]
     ) -> dict:

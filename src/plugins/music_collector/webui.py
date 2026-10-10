@@ -114,6 +114,7 @@ FIELD_META: dict[str, tuple[str, str, bool]] = {
     "playlist.sharer_aliases": ("分享者昵称映射", "每行 原昵称或QQ号码=显示名，如 菜老名=Jacksing 或 123456789=Jacksing；仅做展示层替换，入库仍保留原始昵称。建议在「昵称映射」独立页编辑", True),
     "playlist.one_per_sharer": ("每人本期只收一首", "同一窗口内同一用户只收录第一首；该用户首次分享即占位（即使那首因重复/无法匹配没进榜），之后再分享只回提示不入榜。占位所指的歌被管理员删掉后名额会自动还给该用户（下次分享时自检）。提示文案见「同一用户重复提示」", False),
     "playlist.notify_unmatched": ("提示无法匹配", "非网易云歌曲在分享时就探测能否匹配到网易云，匹配不到则把提示附在收录消息里（文案见「无法匹配提示」）。关闭可省掉这次预搜索", False),
+    "playlist.reply_match": ("引用回填匹配", "在群里**引用**机器人那条「没法匹配」的提示消息、并贴上正确的网易云歌曲链接，即把这首歌绑定到该链接（管理员或该歌分享者才可操作）；只对尚未匹配的歌生效，命中后立刻补进本期歌单。文案见「回填成功/失败/无权限提示」", False),
 
     "card.mode": ("卡片模式", "native=平台原生(依赖签名服务) / custom=自定义卡片 / off=只发文字+封面", False),
     "card.fallback_custom": ("失败后转自定义卡", "原生卡片失败是否自动再试自定义卡片", False),
@@ -153,6 +154,9 @@ FIELD_META: dict[str, tuple[str, str, bool]] = {
     "reply.playlist_empty_text": ("歌单未生成替代文案", "{playlist} 在本期还没归档时显示的替代文字", False),
     "reply.unmatched_text": ("无法匹配提示", "歌曲在网易云搜不到时，附在**收录消息同一条**里的提示（不额外刷屏）。占位符：{title}歌名 {artists}歌手 {platform}来源 {nick}分享者 {index}本期序号 {count}已收录数 {window}窗口文案；用 \\n 换行", True),
     "reply.sharer_limit_text": ("同一用户重复提示", "同一用户本期再次分享时的提示（见「每人本期只收一首」）。占位符：{nick}本次分享者 {title}其本期首发的歌名 {artists}首发歌歌手 {platform}首发歌来源 {index}首发歌本期序号 {count}已收录数 {window}窗口文案；用 \\n 换行", True),
+    "reply.match_ok_text": ("回填成功提示", "群里引用「没法匹配」的提示消息并贴网易云链接、绑定成功后的回执（见「引用回填匹配」）。占位符：{title}原歌名 {artists}原歌手 {matched_title}匹配到的歌名 {matched_artists}匹配到的歌手 {nick}操作者 {window}窗口文案；用 \\n 换行", True),
+    "reply.match_fail_text": ("回填失败提示", "回填匹配失败时的回执（链接解析不出 / 拉不到详情 / 该歌已匹配过）。占位符：{title}原歌名 {reason}失败原因；用 \\n 换行", True),
+    "reply.match_deny_text": ("回填无权限提示", "非管理员、也非该歌分享者却引用指定匹配时的提示。占位符：{title}原歌名 {nick}操作者；用 \\n 换行", True),
 
     "playlist.name_template": ("歌单名模板", "占位符：{seq}期号 {slash}如26/8/7 {y}{yy}年 {m}{mm}月 {d}{dd}日 {ymd}{date}日期 {week}周数 {weekday}星期 {start}起始日 {end}结束日 {window}窗口文案 {count}收录数 {total}分享数 {sharers}人数 {group}群号", True),
     "playlist.description_template": ("简介开头模板", "后续自动接「谁分享了什么歌」清单。占位符同歌单名，另可用 {songlist}歌曲清单 {sharerlist}按人聚合清单；{group}群号 {window}窗口 {count}数", True),

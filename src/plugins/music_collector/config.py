@@ -144,6 +144,11 @@ class PlaylistConfig(BaseModel):
     #: 进本期歌单，而不是等到归档后的报告里才看到。
     #: 关闭后不做这次预探测（省一次搜索请求），匹配仍会在归档阶段进行。
     notify_unmatched: bool = True
+    #: 引用回填匹配：在群里**引用**机器人那条「没法匹配」的提示消息、并贴上正确的
+    #: 网易云歌曲链接，即把这首歌绑定到该链接（管理员或该歌分享者才可操作）。
+    #: 只对**尚未匹配**的歌生效；已经匹配过的会回一句提示、不会被覆盖。
+    #: 命中后立刻把歌补进本期歌单（当前窗口仍在收集期时）。文案见 reply.match_*_text。
+    reply_match: bool = True
 
 
 #: 自我介绍默认文案。占位符见 naming.py，另有 {nick} {count} {state} {playlist}
@@ -198,6 +203,19 @@ class ReplyConfig(BaseModel):
     #:         {platform} 首发歌来源平台      {index} 首发歌本期序号（不在榜单里时为 —）
     #:         {count} 本期已收录首数         {window} 窗口文案
     sharer_limit_text: str = " 本期你已经分享过《{title}》了，要更换的话请找管理员"
+    #: 「引用提示消息 + 网易云链接」回填匹配**成功**后的回执（见 playlist.reply_match）。
+    #: 占位符：{title} 原歌名 {artists} 原歌手
+    #:         {matched_title} 匹配到的歌名 {matched_artists} 匹配到的歌手
+    #:         {nick} 操作者 {window} 窗口文案
+    match_ok_text: str = (
+        "✅ 已把《{title}》匹配为「{matched_title} - {matched_artists}」，稍后会补进本期歌单"
+    )
+    #: 回填匹配**失败**时的回执（链接解析不出 / 拉不到详情 / 歌已匹配过）。
+    #: 占位符：{title} 原歌名 {reason} 失败原因
+    match_fail_text: str = "❌ 没能匹配上《{title}》：{reason}"
+    #: 非管理员、也非该歌分享者却引用指定匹配时的提示。
+    #: 占位符：{title} 原歌名 {nick} 操作者
+    match_deny_text: str = "只有管理员或这首歌的分享者能指定匹配哦"
 
 
 class IntroConfig(BaseModel):

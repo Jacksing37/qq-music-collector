@@ -355,6 +355,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
           <button id="cClearSearch" title="清除筛选条件">✕ 清除</button>
         </div>
         <p class="muted">在下方各群卡片里可编辑、手动匹配、调整顺序、删除，并对单个群「同步到歌单」（增+删+简介）。</p>
+        <p class="muted">群里也能自助：<b>引用机器人那条「⚠️ 在网易云没搜到」的提示消息 + 贴正确的网易云链接</b>，分享者本人或管理员即可把这首歌绑定上去（配置见「引用回填匹配」）。</p>
       </div>
       <div id="collectGroups"><div class="empty">加载中…</div></div>
     </section>
