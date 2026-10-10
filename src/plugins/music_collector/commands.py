@@ -132,6 +132,15 @@ async def _is_admin(bot: Bot, event: MessageEvent) -> bool:
     return False
 
 
+def _write(group_id: Optional[int], key: str, value: object) -> str:
+    """按群写配置：在群里执行就落到该群的覆盖，私聊 / 进程级配置项落到全局。
+
+    群内命令是**最容易**改错层的地方 —— 一个群管理员想调自己群的窗口，结果把
+    所有群的都改了。统一走这里，落层规则只在 ``config.is_group_scopable`` 一处定义。
+    """
+    return service.set_config(key, value, group_id)
+
+
 def _validate_point(mode: str, value: str) -> None:
     """按当前模式校验时间点格式，非法会抛 WindowParseError。"""
     if mode == "weekly":
@@ -144,7 +153,7 @@ def _validate_point(mode: str, value: str) -> None:
 
 def _demo_context(group_id: Optional[int] = None) -> dict[str, str]:
     """用当前窗口造一份占位符样例，供模板预览。"""
-    state = service.current_window()
+    state = service.current_window(group_id)
     return build_context(
         group_id=group_id or 0,
         window_label=state.label,
@@ -152,7 +161,7 @@ def _demo_context(group_id: Optional[int] = None) -> dict[str, str]:
         end_at=state.archive_at,
         count=0,
         total=0,
-        seq=service.config.playlist.seq,
+        seq=service.cfg(group_id).playlist.seq,
         songs=[],
     )
 
@@ -162,8 +171,8 @@ async def _intro_context(nick: str, group_id: Optional[int]) -> dict[str, str]:
 
     与 __init__._build_intro 共用同一套占位符，保证命令预览与运行时一致。
     """
-    cfg = service.config
-    state = service.current_window()
+    cfg = service.cfg(group_id)
+    state = service.current_window(group_id)
     count = 0
     if group_id is not None:
         try:
@@ -204,45 +213,45 @@ async def handle_command(bot: Bot, event: MessageEvent, args: Message = CommandA
     elif action in ("count", "数量"):
         await _cmd_count(group_id)
     elif action in ("window", "时间", "窗口"):
-        await _cmd_window()
+        await _cmd_window(group_id)
     elif action in ("status", "状态"):
-        await _cmd_status()
+        await _cmd_status(group_id)
     elif action in ("preview", "预览"):
         await _cmd_preview(group_id)
     elif action in ("mode", "模式"):
-        await _cmd_mode(bot, event, rest)
+        await _cmd_mode(bot, event, rest, group_id)
     elif action in ("set", "设置"):
-        await _cmd_set(bot, event, rest)
+        await _cmd_set(bot, event, rest, group_id)
     elif action in ("name", "命名"):
         await _cmd_name(bot, event, rest, group_id)
     elif action in ("title", "本期", "本次"):
         await _cmd_title(bot, event, rest, group_id)
     elif action in ("seq", "期号"):
-        await _cmd_seq(bot, event, rest)
+        await _cmd_seq(bot, event, rest, group_id)
     elif action in ("desc", "简介"):
         await _cmd_desc(bot, event, rest, group_id)
     elif action in ("sharer", "清单"):
-        await _cmd_sharer(bot, event, rest)
+        await _cmd_sharer(bot, event, rest, group_id)
     elif action in ("archive", "归档"):
         await _cmd_archive(bot, event, group_id, rest)
     elif action in ("del", "删除", "清理"):
         await _cmd_delete(bot, event, group_id, rest)
     elif action in ("delauto", "自动清", "清空"):
-        await _cmd_delauto(bot, event, rest)
+        await _cmd_delauto(bot, event, rest, group_id)
     elif action in ("prune", "定时清", "定期清"):
         await _cmd_prune(bot, event, rest)
     elif action in ("on", "off", "开", "关"):
-        await _cmd_toggle(bot, event, action)
+        await _cmd_toggle(bot, event, action, group_id)
     elif action in ("collect", "收集"):
-        await _cmd_collect(bot, event, rest)
+        await _cmd_collect(bot, event, rest, group_id)
     elif action in ("replycard", "回卡", "卡片回复"):
-        await _cmd_replycard(bot, event, rest)
+        await _cmd_replycard(bot, event, rest, group_id)
     elif action in ("emoji", "表情"):
-        await _cmd_emoji(bot, event, rest)
+        await _cmd_emoji(bot, event, rest, group_id)
     elif action in ("artist", "歌手"):
-        await _cmd_artist(bot, event, rest)
+        await _cmd_artist(bot, event, rest, group_id)
     elif action in ("blank", "空行"):
-        await _cmd_blank(bot, event, rest)
+        await _cmd_blank(bot, event, rest, group_id)
     elif action in ("cookie", "cookies", "凭证"):
         await _cmd_cookie(bot, event, rest)
     elif action in ("export", "导出"):
@@ -254,11 +263,11 @@ async def handle_command(bot: Bot, event: MessageEvent, args: Message = CommandA
     elif action in ("debug", "调试"):
         await _cmd_debug(bot, event, rest)
     elif action in ("card", "卡片"):
-        await _cmd_card(bot, event, rest)
+        await _cmd_card(bot, event, rest, group_id)
     elif action in ("intro", "介绍", "自我介绍"):
         await _cmd_intro(bot, event, rest, group_id)
     elif action in ("reply", "回复", "收录回复"):
-        await _cmd_reply(bot, event, rest)
+        await _cmd_reply(bot, event, rest, group_id)
     elif action in ("descfix", "补写", "补简介"):
         await _cmd_descfix(bot, event, group_id)
     else:
@@ -280,20 +289,20 @@ async def _cmd_list(bot: Bot, group_id: Optional[int]) -> None:
 async def _cmd_count(group_id: Optional[int]) -> None:
     if group_id is None:
         await cmd.finish(Message("该命令请在群里使用"))
-    state = service.current_window()
+    state = service.current_window(group_id)
     total = await service.store.count(group_id, state.key)
     status = "收集中" if state.collecting else "不在收集期"
     await cmd.finish(Message(f"当前窗口 {state.label}（{status}）已收集 {total} 首"))
 
 
-async def _cmd_window() -> None:
-    text = service.resolver.summary_text() + "\n\n下次触发：\n" + next_runs()
+async def _cmd_window(group_id: Optional[int] = None) -> None:
+    text = service.resolver_for(group_id).summary_text() + "\n\n下次触发：\n" + next_runs()
     await cmd.finish(Message(text))
 
 
-async def _cmd_status() -> None:
-    cfg = service.config
-    state = service.current_window()
+async def _cmd_status(group_id: Optional[int] = None) -> None:
+    cfg = service.cfg(group_id)
+    state = service.current_window(group_id)
     profile = await service.netease.login_status()
     if profile and profile.get("userId"):
         account = f"已登录（{profile.get('nickname')}）"
@@ -327,7 +336,7 @@ async def _cmd_preview(group_id: Optional[int]) -> None:
     if group_id is None:
         await cmd.finish(Message("该命令请在群里使用"))
     name = await service.preview_playlist_name(group_id)
-    cfg = service.config.playlist
+    cfg = service.cfg(group_id).playlist
     extra = f"\n（本次一次性命名: {cfg.pending_name}）" if cfg.pending_name else ""
     await cmd.finish(Message(f"本期歌单名将是：\n{name}{extra}"))
 
@@ -335,17 +344,22 @@ async def _cmd_preview(group_id: Optional[int]) -> None:
 # ---------------------------------------------------------------- 配置类
 
 
-async def _cmd_mode(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
+async def _cmd_mode(
+    bot: Bot, event: MessageEvent, rest: list[str], group_id: Optional[int] = None
+) -> None:
     if not await _is_admin(bot, event):
         await cmd.finish(Message("只有管理员可以修改配置"))
     if not rest or rest[0] not in ("weekly", "daily", "once"):
         await cmd.finish(Message("用法: /music mode weekly|daily|once"))
-    config_manager.update("window.mode", rest[0])
+    _write(group_id, "window.mode", rest[0])
     ok, info = reload_jobs()
-    await cmd.finish(Message(f"模式已切换为 {rest[0]}\n" + (info if ok else info)))
+    scope = f"（仅本群 {group_id}）" if group_id is not None else ""
+    await cmd.finish(Message(f"模式已切换为 {rest[0]}{scope}\n" + (info if ok else info)))
 
 
-async def _cmd_set(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
+async def _cmd_set(
+    bot: Bot, event: MessageEvent, rest: list[str], group_id: Optional[int] = None
+) -> None:
     if not await _is_admin(bot, event):
         await cmd.finish(Message("只有管理员可以修改配置"))
 
@@ -366,20 +380,20 @@ async def _cmd_set(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
             await cmd.finish(Message(
                 "开始和结束都要有，用 - 连接，例: 周五 12:00-周五 20:00"
             ))
-        mode = service.config.window.mode
+        mode = service.cfg(group_id).window.mode
         try:
             _validate_point(mode, start_str)
             _validate_point(mode, end_str)
         except WindowParseError as exc:
             await cmd.finish(Message(str(exc)))
-        config_manager.update(f"window.{mode}.start", start_str)
-        config_manager.update(f"window.{mode}.summary", end_str)
-        config_manager.update(f"window.{mode}.end", end_str)
-        config_manager.update(f"window.{mode}.archive", end_str)
+        _write(group_id, f"window.{mode}.start", start_str)
+        _write(group_id, f"window.{mode}.summary", end_str)
+        _write(group_id, f"window.{mode}.end", end_str)
+        _write(group_id, f"window.{mode}.archive", end_str)
         ok, info = reload_jobs()
         await cmd.finish(Message(
             f"[{mode}] 开始={start_str}，结束(汇总/归档统一)={end_str}\n\n"
-            + service.resolver.summary_text() + "\n\n下次触发：\n" + info
+            + service.resolver_for(group_id).summary_text() + "\n\n下次触发：\n" + info
         ))
 
     if len(rest) < 2:
@@ -389,7 +403,7 @@ async def _cmd_set(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
 
     if field_raw in ("tz", "timezone", "时区"):
         try:
-            config_manager.update("window.timezone", value)
+            _write(group_id, "window.timezone", value)
         except Exception as exc:
             await cmd.finish(Message(f"时区设置失败: {exc}"))
         ok, info = reload_jobs()
@@ -399,23 +413,23 @@ async def _cmd_set(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
     if field is None:
         await cmd.finish(Message(f"未知配置项: {field_raw}\n可用: start / summary / archive / tz"))
 
-    mode = service.config.window.mode
+    mode = service.cfg(group_id).window.mode
     try:
         _validate_point(mode, value)
     except WindowParseError as exc:
         await cmd.finish(Message(str(exc)))
 
-    config_manager.update(f"window.{mode}.{field}", value)
+    _write(group_id, f"window.{mode}.{field}", value)
     # 用户要求：设结束收集时，汇总播报也对齐到结束时刻；
     # 归档时刻在 archive_same_as_end 打开时同样跟随结束时刻
     if field == "end":
-        config_manager.update(f"window.{mode}.summary", value)
-        if service.resolver.same_archive:
-            config_manager.update(f"window.{mode}.archive", value)
+        _write(group_id, f"window.{mode}.summary", value)
+        if service.resolver_for(group_id).same_archive:
+            _write(group_id, f"window.{mode}.archive", value)
     ok, info = reload_jobs()
     await cmd.finish(Message(
         f"[{mode}] {field} 已设为 {value}\n\n"
-        + service.resolver.summary_text() + "\n\n下次触发：\n" + info
+        + service.resolver_for(group_id).summary_text() + "\n\n下次触发：\n" + info
     ))
 
 
@@ -426,9 +440,10 @@ async def _cmd_name(
         await cmd.finish(Message("只有管理员可以修改配置"))
     if not rest:
         ctx = _demo_context(group_id)
+        tmpl = service.cfg(group_id).playlist.name_template
         await cmd.finish(Message(
-            f"当前模板: {service.config.playlist.name_template}\n"
-            f"预览: {render_template(service.config.playlist.name_template, ctx)}\n\n"
+            f"当前模板: {tmpl}\n"
+            f"预览: {render_template(tmpl, ctx)}\n\n"
             "用法: /music name Wk.{seq}线上学习{slash}\n"
             "占位符: {seq} {slash} {dot} {y} {yy} {m} {mm} {d} {dd} {ymd}\n"
             "        {week} {weekday} {start} {end} {window} {count} {sharers} {group}"
@@ -441,7 +456,7 @@ async def _cmd_name(
             f"这些占位符不认识: {'、'.join('{' + u + '}' for u in unknown)}\n"
             "发送 /music name 查看可用列表"
         ))
-    config_manager.update("playlist.name_template", template)
+    _write(group_id, "playlist.name_template", template)
     await cmd.finish(Message(
         f"歌单命名模板已更新\n预览: {render_template(template, ctx)}"
     ))
@@ -454,7 +469,7 @@ async def _cmd_title(
     if not await _is_admin(bot, event):
         await cmd.finish(Message("只有管理员可以修改配置"))
     if not rest:
-        current = service.config.playlist.pending_name
+        current = service.cfg(group_id).playlist.pending_name
         await cmd.finish(Message(
             (f"当前一次性歌单名: {current}\n清除请发 /music title clear"
              if current else "还没有设置一次性歌单名") +
@@ -462,36 +477,39 @@ async def _cmd_title(
         ))
     value = " ".join(rest).strip()
     if value.lower() in ("clear", "clean", "none", "清除", "取消"):
-        config_manager.update("playlist.pending_name", "")
+        _write(group_id, "playlist.pending_name", "")
         await cmd.finish(Message("已清除一次性歌单名，下次归档回到通用模板"))
     ctx = _demo_context(group_id)
-    config_manager.update("playlist.pending_name", value)
+    _write(group_id, "playlist.pending_name", value)
     await cmd.finish(Message(
         f"下一次归档将使用歌单名：\n{render_template(value, ctx)}\n"
         "（用完自动失效）"
     ))
 
 
-async def _cmd_seq(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
+async def _cmd_seq(
+    bot: Bot, event: MessageEvent, rest: list[str], group_id: Optional[int] = None
+) -> None:
     if not await _is_admin(bot, event):
         await cmd.finish(Message("只有管理员可以修改配置"))
-    cfg = service.config.playlist
+    cfg = service.cfg(group_id).playlist
     if not rest:
         await cmd.finish(Message(
             f"当前期号: {cfg.seq}（自动递增: {'开' if cfg.seq_auto_increment else '关'}）\n"
             "用法: /music seq 86        设置期号\n"
-            "      /music seq auto on|off  开关自动递增"
+            "      /music seq auto on|off  开关自动递增\n"
+            "（在群里执行只改本群期号，私聊执行改全局默认）"
         ))
     first = rest[0].lower()
     if first in ("auto", "自动"):
         if len(rest) < 2 or rest[1].lower() not in ("on", "off", "开", "关"):
             await cmd.finish(Message("用法: /music seq auto on|off"))
         enabled = rest[1].lower() in ("on", "开")
-        config_manager.update("playlist.seq_auto_increment", enabled)
+        _write(group_id, "playlist.seq_auto_increment", enabled)
         await cmd.finish(Message(f"期号自动递增已{'开启' if enabled else '关闭'}"))
     if not first.isdigit():
         await cmd.finish(Message("期号必须是数字，例如 /music seq 86"))
-    config_manager.update("playlist.seq", int(first))
+    _write(group_id, "playlist.seq", int(first))
     await cmd.finish(Message(f"期号已设为 {first}"))
 
 
@@ -500,7 +518,7 @@ async def _cmd_desc(
 ) -> None:
     if not await _is_admin(bot, event):
         await cmd.finish(Message("只有管理员可以修改配置"))
-    cfg = service.config.playlist
+    cfg = service.cfg(group_id).playlist
     if not rest:
         ctx = _demo_context(group_id)
         await cmd.finish(Message(
@@ -516,20 +534,22 @@ async def _cmd_desc(
         await cmd.finish(Message(
             f"这些占位符不认识: {'、'.join('{' + u + '}' for u in unknown)}"
         ))
-    config_manager.update("playlist.description_template", template)
+    _write(group_id, "playlist.description_template", template)
     await cmd.finish(Message(
         f"简介模板已更新\n预览: {render_template(template, ctx)}\n"
         "（后面会自动附上「谁分享了什么歌」的清单）"
     ))
 
 
-async def _cmd_sharer(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
+async def _cmd_sharer(
+    bot: Bot, event: MessageEvent, rest: list[str], group_id: Optional[int] = None
+) -> None:
     if not await _is_admin(bot, event):
         await cmd.finish(Message("只有管理员可以修改配置"))
     styles = {"list": "逐首列出（含分享者）", "by_person": "按人聚合",
               "by_name": "只列分享者名", "none": "不附清单"}
     if not rest or rest[0] not in styles:
-        current = service.config.playlist.sharer_style
+        current = service.cfg(group_id).playlist.sharer_style
         await cmd.finish(Message(
             f"当前样式: {current}（{styles.get(current, '')}）\n"
             "用法: /music sharer list|by_person|by_name|none\n"
@@ -539,20 +559,25 @@ async def _cmd_sharer(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
             "  none      简介只保留开头文案"
         ))
     style = rest[0]
-    config_manager.update("playlist.sharer_style", style)
-    config_manager.update("playlist.include_sharers", style != "none")
+    _write(group_id, "playlist.sharer_style", style)
+    _write(group_id, "playlist.include_sharers", style != "none")
     await cmd.finish(Message(f"简介清单样式已设为 {style}（{styles[style]}）"))
 
 
-async def _cmd_toggle(bot: Bot, event: MessageEvent, action: str) -> None:
+async def _cmd_toggle(
+    bot: Bot, event: MessageEvent, action: str, group_id: Optional[int] = None
+) -> None:
     if not await _is_admin(bot, event):
         await cmd.finish(Message("只有管理员可以修改配置"))
     enabled = action in ("on", "开")
-    config_manager.update("enabled", enabled)
-    await cmd.finish(Message("收集已开启" if enabled else "收集已关闭"))
+    _write(group_id, "enabled", enabled)
+    where = f"（仅本群 {group_id}）" if group_id is not None else ""
+    await cmd.finish(Message(("收集已开启" if enabled else "收集已关闭") + where))
 
 
-async def _cmd_collect(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
+async def _cmd_collect(
+    bot: Bot, event: MessageEvent, rest: list[str], group_id: Optional[int] = None
+) -> None:
     """手动覆盖收集状态，方便测试（不改动时间表）。
 
     auto=按窗口自动判断  on=强制正在收集  off=强制停止。
@@ -562,7 +587,7 @@ async def _cmd_collect(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
     if not rest or rest[0].lower() not in (
         "auto", "on", "off", "自动", "开", "关"
     ):
-        cur = service.config.collect_override
+        cur = service.cfg(group_id).collect_override
         await cmd.finish(Message(
             f"当前收集模式: {cur}\n"
             "用法: /music collect auto|on|off\n"
@@ -576,16 +601,19 @@ async def _cmd_collect(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
         else "on" if raw in ("on", "开")
         else "off"
     )
-    note = service.set_collect_override(value)
-    await cmd.finish(Message(f"收集模式已切换：{note}"))
+    note = service.set_collect_override(value, group_id)
+    where = f"（仅本群 {group_id}）" if group_id is not None else ""
+    await cmd.finish(Message(f"收集模式已切换{where}：{note}"))
 
 
-async def _cmd_replycard(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
+async def _cmd_replycard(
+    bot: Bot, event: MessageEvent, rest: list[str], group_id: Optional[int] = None
+) -> None:
     """识别到音乐后是否回发音乐卡片（@+文字提示始终发送，本项只控制卡片）。"""
     if not await _is_admin(bot, event):
         await cmd.finish(Message("只有管理员可以修改配置"))
     if not rest or rest[0].lower() not in ("on", "off", "开", "关"):
-        cur = service.config.reply_card
+        cur = service.cfg(group_id).reply_card
         await cmd.finish(Message(
             f"当前回发音乐卡片: {'开启' if cur else '关闭'}\n"
             "用法: /music replycard on|off\n"
@@ -593,20 +621,22 @@ async def _cmd_replycard(bot: Bot, event: MessageEvent, rest: list[str]) -> None
             "  off   只发 @+文字提示，不发卡片（签名服务不稳时可关）"
         ))
     enabled = rest[0].lower() in ("on", "开")
-    config_manager.update("reply_card", enabled)
+    _write(group_id, "reply_card", enabled)
     await cmd.finish(Message(
         f"音乐卡片回发已{'开启' if enabled else '关闭'}（@+文字提示不受影响）"
     ))
 
 
-async def _cmd_card(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
+async def _cmd_card(
+    bot: Bot, event: MessageEvent, rest: list[str], group_id: Optional[int] = None
+) -> None:
     """音乐卡片发送策略。
 
     原生卡片要协议端向签名服务换 ArkShare 结构，那个服务经常 500，
     表现为群里只回文字不回卡片、日志刷「音乐卡片签名失败」。
     切到 custom 就不再依赖签名服务。
     """
-    cfg = service.config.card
+    cfg = service.cfg(group_id).card
     sub = rest[0].lower() if rest else ""
 
     if sub in ("", "status", "状态"):
@@ -635,7 +665,7 @@ async def _cmd_card(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
             else "custom" if sub in ("custom", "自定义")
             else "off"
         )
-        config_manager.update("card.mode", value)
+        _write(group_id, "card.mode", value)
         card_breaker.reset()
         await cmd.finish(Message(
             f"音乐卡片模式已设为 {value}：{_CARD_MODE_CN[value]}\n熔断状态已重置"
@@ -645,14 +675,14 @@ async def _cmd_card(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
         if len(rest) < 2 or rest[1].lower() not in ("on", "off", "开", "关"):
             await cmd.finish(Message("用法: /music card text on|off"))
         enabled = rest[1].lower() in ("on", "开")
-        config_manager.update("card.fallback_text", enabled)
+        _write(group_id, "card.fallback_text", enabled)
         await cmd.finish(Message(f"卡片失败时{'会' if enabled else '不会'}补发文字"))
 
     if sub in ("cover", "封面"):
         if len(rest) < 2 or rest[1].lower() not in ("on", "off", "开", "关"):
             await cmd.finish(Message("用法: /music card cover on|off"))
         enabled = rest[1].lower() in ("on", "开")
-        config_manager.update("card.fallback_cover", enabled)
+        _write(group_id, "card.fallback_cover", enabled)
         await cmd.finish(Message(f"文字兜底{'会' if enabled else '不会'}附封面图"))
 
     if sub in ("retry", "熔断"):
@@ -661,11 +691,11 @@ async def _cmd_card(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
                 "用法: /music card retry <连续失败次数> [冷却分钟]\n"
                 "例: /music card retry 3 10   （失败 3 次停 10 分钟；0 = 不熔断）"
             ))
-        config_manager.update("card.failure_threshold", int(rest[1]))
+        _write(group_id, "card.failure_threshold", int(rest[1]))
         minutes = cfg.cooldown_minutes
         if len(rest) >= 3 and rest[2].isdigit():
             minutes = int(rest[2])
-            config_manager.update("card.cooldown_minutes", minutes)
+            _write(group_id, "card.cooldown_minutes", minutes)
         card_breaker.reset()
         await cmd.finish(Message(
             f"熔断已设为：连续失败 {rest[1]} 次后停 {minutes} 分钟"
@@ -679,11 +709,13 @@ async def _cmd_card(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
     await cmd.finish(Message(f"未知参数: {sub}\n发送 /music card 查看用法"))
 
 
-async def _cmd_emoji(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
+async def _cmd_emoji(
+    bot: Bot, event: MessageEvent, rest: list[str], group_id: Optional[int] = None
+) -> None:
     """昵称 / 歌名里的表情处理方式。"""
     if not await _is_admin(bot, event):
         await cmd.finish(Message("只有管理员可以修改配置"))
-    cfg = service.config.playlist
+    cfg = service.cfg(group_id).playlist
     if not rest or rest[0].lower() not in (
         "text", "strip", "keep", "文字", "删除", "原样"
     ):
@@ -700,30 +732,34 @@ async def _cmd_emoji(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
         else "strip" if raw in ("strip", "删除")
         else "keep"
     )
-    config_manager.update("playlist.emoji_style", value)
+    _write(group_id, "playlist.emoji_style", value)
     await cmd.finish(Message(f"昵称/歌名表情处理已设为 {value}"))
 
 
-async def _cmd_artist(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
+async def _cmd_artist(
+    bot: Bot, event: MessageEvent, rest: list[str], group_id: Optional[int] = None
+) -> None:
     """简介清单里是否带歌手名。"""
     if not await _is_admin(bot, event):
         await cmd.finish(Message("只有管理员可以修改配置"))
-    cfg = service.config.playlist
+    cfg = service.cfg(group_id).playlist
     if not rest or rest[0].lower() not in ("on", "off", "开", "关"):
         await cmd.finish(Message(
             f"当前简介是否带歌手: {'开' if cfg.desc_show_artist else '关'}\n"
             "用法: /music artist on|off"
         ))
     enabled = rest[0].lower() in ("on", "开")
-    config_manager.update("playlist.desc_show_artist", enabled)
+    _write(group_id, "playlist.desc_show_artist", enabled)
     await cmd.finish(Message(f"简介清单{'已带' if enabled else '已不带'}歌手名"))
 
 
-async def _cmd_blank(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
+async def _cmd_blank(
+    bot: Bot, event: MessageEvent, rest: list[str], group_id: Optional[int] = None
+) -> None:
     """简介清单条目之间插空行（by_person 样式下按人分段）。"""
     if not await _is_admin(bot, event):
         await cmd.finish(Message("只有管理员可以修改配置"))
-    cfg = service.config.playlist
+    cfg = service.cfg(group_id).playlist
     if not rest or rest[0].lower() not in ("on", "off", "开", "关"):
         await cmd.finish(Message(
             f"当前简介条目间空行: {'开' if cfg.desc_blank_line else '关'}\n"
@@ -731,7 +767,7 @@ async def _cmd_blank(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
             "（仅 by_person 样式下生效，按人分段更清晰）"
         ))
     enabled = rest[0].lower() in ("on", "开")
-    config_manager.update("playlist.desc_blank_line", enabled)
+    _write(group_id, "playlist.desc_blank_line", enabled)
     await cmd.finish(Message(f"简介条目间空行已{'开启' if enabled else '关闭'}"))
 
 
@@ -749,7 +785,7 @@ async def _cmd_archive(
     tip = f"（本次歌单名: {override}）" if override else ""
     await bot.send(event, Message(f"开始归档{tip}，正在匹配网易云曲库，请稍候…"))
     report = await service.run_archive(group_id, name_override=override)
-    for chunk in split_text(report.summary(service.config.playlist.sharer_aliases)):
+    for chunk in split_text(report.summary(service.cfg(group_id).playlist.sharer_aliases)):
         await bot.send(event, Message(chunk))
 
 
@@ -772,7 +808,7 @@ async def _cmd_delete(
         await cmd.finish(Message("该命令请在群里使用"))
 
     sub = rest[0].lower()
-    state = service.current_window()
+    state = service.current_window(group_id)
 
     if sub == "all":
         n = await service.clear_window(group_id, state.key)
@@ -800,18 +836,20 @@ async def _cmd_delete(
     await cmd.finish(Message(f"已删除 {n} 首"))
 
 
-async def _cmd_delauto(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
+async def _cmd_delauto(
+    bot: Bot, event: MessageEvent, rest: list[str], group_id: Optional[int] = None
+) -> None:
     """归档（结束收集）后是否自动清空本期。"""
     if not await _is_admin(bot, event):
         await cmd.finish(Message("只有管理员可以修改配置"))
     if not rest or rest[0].lower() not in ("on", "off", "开", "关"):
-        cur = service.config.clear.after_archive
+        cur = service.cfg(group_id).clear.after_archive
         await cmd.finish(Message(
             f"当前: 归档后自动清空本期 = {'开启' if cur else '关闭'}\n"
             "用法: /music delauto on|off"
         ))
     enabled = rest[0].lower() in ("on", "开")
-    config_manager.update("clear.after_archive", enabled)
+    _write(group_id, "clear.after_archive", enabled)
     await cmd.finish(Message(
         f"归档（结束收集）后自动清空本期已{'开启' if enabled else '关闭'}"
     ))
@@ -889,7 +927,7 @@ async def _cmd_cookie(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
 async def _cmd_export(bot: Bot, event: MessageEvent, group_id: Optional[int]) -> None:
     if group_id is None:
         await cmd.finish(Message("该命令请在群里使用"))
-    state = service.current_window()
+    state = service.current_window(group_id)
     songs = await service.store.list_songs(group_id, state.key)
     if not songs:
         await cmd.finish(Message("当前窗口没有歌曲"))
@@ -901,7 +939,10 @@ async def _cmd_export(bot: Bot, event: MessageEvent, group_id: Optional[int]) ->
     ]
     for idx, song in enumerate(songs, start=1):
         artist = song.artists or "未知歌手"
-        sharer = resolve_alias(song.sharer_name or "匿名", song.sharer_id, service.config.playlist.sharer_aliases)
+        sharer = resolve_alias(
+            song.sharer_name or "匿名", song.sharer_id,
+            service.cfg(group_id).playlist.sharer_aliases,
+        )
         lines.append(f"{idx}. {song.title} - {artist}（{sharer} 分享）")
     text = "\n".join(lines)
     for chunk in split_text(text):
@@ -956,7 +997,7 @@ async def _cmd_intro(
     bot: Bot, event: MessageEvent, rest: list[str], group_id: Optional[int]
 ) -> None:
     """被 @ 时的自我介绍：查看 / 开关 / 自定义文案 / 冷却等。"""
-    cfg = service.config.intro
+    cfg = service.cfg(group_id).intro
 
     # 无参数：展示当前配置 + 渲染预览（所有人可见）
     if not rest:
@@ -994,7 +1035,7 @@ async def _cmd_intro(
 
     if sub in ("on", "off", "开", "关"):
         enabled = sub in ("on", "开")
-        config_manager.update("intro.enabled", enabled)
+        _write(group_id, "intro.enabled", enabled)
         await cmd.finish(Message(f"被 @ 时的自我介绍已{'开启' if enabled else '关闭'}"))
     if sub == "text":
         if len(rest) < 2:
@@ -1010,7 +1051,7 @@ async def _cmd_intro(
                 f"这些占位符不认识: {'、'.join('{' + u + '}' for u in unknown)}\n"
                 "可用的有：{nick} {state} {playlist} 以及命名占位符 {window} {count} {seq} 等"
             ))
-        config_manager.update("intro.text", template)
+        _write(group_id, "intro.text", template)
         await cmd.finish(Message("自我介绍文案已更新\n预览：\n" + render_template(template, ctx)))
     if sub == "cooldown":
         if len(rest) < 2 or not rest[1].lstrip("-").isdigit():
@@ -1018,39 +1059,41 @@ async def _cmd_intro(
         cd = int(rest[1])
         if cd < 0:
             await cmd.finish(Message("冷却秒数不能为负"))
-        config_manager.update("intro.cooldown", cd)
+        _write(group_id, "intro.cooldown", cd)
         await cmd.finish(Message(f"自我介绍冷却已设为 {cd} 秒" + ("（不限频）" if cd == 0 else "")))
     if sub == "at":
         if len(rest) < 2 or rest[1].lower() not in ("on", "off", "开", "关"):
             await cmd.finish(Message("用法: /music intro at on|off"))
         v = rest[1].lower() in ("on", "开")
-        config_manager.update("intro.at_sender", v)
+        _write(group_id, "intro.at_sender", v)
         await cmd.finish(Message(f"@ 提问者已{'开启' if v else '关闭'}"))
     if sub == "always":
         if len(rest) < 2 or rest[1].lower() not in ("on", "off", "开", "关"):
             await cmd.finish(Message("用法: /music intro always on|off"))
         v = rest[1].lower() in ("on", "开")
-        config_manager.update("intro.always_reply", v)
+        _write(group_id, "intro.always_reply", v)
         await cmd.finish(Message(f"关收集时也回应已{'开启' if v else '关闭'}"))
     if sub in ("skipcmd", "skip_command", "skip-cmd"):
         if len(rest) < 2 or rest[1].lower() not in ("on", "off", "开", "关"):
             await cmd.finish(Message("用法: /music intro skipcmd on|off"))
         v = rest[1].lower() in ("on", "开")
-        config_manager.update("intro.skip_commands", v)
+        _write(group_id, "intro.skip_commands", v)
         await cmd.finish(Message(f"遇到 /music 命令时跳过自我介绍已{'开启' if v else '关闭'}"))
     if sub in ("skipmusic", "skip_music", "skip-music"):
         if len(rest) < 2 or rest[1].lower() not in ("on", "off", "开", "关"):
             await cmd.finish(Message("用法: /music intro skipmusic on|off"))
         v = rest[1].lower() in ("on", "开")
-        config_manager.update("intro.skip_music", v)
+        _write(group_id, "intro.skip_music", v)
         await cmd.finish(Message(f"遇到音乐分享时跳过自我介绍已{'开启' if v else '关闭'}"))
 
     await cmd.finish(Message("用法见 /music intro"))
 
 
-async def _cmd_reply(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
+async def _cmd_reply(
+    bot: Bot, event: MessageEvent, rest: list[str], group_id: Optional[int] = None
+) -> None:
     """收录回复文案：自定义模板与占位符。"""
-    cfg = service.config.reply
+    cfg = service.cfg(group_id).reply
     if not rest:
         await cmd.finish(Message(
             f"收录回复自定义: {'开启' if cfg.enabled else '关闭（用内置格式）'}\n"
@@ -1070,7 +1113,7 @@ async def _cmd_reply(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
         if not await _is_admin(bot, event):
             await cmd.finish(Message("只有管理员可以修改配置"))
         v = sub in ("on", "开")
-        config_manager.update("reply.enabled", v)
+        _write(group_id, "reply.enabled", v)
         await cmd.finish(Message(f"收录回复自定义模板已{'开启' if v else '关闭'}"))
 
     if sub in ("text", "文案", "模板"):
@@ -1079,7 +1122,7 @@ async def _cmd_reply(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
         if len(rest) < 2:
             await cmd.finish(Message("用法: /music reply text 已收录第{index}首《{title}》"))
         text = " ".join(rest[1:]).replace("\\n", "\n")
-        config_manager.update("reply.accept_text", text)
+        _write(group_id, "reply.accept_text", text)
         await cmd.finish(Message(f"收录回复模板已更新:\n{text}"))
 
     if sub in ("empty", "空", "未归档"):
@@ -1088,7 +1131,7 @@ async def _cmd_reply(bot: Bot, event: MessageEvent, rest: list[str]) -> None:
         if len(rest) < 2:
             await cmd.finish(Message("用法: /music reply empty 本期歌单还没生成"))
         text = " ".join(rest[1:]).replace("\\n", "\n")
-        config_manager.update("reply.playlist_empty_text", text)
+        _write(group_id, "reply.playlist_empty_text", text)
         await cmd.finish(Message(f"未归档时的 {{playlist}} 文案已更新: {text}"))
 
     await cmd.finish(Message("用法见 /music reply"))

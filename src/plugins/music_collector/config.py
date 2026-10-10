@@ -27,6 +27,9 @@ CONFIG_PATH = DATA_DIR / "config.yaml"
 EXAMPLE_CONFIG_PATH = ROOT_DIR / "config.example.yaml"
 DB_PATH = DATA_DIR / "collector.db"
 NETEASE_SESSION_PATH = DATA_DIR / "netease_session.json"
+#: 按群覆盖的配置项（``{群号: {dotted_key: 值}}``）。只存被**显式覆盖**的键，
+#: 其余一律继承 config.yaml 的全局值。
+GROUP_OVERRIDES_PATH = DATA_DIR / "group_overrides.yaml"
 
 
 class _PointsBase(BaseModel):
@@ -480,6 +483,10 @@ class ConfigManager:
         #: 是否已经 ``load()`` 过。没加载过时保持代码默认值，不做自动重载
         #: （否则测试/离线脚本会意外读到真实的 data/config.yaml）
         self._loaded: bool = False
+        #: 内存态版本号，每次 load/save 自增。``effective_config`` 的缓存键用它
+        #: 而不是 mtime —— 某些文件系统 mtime 只有秒级精度，同一秒内连写两次
+        #: 会拿到相同的 mtime，缓存就不会失效。
+        self._gen: int = 0
 
     def _disk_mtime(self) -> float:
         try:
@@ -529,6 +536,7 @@ class ConfigManager:
         raw = yaml.safe_load(self.path.read_text(encoding="utf-8")) or {}
         self._config = AppConfig.model_validate(raw)
         self._mtime = self._disk_mtime()
+        self._gen += 1
         return self._config
 
     def save(self) -> None:
@@ -541,6 +549,7 @@ class ConfigManager:
             try:
                 self.path.write_text(text, encoding="utf-8")
                 self._mtime = self._disk_mtime()
+                self._gen += 1
                 return
             except PermissionError as exc:
                 last_err = exc
@@ -580,3 +589,265 @@ class ConfigManager:
 
 
 config_manager = ConfigManager()
+
+
+# -------------------------------------------------------------------- 按群配置
+#
+# 绝大多数设置都允许「按群覆盖」：全局 config.yaml 是默认值，某个群想要不一样
+# 就在 group_overrides.yaml 里记一条。判定基准只有一处 —— 见 is_group_scopable。
+#
+# 少数配置是**进程级唯一**的（一个进程只有一份日志缓冲、一个缓存目录、一个网易云
+# 账号、一份字体探测结果），按群覆盖它们没有意义，因此列进白名单，写入时一律落到
+# 全局配置；配置页里也只允许在「全局默认」层编辑。
+
+#: 进程级唯一、不允许按群覆盖的完整键名
+GLOBAL_ONLY_KEYS: frozenset[str] = frozenset({
+    # 生效群号决定了「有哪些群」，本身不能按群设
+    "groups",
+    # 识别调试日志是 detector 的进程级开关
+    "debug_detect",
+    # 定时清理是个进程级任务，时刻/天数按群设无处执行
+    "clear.scheduled_enabled",
+    "clear.keep_days",
+    "clear.prune_at",
+    # 字体是整机探测结果（render 模块缓存），不按群区分
+    "render.font_path",
+    "render.thai_font_path",
+})
+
+#: 整段都不允许按群覆盖的配置段
+GLOBAL_ONLY_PREFIXES: tuple[str, ...] = ("logs.", "cache.", "netease.")
+
+
+def is_group_scopable(dotted_key: str) -> bool:
+    """该配置项是否允许「按群覆盖」。
+
+    不允许的项（见 ``GLOBAL_ONLY_KEYS`` / ``GLOBAL_ONLY_PREFIXES``）即使带了
+    ``group_id`` 提交，也会被写到全局配置里 —— 与其存一个永远不会生效的值误导人，
+    不如直接落到真正生效的那一层。
+    """
+    if dotted_key in GLOBAL_ONLY_KEYS:
+        return False
+    return not dotted_key.startswith(GLOBAL_ONLY_PREFIXES)
+
+
+def _apply_dotted(data: dict, dotted_key: str, value: object) -> None:
+    """把 ``a.b.c`` 形式的值写进嵌套字典；路径不存在（配置项已删除）时忽略。"""
+    parts = dotted_key.split(".")
+    cursor = data
+    for part in parts[:-1]:
+        nxt = cursor.get(part)
+        if not isinstance(nxt, dict):
+            return
+        cursor = nxt
+    if parts[-1] in cursor:
+        cursor[parts[-1]] = value
+
+
+class GroupOverrides:
+    """按群覆盖项：``{群号: {dotted_key: 值}}``，落在 data/group_overrides.yaml。
+
+    与 ``ConfigManager`` 一样做 mtime 自动重载（网页端 / 手工编辑完立刻生效）。
+    """
+
+    def __init__(self, path: Path = GROUP_OVERRIDES_PATH) -> None:
+        self.path = path
+        self._data: dict[int, dict[str, object]] = {}
+        self._mtime: float = 0.0
+        self._gen: int = 0
+
+    def _disk_mtime(self) -> float:
+        try:
+            return self.path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    @property
+    def gen(self) -> int:
+        return self._gen
+
+    @property
+    def mtime(self) -> float:
+        return self._mtime
+
+    def reload_if_changed(self) -> bool:
+        mtime = self._disk_mtime()
+        if mtime == self._mtime:
+            return False
+        if mtime <= 0.0:
+            # 文件被删了（或从未存在）→ 视为没有任何覆盖
+            if self._data:
+                self._data = {}
+                self._gen += 1
+            self._mtime = 0.0
+            return True
+        try:
+            self.load()
+        except Exception as exc:  # noqa: BLE001 — 坏文件不该拖垮服务
+            self._mtime = mtime
+            logger.warning(f"[music] 按群配置解析失败，继续用内存中的旧值: {exc}")
+            return False
+        logger.info("[music] 检测到按群配置被外部修改，已自动重载")
+        return True
+
+    def load(self) -> dict[int, dict[str, object]]:
+        if not self.path.exists():
+            self._data = {}
+            self._mtime = 0.0
+            self._gen += 1
+            return self._data
+        raw = yaml.safe_load(self.path.read_text(encoding="utf-8")) or {}
+        data: dict[int, dict[str, object]] = {}
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                try:
+                    gid = int(k)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(v, dict):
+                    data[gid] = {str(kk): vv for kk, vv in v.items()}
+        self._data = data
+        self._mtime = self._disk_mtime()
+        self._gen += 1
+        return self._data
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {str(gid): ov for gid, ov in sorted(self._data.items()) if ov}
+        text = yaml.safe_dump(payload, allow_unicode=True, sort_keys=True, indent=2)
+        last_err: Optional[Exception] = None
+        for attempt in range(5):
+            try:
+                self.path.write_text(text, encoding="utf-8")
+                self._mtime = self._disk_mtime()
+                self._gen += 1
+                return
+            except PermissionError as exc:
+                last_err = exc
+                time.sleep(0.2 * (attempt + 1))
+        if last_err is not None:
+            raise last_err
+
+    # ---- 读 ----
+
+    def group_ids(self) -> list[int]:
+        self.reload_if_changed()
+        return sorted(self._data)
+
+    def get(self, group_id: int) -> dict[str, object]:
+        self.reload_if_changed()
+        return dict(self._data.get(int(group_id)) or {})
+
+    def overridden_keys(self, group_id: int) -> list[str]:
+        return sorted(self.get(group_id))
+
+    def has_window_override(self, group_id: int) -> bool:
+        """该群是否单独设过收集时间窗口（决定要不要为它单独排定时任务）。"""
+        return any(k == "window" or k.startswith("window.") for k in self.get(group_id))
+
+    # ---- 写 ----
+
+    def set(self, group_id: int, dotted_key: str, value: object) -> None:
+        gid = int(group_id)
+        cur = dict(self._data.get(gid) or {})
+        cur[dotted_key] = value
+        self._data[gid] = cur
+        self.save()
+
+    def set_many(self, group_id: int, values: dict[str, object]) -> None:
+        gid = int(group_id)
+        cur = dict(self._data.get(gid) or {})
+        cur.update(values)
+        self._data[gid] = cur
+        self.save()
+
+    def remove(self, group_id: int, dotted_key: str) -> None:
+        gid = int(group_id)
+        cur = dict(self._data.get(gid) or {})
+        if dotted_key not in cur:
+            return
+        cur.pop(dotted_key, None)
+        if cur:
+            self._data[gid] = cur
+        else:
+            self._data.pop(gid, None)
+        self.save()
+
+    def clear(self, group_id: int) -> None:
+        gid = int(group_id)
+        if gid not in self._data:
+            return
+        self._data.pop(gid, None)
+        self.save()
+
+
+group_overrides = GroupOverrides()
+
+#: 生效配置缓存：群号 -> ((全局版本, 覆盖版本), AppConfig)
+_EFFECTIVE_CACHE: dict[int, tuple[tuple[int, int], AppConfig]] = {}
+
+
+def invalidate_effective_cache() -> None:
+    _EFFECTIVE_CACHE.clear()
+
+
+def effective_config(group_id: Optional[int]) -> AppConfig:
+    """取某个群的**生效配置**：全局 config.yaml 叠加该群的覆盖项。
+
+    - 没传群号 / 该群没有任何覆盖 → 直接返回全局对象（省掉深拷贝与校验）。
+    - 覆盖项里的值会走一遍 pydantic 校验；写坏的值只记警告并回退全局，
+      不让一条手滑的覆盖把整个群搞挂。
+    """
+    base = config_manager.config
+    if group_id is None:
+        return base
+    gid = int(group_id)
+    group_overrides.reload_if_changed()
+    overrides = group_overrides.get(gid)
+    if not overrides:
+        return base
+    stamp = (config_manager._gen, group_overrides.gen)
+    cached = _EFFECTIVE_CACHE.get(gid)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    data = base.model_dump(mode="json")
+    for key, value in overrides.items():
+        _apply_dotted(data, key, value)
+    try:
+        cfg = AppConfig.model_validate(data)
+    except Exception as exc:  # noqa: BLE001 — 坏覆盖回退全局
+        logger.warning(f"[music] 群 {gid} 的配置覆盖无效，暂时按全局默认走: {exc}")
+        cfg = base
+    _EFFECTIVE_CACHE[gid] = (stamp, cfg)
+    return cfg
+
+
+def apply_config_value(group_id: Optional[int], dotted_key: str, value: object) -> str:
+    """按群写入一个配置项，返回实际写入的层（``"group"`` 或 ``"global"``）。
+
+    带群号且该项允许按群覆盖 → 写进 group_overrides.yaml；否则写全局 config.yaml。
+    两条路径都会记一条 ``[config]`` 日志，网页端「运行日志」页看得见谁改了什么。
+    """
+    if group_id is not None and is_group_scopable(dotted_key):
+        gid = int(group_id)
+        old = group_overrides.get(gid).get(dotted_key)
+        group_overrides.set(gid, dotted_key, value)
+        if old != value:
+            logger.info(
+                f"[config] 群{gid} 覆盖 {dotted_key}: "
+                f"{_mask_value(dotted_key, old)} → {_mask_value(dotted_key, value)}"
+            )
+        return "group"
+    config_manager.update(dotted_key, value)
+    return "global"
+
+
+def reset_config_value(group_id: int, dotted_key: str) -> bool:
+    """取消某个群的某项覆盖，恢复继承全局默认值。返回是否真的删掉了一条。"""
+    gid = int(group_id)
+    had = dotted_key in group_overrides.get(gid)
+    group_overrides.remove(gid, dotted_key)
+    if had:
+        logger.info(f"[config] 群{gid} 取消覆盖 {dotted_key}（恢复继承全局默认）")
+    return had
+

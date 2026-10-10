@@ -21,7 +21,10 @@ from .config import (
     NETEASE_SESSION_PATH,
     AppConfig,
     PlaylistConfig,
+    apply_config_value,
     config_manager,
+    effective_config,
+    group_overrides,
 )
 from . import detector
 from . import logbuffer
@@ -84,10 +87,30 @@ class CollectorService:
     def config(self) -> AppConfig:
         return config_manager.config
 
+    def cfg(self, group_id: Optional[int] = None) -> AppConfig:
+        """取某个群的**生效配置**（全局默认 + 该群覆盖）；``None`` 表示全局默认。
+
+        service 里凡是拿得到 ``group_id`` 的地方都该用它，而不是 ``self.config``；
+        只有真正的进程级行为（日志缓冲、缓存清理、定时任务本身）才用全局值。
+        """
+        return effective_config(group_id)
+
+    def set_config(self, key: str, value: object, group_id: Optional[int] = None) -> str:
+        """按群写配置项，返回实际写入的层（group/global）。供群内命令复用。"""
+        return apply_config_value(group_id, key, value)
+
+    def group_ids(self) -> list[int]:
+        """有按群覆盖的群号（定时任务据此判断哪些群要单独排班）。"""
+        return group_overrides.group_ids()
+
     @property
     def resolver(self) -> WindowResolver:
         # 构造很轻，每次重建以便配置热更新后立即生效
         return WindowResolver(self.config.window)
+
+    def resolver_for(self, group_id: Optional[int] = None) -> WindowResolver:
+        """某个群的窗口解析器（按群覆盖生效）。"""
+        return WindowResolver(self.cfg(group_id).window)
 
     async def setup(self) -> None:
         config_manager.load()
@@ -102,15 +125,19 @@ class CollectorService:
             self.clean_cache()
 
     def group_enabled(self, group_id: int) -> bool:
-        cfg = self.config
+        cfg = self.cfg(group_id)
         if not cfg.enabled:
             return False
         return not cfg.groups or group_id in cfg.groups
 
-    def current_window(self) -> WindowState:
-        """当前窗口状态；手动开关（collect_override）优先于时间表。"""
-        state = self.resolver.resolve()
-        override = getattr(self.config, "collect_override", "auto")
+    def current_window(self, group_id: Optional[int] = None) -> WindowState:
+        """当前窗口状态；手动开关（collect_override）优先于时间表。
+
+        传 ``group_id`` 时按该群的生效配置（含单独的窗口 / 手动开关）解析。
+        """
+        cfg = self.cfg(group_id)
+        state = WindowResolver(cfg.window).resolve()
+        override = getattr(cfg, "collect_override", "auto")
         if override == "on":
             state.collecting = True
             state.override = "手动强制开启"
@@ -119,18 +146,19 @@ class CollectorService:
             state.override = "手动强制关闭"
         return state
 
-    def set_collect_override(self, value: str) -> str:
+    def set_collect_override(self, value: str, group_id: Optional[int] = None) -> str:
         """设置手动开关，返回人类可读说明。"""
         if value not in ("auto", "on", "off"):
             raise ValueError("collect_override 只能是 auto / on / off")
-        config_manager.update("collect_override", value)
+        self.set_config("collect_override", value, group_id)
         note = {
             "auto": "已恢复按时间表自动收集",
             "on": "已手动开启收集（无视时间窗口）",
             "off": "已手动关闭收集（无视时间窗口）",
         }[value]
         # 单独记一条「收集开关」事件，日志页一眼能看出什么时候被手动改过状态
-        logger.info(f"[music] 收集开关 → {note}")
+        where = f"群{group_id} " if group_id is not None else ""
+        logger.info(f"[music] {where}收集开关 → {note}")
         return note
 
     # ------------------------------------------------------------ 缓存
@@ -154,7 +182,7 @@ class CollectorService:
         sharer_name: str,
     ) -> CollectResult:
         result = CollectResult()
-        state = self.current_window()
+        state = self.current_window(group_id)
         # 不在收集期：静默处理，不解析、不回应
         if not state.collecting:
             return result
@@ -163,7 +191,7 @@ class CollectorService:
         if not links:
             return result
 
-        cfg = self.config
+        cfg = self.cfg(group_id)
         pl = cfg.playlist
         #: 本批消息里已经占位的分享者 -> 首发占位记录。
         #: 同一条消息里贴了多首时，也只有第一首能过（其余按已分享处理）。
@@ -215,7 +243,7 @@ class CollectorService:
             # 仅记录为跨窗口重复提示（与同窗口重复互不冲突、不重复刷屏）。
             master_dup_stored = None
             already_in_master = False
-            if self.config.master.enabled:
+            if cfg.master.enabled:
                 m_inserted, m_stored = await self.store.add_song(
                     group_id, MASTER_KEY, song, src_window=state.key
                 )
@@ -305,13 +333,13 @@ class CollectorService:
             archive_at=None,
         )
 
-    def _master_playlist_cfg(self) -> "PlaylistConfig":
+    def _master_playlist_cfg(self, group_id: Optional[int] = None) -> "PlaylistConfig":
         """把扁平的 master 配置组装成归档器需要的 PlaylistConfig。
 
         master 段为了网页端能平铺展示，字段是扁平的；归档器严格依赖
         ``PlaylistConfig``，这里在调用前临时拼一个。
         """
-        m = self.config.master
+        m = self.cfg(group_id).master
         return PlaylistConfig(
             name_template=m.name_template,
             description_template=m.description_template,
@@ -340,7 +368,7 @@ class CollectorService:
         - 总库歌单尚不存在（首次）：走全量归档建歌单。
         """
         try:
-            cfg = self._master_playlist_cfg()
+            cfg = self._master_playlist_cfg(group_id)
             existing = await self.store.get_archive(group_id, MASTER_KEY)
             if existing and str(existing.get("playlist_id") or "").isdigit() and new_songs:
                 raw = (existing or {}).get("added_ids") or []
@@ -364,7 +392,7 @@ class CollectorService:
             else:
                 logger.warning(f"[music] 总库分享即归档失败 group={group_id}: {report.message}")
             # 关键：这条路径也会「新建歌单」，必须同样消耗期号 / 一次性名
-            self._after_archive("master", cfg, report)
+            self._after_archive("master", cfg, report, group_id=group_id)
         except Exception as exc:
             logger.warning(f"[music] 总库分享即归档异常 group={group_id}: {type(exc).__name__} {exc}")
 
@@ -596,17 +624,17 @@ class CollectorService:
     ) -> ArchiveReport:
         """把总库归档到网易云歌单（与正常收集一致：复用/新建、简介清单、期号等）。"""
         songs = await self.store.list_songs(group_id, MASTER_KEY, newest_first=True)
-        cfg = self._master_playlist_cfg()
+        cfg = self._master_playlist_cfg(group_id)
         report = await self.archiver.archive(
             group_id, MASTER_KEY, "总库", songs, cfg,
             start_at=None, end_at=None, name_override=name_override,
         )
-        self._after_archive("master", cfg, report, name_override)
+        self._after_archive("master", cfg, report, name_override, group_id=group_id)
         return report
 
     async def sync_master_playlist(self, group_id: int) -> dict:
         """全量同步总库到总库歌单：增 + 删 + 简介（与正常收集一致）。"""
-        cfg = self._master_playlist_cfg()
+        cfg = self._master_playlist_cfg(group_id)
         songs = await self.store.list_songs(group_id, MASTER_KEY, newest_first=True)
         # 同步前先对总库内全部歌做跨平台匹配，确保非网易云来源的歌也能进歌单
         await self._ensure_matched(songs, cfg)
@@ -619,7 +647,7 @@ class CollectorService:
             )
             if not report.ok:
                 return {"ok": False, "message": report.message or "建歌单失败"}
-            self._after_archive("master", cfg, report)
+            self._after_archive("master", cfg, report, group_id=group_id)
             arch = await self.store.get_archive(group_id, MASTER_KEY)
             if not arch:
                 return {"ok": False, "message": "建歌单后未读到归档记录"}
@@ -654,7 +682,7 @@ class CollectorService:
         )
 
         desc = await self._render_description(
-            songs, group_id, "总库", self._master_playlist_cfg(),
+            songs, group_id, "总库", self._master_playlist_cfg(group_id),
             start_at=None, end_at=None, count=len(songs),
         )
         desc_ok, desc_note = await self.push_description(
@@ -673,7 +701,7 @@ class CollectorService:
 
     async def preview_master_name(self, group_id: int) -> str:
         songs = await self.store.list_songs(group_id, MASTER_KEY, newest_first=True)
-        m = self.config.master
+        m = self.cfg(group_id).master
         context = build_context(
             group_id=group_id, window_label="总库",
             start_at=None, end_at=None,
@@ -685,7 +713,7 @@ class CollectorService:
     async def preview_master_description(self, group_id: int) -> str:
         songs = await self.store.list_songs(group_id, MASTER_KEY, newest_first=True)
         return await self._render_description(
-            songs, group_id, "总库", self._master_playlist_cfg(),
+            songs, group_id, "总库", self._master_playlist_cfg(group_id),
             start_at=None, end_at=None, count=len(songs),
         )
 
@@ -714,7 +742,7 @@ class CollectorService:
         也能被加进歌单。
         """
         try:
-            cfg = self.config.playlist
+            cfg = self.cfg(group_id).playlist
             all_songs = await self.store.list_songs(group_id, state.key)
             await self._ensure_matched(all_songs, cfg)
             report = await self.archiver.archive(
@@ -734,7 +762,7 @@ class CollectorService:
             # 关键：本期歌单通常是**这里**建出来的（auto_archive_on_share 打开时），
             # 不在这里消耗期号的话，定时归档再跑时 created_new 已是 False，
             # 期号就永远不自增（线上真实踩过这个坑）。
-            self._after_archive("playlist", cfg, report)
+            self._after_archive("playlist", cfg, report, group_id=group_id)
         except Exception as exc:
             logger.warning(f"[music] 分享即归档异常 group={group_id}: {type(exc).__name__} {exc}")
 
@@ -743,18 +771,19 @@ class CollectorService:
     async def build_report(
         self, group_id: int, window: Optional[WindowState] = None
     ) -> tuple[str, list[Path], list[Song]]:
-        state = window or self.current_window()
+        cfg = self.cfg(group_id)
+        state = window or self.current_window(group_id)
         songs = await self.store.list_songs(group_id, state.key)
         title = f"群音乐收藏榜 · {state.label}"
-        text = build_text_list(songs, title, aliases=self.config.playlist.sharer_aliases)
+        text = build_text_list(songs, title, aliases=cfg.playlist.sharer_aliases)
         images: list[Path] = []
         if songs:
             subtitle = f"共 {len(songs)} 首 · 窗口 {state.label}"
             images = await render_song_list(
-                songs, title, subtitle, self.config.render, CACHE_DIR / "render",
-                aliases=self.config.playlist.sharer_aliases,
+                songs, title, subtitle, cfg.render, CACHE_DIR / "render",
+                aliases=cfg.playlist.sharer_aliases,
             )
-            cache_cfg = self.config.cache
+            cache_cfg = cfg.cache
             if cache_cfg.enabled and cache_cfg.clean_after_render:
                 self.clean_cache()
         return text, images, songs
@@ -767,6 +796,7 @@ class CollectorService:
         cfg_seen: PlaylistConfig,
         report: ArchiveReport,
         name_override: str = "",
+        group_id: Optional[int] = None,
     ) -> None:
         """**所有**归档路径的统一收尾：新建歌单就消耗期号 / 一次性名。
 
@@ -776,17 +806,21 @@ class CollectorService:
         ``created_new=False``。如果自动归档那条路径漏掉这一步，期号就永远不自增，
         表现为「每周歌单名都是同一个数字，得手动改」。
         所以把收尾集中到这里，新增归档路径时只要记得调用它即可。
+
+        ``group_id`` 决定期号写哪一层：有群号且该群单独覆盖过期号就写该群的覆盖，
+        否则写全局（这样没单独设过的群共享同一个期号，不会被拆成互不相干的计数器）。
         """
         if not report.ok:
             return
         if report.created_new:
-            self._consume_naming(scope, cfg_seen, name_override)
+            self._consume_naming(scope, cfg_seen, name_override, group_id)
         elif report.renamed and cfg_seen.pending_name and not name_override:
             # 复用歌单按「一次性歌单名」改过名，该名同样要消耗，否则每次都再改一次
-            config_manager.update(f"{scope}.pending_name", "")
+            self.set_config(f"{scope}.pending_name", "", group_id)
 
     def _consume_naming(
-        self, scope: str, cfg_seen: PlaylistConfig, name_override: str = ""
+        self, scope: str, cfg_seen: PlaylistConfig, name_override: str = "",
+        group_id: Optional[int] = None,
     ) -> None:
         """归档**新建**歌单后消耗一次性歌单名 / 自增期号。
 
@@ -796,20 +830,35 @@ class CollectorService:
         网络请求，期间网页端可能刚改过配置、或另一个协程已经自增过。若还按
         开始时那份写回去，就会出现「期号没变」甚至把别人的改动一起回退。
         期号取 ``max(最新, 本次) + 1``，只会跳过不会重复。
+
+        期号写哪一层：只有该群**已经单独覆盖过** ``{scope}.seq`` 时才写该群，
+        否则写全局 —— 否则第一次归档就会凭空给这个群生成一份 seq 覆盖，把
+        「没单独设过的群共享全局期号」这个语义破坏掉。一次性歌单名同理。
         """
-        latest = self.config.master if scope == "master" else self.config.playlist
+        latest_cfg = self.cfg(group_id)
+        latest = latest_cfg.master if scope == "master" else latest_cfg.playlist
+        overridden = set(group_overrides.get(int(group_id))) if group_id is not None else set()
+
+        def layer(key: str) -> Optional[int]:
+            """该项被该群覆盖过就写该群，否则写全局。"""
+            return group_id if (group_id is not None and key in overridden) else None
+
+        name_key = f"{scope}.pending_name"
         if latest.pending_name and not name_override:
-            config_manager.update(f"{scope}.pending_name", "")
+            self.set_config(name_key, "", layer(name_key))
+        seq_key = f"{scope}.seq"
         if latest.seq_auto_increment:
-            config_manager.update(f"{scope}.seq", max(int(latest.seq), int(cfg_seen.seq)) + 1)
+            self.set_config(
+                seq_key, max(int(latest.seq), int(cfg_seen.seq)) + 1, layer(seq_key)
+            )
 
     async def preview_playlist_name(
         self, group_id: int, window: Optional[WindowState] = None
     ) -> str:
         """按当前配置预览歌单名，方便群里确认再归档。"""
-        state = window or self.current_window()
+        state = window or self.current_window(group_id)
         songs = await self.store.list_songs(group_id, state.key)
-        cfg = self.config.playlist
+        cfg = self.cfg(group_id).playlist
         context = build_context(
             group_id=group_id,
             window_label=state.label,
@@ -830,9 +879,9 @@ class CollectorService:
         window: Optional[WindowState] = None,
         name_override: str = "",
     ) -> ArchiveReport:
-        state = window or self.current_window()
+        state = window or self.current_window(group_id)
         songs = await self.store.list_songs(group_id, state.key)
-        cfg = self.config.playlist
+        cfg = self.cfg(group_id).playlist
         report = await self.archiver.archive(
             group_id, state.key, state.label, songs, cfg,
             start_at=state.start_at,
@@ -841,8 +890,8 @@ class CollectorService:
         )
         # 只有「新建歌单」才消耗一次性歌单名 / 自增期号；复用已有歌单追加时不改动
         # 命名与期号。统一走 _after_archive，避免某条归档路径漏掉自增。
-        self._after_archive("playlist", cfg, report, name_override)
-        if report.ok and self.config.clear.after_archive:
+        self._after_archive("playlist", cfg, report, name_override, group_id=group_id)
+        if report.ok and self.cfg(group_id).clear.after_archive:
             # 归档（结束收集）后自动清空本期已收集歌曲
             removed = await self.store.delete_window(group_id, state.key)
             logger.info(f"[music] 归档后已自动清空本期 {removed} 首")
@@ -926,7 +975,7 @@ class CollectorService:
             songs,
             group_id,
             str(snapshot.get("label") or window_key or ""),
-            self.config.playlist,
+            self.cfg(group_id).playlist,
             start_at=start_at,
             end_at=end_at,
             count=count,
@@ -1007,13 +1056,13 @@ class CollectorService:
         self, group_id: int, window: Optional[WindowState] = None
     ) -> str:
         """按当前配置重新生成一份简介文本（用于手动补写 / 预览）。"""
-        state = window or self.current_window()
+        state = window or self.current_window(group_id)
         songs = await self.store.list_songs(group_id, state.key)
         return await self._render_description(
             songs,
             group_id,
             state.label,
-            self.config.playlist,
+            self.cfg(group_id).playlist,
             start_at=state.start_at,
             end_at=state.end_at or state.archive_at,
         )
@@ -1024,7 +1073,7 @@ class CollectorService:
         """把指定简介写到指定歌单（失败自动入队）。"""
         return await self.archiver.write_description(
             playlist_id, desc, name=name, group_id=group_id,
-            retries=self.config.playlist.desc_retry,
+            retries=self.cfg(group_id or None).playlist.desc_retry,
         )
 
     # ------------------------------------------------------------ 网页端手动收集管理
@@ -1255,8 +1304,8 @@ class CollectorService:
         - 已有歌单：计算窗口有/歌单无(to_add) 与 歌单有/窗口无(to_remove) 做对账，
           调 add/remove，重写 added_ids，再重写简介。
         """
-        state = window or self.current_window()
-        cfg = self.config.playlist
+        state = window or self.current_window(group_id)
+        cfg = self.cfg(group_id).playlist
         songs = await self.store.list_songs(group_id, state.key)
         # 同步前先对窗口内全部歌做跨平台匹配，确保非网易云来源的歌也能进歌单
         await self._ensure_matched(songs, cfg)
@@ -1270,7 +1319,7 @@ class CollectorService:
             )
             if not report.ok:
                 return {"ok": False, "message": report.message or "建歌单失败"}
-            self._after_archive("playlist", cfg, report)
+            self._after_archive("playlist", cfg, report, group_id=group_id)
             arch = await self.store.get_archive(group_id, state.key)
             if not arch:
                 return {"ok": False, "message": "建歌单后未读到归档记录"}
@@ -1344,10 +1393,26 @@ class CollectorService:
         return await self.store.windows_with_counts(group_id)
 
     async def target_groups(self, window_key: str) -> list[int]:
-        """定时任务要处理哪些群：优先配置白名单，否则取有数据的群。"""
+        """定时任务要处理哪些群：优先配置白名单，否则取有数据的群。
+
+        没有配白名单时，把「有按群覆盖」的群也算进来 —— 某个群只单独改过配置、
+        还没收集过任何歌时，它的开始/结束提醒也不该被漏掉。
+        """
         if self.config.groups:
             return list(self.config.groups)
-        return await self.store.groups_in_window(window_key)
+        gids = set(await self.store.groups_in_window(window_key))
+        gids |= set(group_overrides.group_ids())
+        return sorted(gids)
+
+    async def known_groups(self) -> list[int]:
+        """网页端「按群配置」下拉里要列出哪些群。"""
+        gids: set[int] = set(self.config.groups or [])
+        gids |= set(group_overrides.group_ids())
+        try:
+            gids |= set(await self.store.all_groups())
+        except Exception:  # noqa: BLE001 — 库读不出来也不该让配置页打不开
+            pass
+        return sorted(gids)
 
 
 service = CollectorService()

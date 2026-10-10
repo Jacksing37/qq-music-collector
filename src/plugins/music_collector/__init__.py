@@ -123,9 +123,9 @@ def _is_command_message(event: GroupMessageEvent) -> bool:
 
 async def _build_intro(event: GroupMessageEvent) -> str:
     """渲染自我介绍文案，支持命名占位符 + {nick}/{count}/{state}/{playlist}。"""
-    cfg = service.config
-    state = service.current_window()
     group_id = event.group_id
+    cfg = service.cfg(group_id)
+    state = service.current_window(group_id)
     try:
         count = await service.store.count(group_id, state.key)
     except Exception:
@@ -155,7 +155,7 @@ at_listener = on_message(rule=Rule(_at_bot), priority=5, block=False)
 
 @at_listener.handle()
 async def handle_at(bot: Bot, event: GroupMessageEvent) -> None:
-    cfg = service.config.intro
+    cfg = service.cfg(event.group_id).intro
     if not cfg.enabled:
         return
     # 收集功能关掉时默认仍然自我介绍（否则用户会以为机器人挂了）
@@ -219,7 +219,7 @@ async def _playlist_placeholder(group_id: int, window_key: str) -> str:
 
     本期还没归档时用 ``reply.playlist_empty_text`` 代替。
     """
-    cfg = service.config.reply
+    cfg = service.cfg(group_id).reply
     try:
         arch = await service.store.get_archive(group_id, window_key)
     except Exception as exc:  # 查库异常不该打断回复
@@ -251,8 +251,8 @@ async def build_master_dup_text(
     {who}总库首发者 {index}总库序号 {count}总库总数 {window}当前窗口
     {period}首发所在期号（来源窗口） {date}首发分享日期(YY/MM/DD)。
     """
-    cfg = service.config.master
-    aliases = service.config.playlist.sharer_aliases
+    cfg = service.cfg(group_id).master
+    aliases = service.cfg(group_id).playlist.sharer_aliases
     who = resolve_alias(
         song.sharer_name or str(song.sharer_id), song.sharer_id, aliases
     )
@@ -261,7 +261,7 @@ async def build_master_dup_text(
         count = await service.store.count(group_id, MASTER_KEY)
     except Exception:
         count = index
-    state = service.current_window()
+    state = service.current_window(group_id)
     context = {
         "title": song.title,
         "artists": song.artists,
@@ -285,15 +285,15 @@ async def build_accept_text(
     ``unmatched=True`` 表示这首歌已在网易云搜过、确认搜不到（不会进本期歌单），
     此时按 ``reply.unmatched_text`` 渲染一条提示，**并入同一条消息**，不额外刷屏。
     """
-    cfg = service.config.reply
-    state = service.current_window()
+    cfg = service.cfg(group_id).reply
+    state = service.current_window(group_id)
     try:
         count = await service.store.count(group_id, state.key)
     except Exception:
         count = index
     nick = resolve_alias(
         song.sharer_name or str(song.sharer_id), song.sharer_id,
-        service.config.playlist.sharer_aliases,
+        service.cfg(group_id).playlist.sharer_aliases,
     )
     notice = ""
     if unmatched:
@@ -344,9 +344,9 @@ async def build_sharer_limit_text(song: Song, first: dict, group_id: int) -> str
       {index}     首发歌在本期的序号（首发那首没进榜时为 —）
       {count}     本期已收录首数         {window} 窗口文案
     """
-    cfg = service.config.reply
-    aliases = service.config.playlist.sharer_aliases
-    state = service.current_window()
+    cfg = service.cfg(group_id).reply
+    aliases = service.cfg(group_id).playlist.sharer_aliases
+    state = service.current_window(group_id)
     nick = resolve_alias(
         song.sharer_name or str(song.sharer_id), song.sharer_id, aliases
     )
@@ -395,7 +395,7 @@ async def _reply_song(
     if not with_card:
         return
     # 卡片单独发一条：签名服务挂掉时内部会自动降到自定义卡片 / 文字兜底
-    way = await send_music_card(bot, event, song, service.config.card)
+    way = await send_music_card(bot, event, song, service.cfg(event.group_id).card)
     trace_out(f"卡片《{song.title}》[{way}]", f"群{event.group_id}")
     logger.debug(f"[music] 《{song.title}》卡片发送方式: {way}")
 
@@ -424,7 +424,7 @@ async def handle_music_share(bot: Bot, event: GroupMessageEvent) -> None:
         f"已分享过 {len(result.sharer_limited)} / 未识别 {len(result.unidentified)}"
     )
 
-    cfg = service.config
+    cfg = service.cfg(group_id)
 
     # 文字 @+提示始终发送；卡片是否回发由 reply_card 单独控制
     # 无法匹配到网易云的歌：提示并入收录消息同一条，不额外刷屏

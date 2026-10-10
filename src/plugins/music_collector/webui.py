@@ -30,7 +30,15 @@ from nonebot.log import logger
 from pydantic import BaseModel
 from pydantic_core import PydanticUndefined
 
-from .config import AppConfig, config_manager
+from .config import (
+    AppConfig,
+    apply_config_value,
+    config_manager,
+    effective_config,
+    group_overrides,
+    is_group_scopable,
+    reset_config_value,
+)
 from . import logbuffer
 from .models import PLATFORM_NAMES
 from .store import MASTER_KEY
@@ -53,6 +61,13 @@ SECTION_TITLES = {
     "netease": "网易云登录",
     "logs": "运行日志",
 }
+
+#: 配置页分组的展示顺序。网易云登录紧跟「通用设置」，登录 / 重登 / 粘贴 cookie
+#: 都在这一个分组里完成（它们原先散在独立的「网易云账号」页）。
+SECTION_ORDER = [
+    "general", "netease", "window", "playlist", "card", "render",
+    "cache", "clear", "intro", "reply", "master", "logs",
+]
 
 # dotted_key -> (label, hint, multiline?)
 FIELD_META: dict[str, tuple[str, str, bool]] = {
@@ -287,7 +302,28 @@ def _field_desc(parent: str, fname: str, finfo, dotted_parent: str) -> dict:
         "multiline": multiline,
         # 密码 / cookie 类字段在表单里用 password 输入框，避免旁窥
         "secret": ("password" in fname) or ("cookie" in fname),
+        # 进程级唯一的项（日志 / 缓存 / 网易云账号 / 字体 / 生效群号…）不能按群覆盖，
+        # 前端在「按群」视图里要把它们灰掉，并注明「始终取全局值」
+        "global_only": not is_group_scopable(dotted),
     }
+
+
+def _collect_section_fields(section_key: str, model, prefix: str = "") -> list[dict]:
+    """把某个配置段拍平成字段列表，**递归展开嵌套子模型**。
+
+    ``window.weekly.start`` 这类三级键过去因为只展开一层而从未出现在表单里
+    （``FIELD_META`` 里早就写好了它们的文案，只是没人渲染），结果真正决定收集
+    时间的「每周·开始/汇总/结束/归档」在网页端改不了。按群覆盖窗口也需要它们。
+    """
+    out: list[dict] = []
+    for sname, sinfo in model.model_fields.items():
+        if _is_basemodel(sinfo.annotation):
+            sub = f"{prefix}.{sname}" if prefix else sname
+            out.extend(_collect_section_fields(section_key, sinfo.annotation, sub))
+            continue
+        dotted_parent = f"{section_key}.{prefix}" if prefix else section_key
+        out.append(_field_desc(section_key, sname, sinfo, dotted_parent))
+    return out
 
 
 def build_schema() -> list[dict]:
@@ -295,6 +331,8 @@ def build_schema() -> list[dict]:
 
     返回 ``[{key, title, fields:[...]}]``，每个 field 含 dotted key / 类型 /
     枚举选项 / 默认值 / 展示文案。新增配置项时无需改这里。
+
+    分组顺序由 ``SECTION_ORDER`` 决定（网易云登录排到通用设置之后）。
     """
     sections: list[dict] = []
     general: list[dict] = []
@@ -309,8 +347,11 @@ def build_schema() -> list[dict]:
         tp = finfo.annotation
         if not _is_basemodel(tp):
             continue
-        fields = [_field_desc(fname, sname, sinfo, fname) for sname, sinfo in tp.model_fields.items()]
+        fields = _collect_section_fields(fname, tp)
         sections.append({"key": fname, "title": SECTION_TITLES.get(fname, fname), "fields": fields})
+
+    order = {key: i for i, key in enumerate(SECTION_ORDER)}
+    sections.sort(key=lambda s: order.get(s["key"], len(order)))
     return sections
 
 
@@ -357,8 +398,12 @@ def coerce_value(ftype: str, enum_options, raw: object) -> object:
     return str(raw)
 
 
-def current_values() -> dict[str, object]:
-    """把当前配置拍平成 dotted_key -> 值 的字典。"""
+def current_values(group_id: typing.Optional[int] = None) -> dict[str, object]:
+    """把配置拍平成 dotted_key -> 值 的字典。
+
+    ``group_id`` 非空时返回该群的**生效值**（全局默认叠加该群覆盖），这样配置页
+    切到某个群时看到的每一格都是真正会生效的值。
+    """
 
     def _walk(node, prefix):
         out = {}
@@ -375,33 +420,45 @@ def current_values() -> dict[str, object]:
                     out[nk] = v
         return out
 
-    return _walk(config_manager.config.model_dump(mode="json"), "")
+    base = config_manager.config if group_id is None else effective_config(group_id)
+    return _walk(base.model_dump(mode="json"), "")
 
 
-def apply_updates(values: dict[str, object]) -> tuple[bool, dict[str, str]]:
+def apply_updates(
+    values: dict[str, object], group_id: typing.Optional[int] = None
+) -> tuple[bool, dict[str, str]]:
     """原子地应用一批配置更新；任一失败整体回滚，避免写到一半。
+
+    ``group_id`` 非空时写进该群的覆盖层（进程级配置项仍会自动落到全局）。
 
     返回 ``(ok, errors)``。成功后若涉及 ``window.*``，重新注册定时任务。
     """
     if not values:
         return True, {}
     snapshot = config_manager.config.model_dump(mode="json")
+    over_snapshot = {g: dict(v) for g, v in group_overrides._data.items()}
     errors: dict[str, str] = {}
     for key, val in values.items():
         try:
-            config_manager.update(key, val)
+            apply_config_value(group_id, key, val)
         except Exception as exc:  # noqa: BLE001 — 配置写入失败需反馈给用户
             errors[key] = str(exc)
     if errors:
         # 回滚到更新前的状态（回滚写盘失败也不能抛 500，否则用户只会看到
         # 「Internal Server Error」而看不到真实的错误原因）
         config_manager._config = AppConfig.model_validate(snapshot)
+        group_overrides._data = over_snapshot
         try:
             config_manager.save()
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[music] 配置回滚写盘失败（配置已还原内存态）: {exc}")
+        try:
+            group_overrides.save()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[music] 按群配置回滚写盘失败: {exc}")
         return False, errors
 
+    # 时间窗口（全局的或某个群单独的）改了都要重建定时任务，否则新时刻不生效
     if any(k.startswith("window") for k in values):
         try:
             reload_jobs()
@@ -495,6 +552,17 @@ async def _aliases_page() -> HTMLResponse:
     return HTMLResponse(ALIASES_HTML)
 
 
+def _group_id_param(request: Request) -> typing.Optional[int]:
+    """从查询参数读 ``group_id``；缺省 / 非法 / ``"global"`` 都视为全局默认层。"""
+    raw = request.query_params.get("group_id")
+    if raw is None or raw == "" or raw == "global":
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 async def _api_schema(request: Request):
     if not _token_ok(request):
         raise HTTPException(status_code=401, detail="unauthorized")
@@ -504,7 +572,26 @@ async def _api_schema(request: Request):
 async def _api_config(request: Request):
     if not _token_ok(request):
         raise HTTPException(status_code=401, detail="unauthorized")
-    return JSONResponse({"values": current_values(), "schema": SCHEMA})
+    gid = _group_id_param(request)
+    return JSONResponse({
+        "values": current_values(gid),
+        "schema": SCHEMA,
+        "group_id": gid,
+        #: 该群被单独覆盖过的键（前端据此高亮 + 提供「恢复继承」）
+        "overridden": group_overrides.overridden_keys(gid) if gid is not None else [],
+        "groups": await service.known_groups(),
+    })
+
+
+async def _api_groups(request: Request):
+    """按群配置的下拉数据源：有哪些群 + 各自覆盖了哪些键。"""
+    if not _token_ok(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    gids = await service.known_groups()
+    return JSONResponse({
+        "groups": gids,
+        "overrides": {str(g): group_overrides.overridden_keys(g) for g in gids},
+    })
 
 
 async def _api_patch(request: Request):
@@ -514,6 +601,34 @@ async def _api_patch(request: Request):
         body = await request.json()
     except Exception:
         return JSONResponse({"ok": False, "errors": {"_": "请求体不是合法 JSON"}}, status_code=400)
+
+    gid = body.get("group_id")
+    if gid is not None:
+        try:
+            gid = int(gid)
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "errors": {"_": "group_id 非法"}}, status_code=400)
+
+    # 「恢复继承全局默认」：只对按群层有意义
+    reset = body.get("reset")
+    if reset:
+        if gid is None:
+            return JSONResponse({"ok": False, "errors": {"_": "全局层没有可恢复的覆盖"}}, status_code=400)
+        if not isinstance(reset, list):
+            return JSONResponse({"ok": False, "errors": {"_": "reset 必须是数组"}}, status_code=400)
+        changed = False
+        for key in reset:
+            try:
+                changed = reset_config_value(gid, str(key)) or changed
+            except Exception as exc:  # noqa: BLE001
+                return JSONResponse({"ok": False, "errors": {str(key): str(exc)}}, status_code=400)
+        if changed and any(str(k).startswith("window") for k in reset):
+            try:
+                reload_jobs()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[music] 取消窗口覆盖后重载定时失败: {exc}")
+        if not body.get("values"):
+            return JSONResponse({"ok": True})
 
     values: dict = {}
     if isinstance(body.get("values"), dict):
@@ -530,6 +645,8 @@ async def _api_patch(request: Request):
         if not desc:
             perr[k] = "未知配置项"
             continue
+        # 进程级唯一的项在按群视图里被前端灰掉了，但接口也要兜住：
+        # 直接落到全局，避免存下一个永远不会生效的覆盖值
         try:
             coerced[k] = coerce_value(desc["type"], desc.get("enum"), raw)
         except Exception as exc:
@@ -537,21 +654,28 @@ async def _api_patch(request: Request):
     if perr:
         return JSONResponse({"ok": False, "errors": perr}, status_code=400)
 
-    ok, errs = apply_updates(coerced)
+    ok, errs = apply_updates(coerced, group_id=gid)
     if not ok:
         return JSONResponse({"ok": False, "errors": errs}, status_code=400)
-    return JSONResponse({"ok": True})
+    return JSONResponse({
+        "ok": True,
+        "group_id": gid,
+        "overridden": group_overrides.overridden_keys(gid) if gid is not None else [],
+    })
 
 
 async def _api_status(request: Request):
     if not _token_ok(request):
         raise HTTPException(status_code=401, detail="unauthorized")
-    st = service.current_window()
+    gid = _group_id_param(request)
+    st = service.current_window(gid)
+    cfg = service.cfg(gid)
     return JSONResponse({
         "window_label": st.label,
         "collecting": st.collecting,
-        "collect_override": service.config.collect_override,
+        "collect_override": cfg.collect_override,
         "next_runs": next_runs(),
+        "group_id": gid,
     })
 
 
@@ -620,9 +744,13 @@ async def _api_account(request: Request):
 # -------------------------------------------------------------------- 预览 / 操作
 
 
-def _song_item(song, index: int) -> dict:
-    """把一条 Song 序列化成前端展示用的字典。"""
-    aliases = service.config.playlist.sharer_aliases
+def _song_item(song, index: int, aliases: typing.Optional[dict] = None) -> dict:
+    """把一条 Song 序列化成前端展示用的字典。
+
+    ``aliases`` 为该群的分享者昵称映射（按群配置可能不同），缺省取全局值。
+    """
+    if aliases is None:
+        aliases = service.config.playlist.sharer_aliases
     return {
         "index": index + 1,
         "title": song.title,
@@ -663,11 +791,12 @@ async def build_overview(
             if filtering and not songs:
                 continue
             arch = await service.store.get_archive(gid, MASTER_KEY)
+            aliases = service.cfg(gid).playlist.sharer_aliases
             groups.append({
                 "group_id": gid,
                 "count": len(songs),
                 "playlist_url": (arch or {}).get("playlist_url"),
-                "songs": [_song_item(s, i) for i, s in enumerate(songs)],
+                "songs": [_song_item(s, i, aliases) for i, s in enumerate(songs)],
             })
         import_groups = set(await service.store.distinct_group_ids())
         import_groups |= set(service.config.groups or [])
@@ -701,11 +830,12 @@ async def build_overview(
         if filtering and not songs:
             continue
         arch = await service.store.get_archive(gid, wk)
+        aliases = service.cfg(gid).playlist.sharer_aliases
         groups.append({
             "group_id": gid,
             "count": len(songs),
             "playlist_url": (arch or {}).get("playlist_url"),
-            "songs": [_song_item(s, i) for i, s in enumerate(songs)],
+            "songs": [_song_item(s, i, aliases) for i, s in enumerate(songs)],
         })
     return {
         "window": {"key": state.key, "label": state.label, "collecting": state.collecting},
@@ -733,7 +863,7 @@ async def dispatch_action(body: dict) -> dict:
         wk = body.get("window_key")
         if action in ("start", "stop", "auto"):
             value = {"start": "on", "stop": "off", "auto": "auto"}[action]
-            note = service.set_collect_override(value)
+            note = service.set_collect_override(value, body.get("group_id"))
             return {"ok": True, "message": note}
 
         if action == "master_aggregate":
@@ -802,10 +932,11 @@ async def dispatch_action(body: dict) -> dict:
                         "window_label": "总库",
                         "name": name,
                         "description": desc,
-                        "songs": [_song_item(s, i) for i, s in enumerate(songs)],
+                        "songs": [_song_item(s, i, service.cfg(gid).playlist.sharer_aliases)
+                                  for i, s in enumerate(songs)],
                     },
                 }
-            state = service.current_window()
+            state = service.current_window(gid)
             name = await service.preview_playlist_name(gid)
             desc = await service.rebuild_description(gid)
             songs = await service.store.list_songs(gid, state.key)
@@ -817,7 +948,8 @@ async def dispatch_action(body: dict) -> dict:
                     "window_label": state.label,
                     "name": name,
                     "description": desc,
-                    "songs": [_song_item(s, i) for i, s in enumerate(songs)],
+                    "songs": [_song_item(s, i, service.cfg(gid).playlist.sharer_aliases)
+                                  for i, s in enumerate(songs)],
                 },
             }
 
@@ -976,6 +1108,7 @@ def register_webui() -> None:
     app.add_api_route("/api/music-admin/schema", _api_schema, methods=["GET"])
     app.add_api_route("/api/music-admin/config", _api_config, methods=["GET"])
     app.add_api_route("/api/music-admin/config", _api_patch, methods=["PATCH"])
+    app.add_api_route("/api/music-admin/groups", _api_groups, methods=["GET"])
     app.add_api_route("/api/music-admin/status", _api_status, methods=["GET"])
     app.add_api_route("/api/music-admin/overview", _api_overview, methods=["GET"])
     app.add_api_route("/api/music-admin/action", _api_action, methods=["POST"])

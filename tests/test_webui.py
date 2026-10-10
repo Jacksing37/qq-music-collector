@@ -22,11 +22,19 @@ def _all_keys():
 
 def test_build_schema_covers_known_keys():
     keys = _all_keys()
+    # 嵌套子模型（window.weekly/daily/once）必须被展开成真正的字段，
+    # 而不是只出现一个 window.weekly —— 否则「每周·开始/结束」在网页端改不了
     for expected in ("enabled", "collect_override", "window.mode",
-                     "window.weekly", "playlist.sharer_style",
+                     "window.weekly.start", "window.weekly.archive",
+                     "window.daily.end", "window.once.start",
+                     "playlist.sharer_style",
                      "playlist.name_template", "card.mode", "intro.text",
                      "cache.keep_days", "clear.keep_days"):
         assert expected in keys, f"schema 缺少 {expected}"
+    assert "window.weekly" not in keys, "嵌套模型不该作为字段直接出现"
+    nested = next(f for s in W.SCHEMA for f in s["fields"]
+                  if f["key"] == "window.weekly.start")
+    assert nested["type"] == "str", "展开后的字段应是真实类型而非 model"
 
 
 def test_enum_options_detected():

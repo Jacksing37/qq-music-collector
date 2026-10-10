@@ -10,6 +10,9 @@ DASHBOARD_HTML = r"""
   --bg:#0b0f1a; --bg2:#111726; --card:rgba(255,255,255,.04); --card-bd:rgba(255,255,255,.08);
   --txt:#e8edf6; --muted:#8b97ad; --accent:#6ea8fe; --accent2:#a78bfa; --ok:#34d399; --bad:#f87171;
   --input:rgba(255,255,255,.06); --shadow:0 10px 30px rgba(0,0,0,.35); --side:#0e1320;
+  /* 配置页吸顶栈：--cfg-stick 是顶栏高度；--cfg-bar-h 由 JS 量出「配置对象」条的实际高度，
+     跳转栏据此紧贴在它下面，两条都跟着页面滚动 */
+  --cfg-stick:57px; --cfg-bar-h:0px;
   color-scheme: dark;
 }
 [data-theme="light"]{
@@ -84,6 +87,14 @@ pre.runs{margin:10px 0 0;font-size:12px;color:var(--muted);white-space:pre-wrap;
 /* 收集管理表格 */
 .gcard{background:var(--input);border:1px solid var(--card-bd);border-radius:14px;padding:14px 16px;margin-bottom:14px}
 .gtitle{font-size:15px;font-weight:600}.gtitle .cnt{font-size:12px;color:var(--muted);font-weight:400;margin-left:8px}
+/* 群卡片可折叠：标题行永远可见（手机上默认收起，点一下展开本群并收起其他群） */
+.gtitle{cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.gtitle .caret{font-size:12px;color:var(--muted);transition:transform .18s;display:inline-block}
+.gtitle .cnt{margin-left:0}
+.gtitle .gsp{flex:1}
+.gcard.collapsed .gbody{display:none}
+.gcard.collapsed .caret{transform:rotate(-90deg)}
+.gcard.focus{box-shadow:0 0 0 2px var(--accent2)}
 .gtbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px}
 .gtbl th,.gtbl td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--card-bd);vertical-align:middle}
 .gtbl th{color:var(--muted);font-weight:500;font-size:12px}
@@ -174,8 +185,16 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .log-lv-ERROR .ll,.log-lv-CRITICAL .ll{color:var(--bad)}
 .log-line.log-lv-ERROR,.log-line.log-lv-CRITICAL{background:rgba(248,113,113,.06)}
 
-/* 配置页分组跳转栏 */
-.cfg-nav{position:sticky;top:57px;z-index:20;display:flex;flex-wrap:wrap;gap:8px;
+/* 配置页：吸顶栈（「配置对象」条 + 分组跳转栏），滚动时都跟着走 */
+.cfg-bar{position:sticky;top:var(--cfg-stick);z-index:22;display:flex;align-items:center;gap:10px;
+  flex-wrap:wrap;padding:8px 12px;margin-bottom:8px;background:var(--bg2);
+  border:1px solid var(--card-bd);border-radius:14px;box-shadow:var(--shadow)}
+.cfg-bar .cb-label{font-size:13px;color:var(--muted);white-space:nowrap}
+.cfg-bar select{width:auto;min-width:150px;padding:6px 10px}
+.cfg-bar .cb-hint{font-size:12px;color:var(--muted)}
+.cfg-bar .cb-badge{font-size:12px;padding:3px 10px;border-radius:999px;border:1px solid var(--card-bd);color:var(--muted)}
+
+.cfg-nav{position:sticky;top:calc(var(--cfg-stick) + var(--cfg-bar-h));z-index:20;display:flex;flex-wrap:wrap;gap:8px;
   margin-bottom:14px;padding:10px 12px;background:var(--bg2);border:1px solid var(--card-bd);
   border-radius:14px;box-shadow:var(--shadow)}
 .cfg-nav .cn-title{font-size:12px;color:var(--muted);align-self:center;padding-right:2px}
@@ -184,7 +203,22 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .cfg-nav-btn:hover{color:var(--txt)}
 .cfg-nav-btn.active{color:var(--txt);font-weight:600;border-color:var(--accent);
   background:linear-gradient(135deg,rgba(110,168,254,.22),rgba(167,139,250,.22))}
-.cfg-sec{scroll-margin-top:118px}
+.cfg-sec{scroll-margin-top:calc(var(--cfg-stick) + var(--cfg-bar-h) + 72px)}
+
+/* 按群配置：被单独覆盖过的项高亮，并给一个「继承全局」的还原按钮 */
+.field.overridden{border-left:3px solid var(--accent2);padding-left:11px;margin-left:-14px}
+.field.overridden .flabel .ink{font-size:11px;color:var(--accent2);border:1px solid var(--accent2);
+  border-radius:999px;padding:1px 7px;margin-left:6px}
+.field.inherited .flabel .inh{font-size:11px;color:var(--muted);margin-left:6px}
+.field .frow{display:flex;align-items:flex-start;gap:8px}
+.field .frow .fctrl{flex:1;min-width:0}
+.field .revert-btn{flex:0 0 auto;padding:6px 9px;font-size:12px;color:var(--muted)}
+.field.global-only{opacity:.62}
+.fctrl.disabled input,.fctrl.disabled select,.fctrl.disabled textarea{opacity:.65;cursor:not-allowed}
+
+/* 网易云账号（内嵌在「配置 → 网易云登录」分组里） */
+.acc-box{margin-top:14px;padding-top:14px;border-top:1px dashed var(--card-bd)}
+.acc-box .acc-title{font-size:13px;color:var(--muted);margin-bottom:8px}
 
 /* ---------------- 手机 / 小屏适配 ---------------- */
 @media (max-width:900px){
@@ -209,10 +243,12 @@ button:disabled{opacity:.5;cursor:not-allowed}
   /* 配置项：标签与控件上下排布，窄屏更好点 */
   .field{grid-template-columns:1fr;gap:6px;padding:10px 0}
   .flabel{font-size:13px}
-  /* 跳转栏在手机上不吸顶（顶部已被导航条占用），随页面滚走即可 */
-  .cfg-nav{position:static;margin-bottom:12px;padding:9px 10px;gap:6px}
+  /* 吸顶栈：导航条占掉顶部 ~54px，配置对象条与跳转栏依次贴在它下面 */
+  :root{--cfg-stick:54px}
+  .cfg-bar{gap:8px;padding:7px 10px}
+  .cfg-bar select{min-width:120px}
+  .cfg-nav{padding:9px 10px;gap:6px}
   .cfg-nav-btn{padding:5px 10px;font-size:12px}
-  .cfg-sec{scroll-margin-top:70px}
   .stat-grid{grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}
   /* 表格：容器横向滚动，别把列挤成一团 */
   .gcard{overflow-x:auto;-webkit-overflow-scrolling:touch}
@@ -258,7 +294,6 @@ button:disabled{opacity:.5;cursor:not-allowed}
     <button class="nav" data-page="config">⚙ 配置</button>
     <button class="nav" data-page="aliases">✏ 昵称映射</button>
     <button class="nav" data-page="admin">🛡 管理员</button>
-    <button class="nav" data-page="account">🔑 网易云账号</button>
     <button class="nav" data-page="logs">📜 运行日志</button>
   </aside>
 
@@ -342,6 +377,14 @@ button:disabled{opacity:.5;cursor:not-allowed}
 
     <!-- 配置 -->
     <section id="page-config" class="page hidden">
+      <div class="cfg-bar" id="cfgBar">
+        <span class="cb-label">配置对象</span>
+        <select id="cfgGroupSel" title="选择给「全局默认」还是某个群单独配置"></select>
+        <span class="cb-badge" id="cfgScopeBadge">全局默认</span>
+        <span class="cb-hint" id="cfgScopeHint"></span>
+        <div class="spacer"></div>
+        <button id="cfgResetAll" class="btn-danger hidden" title="把本群所有单独设过的项恢复成继承全局默认">↺ 全部恢复继承</button>
+      </div>
       <nav id="cfgNav" class="cfg-nav hidden" aria-label="配置分组跳转"></nav>
       <div id="configForm"></div>
     </section>
@@ -372,25 +415,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
       </div>
     </section>
 
-    <!-- 网易云账号 -->
-    <section id="page-account" class="page hidden">
-      <div class="card">
-        <h2><span class="dot"></span>网易云账号登录</h2>
-        <div id="accStatus" class="muted">加载中…</div>
-        <div class="row end" style="margin-top:12px">
-          <button id="accRelogin" title="用配置里的手机号+密码（或 cookie 续期）重新登录一次">重新登录</button>
-        </div>
-        <p class="muted" style="margin-top:8px">开启「掉登录自动重登」后，写歌单简介遇到「需要登录」会自动续期 / 重登并重试；这里是手动触发一次。手机号密码在配置页的「网易云登录」里填。</p>
-        <div id="accLogin" class="hidden" style="margin-top:14px">
-          <p class="muted">粘贴浏览器 Cookie 里的 <code>MUSIC_U=xxxx</code>（只要 xx 部分也行）。建议私聊机器人用 <code>/music cookie</code> 设置。</p>
-          <input id="accCookie" placeholder="MUSIC_U=xxxx 或仅 xxxx">
-          <div class="row end" style="margin-top:12px">
-            <button id="accLogout" class="btn-danger">退出登录</button>
-            <button id="accLoginBtn" class="btn-primary">登录</button>
-          </div>
-        </div>
-      </div>
-    </section>
+    <!-- 网易云账号已并入「配置 → 网易云登录」分组，不再单开一页 -->
 
     <!-- 运行日志 -->
     <section id="page-logs" class="page hidden">
@@ -501,7 +526,13 @@ let TOKEN = localStorage.getItem(LS_KEY) || "";
 let ORIG = {}, DIRTY = {};
 let CUR_WIN = null, OV = null, COLL = null, MASTER = null, ADD_CTX = null;
 let LOG_TIMER = null, LOG_SEARCH_T = null, LOGS_LAST = [];
+/* 配置页当前在编辑哪一层：null = 全局默认，数字 = 该群的覆盖层 */
+let CFG_GID = null, CFG_OVER = new Set(), CFG_GROUPS = [];
+/* 从概览「去管理 →」进来时要展开的目标群（渲染完群卡片后一次性消费掉） */
+let FOCUS_GID = null;
 const MASTER_KEY = "__master__";
+/* 手机上群卡片默认折叠（桌面保持展开） */
+const isNarrow = () => window.matchMedia("(max-width:900px)").matches;
 function getColl(wk){ return wk===MASTER_KEY ? MASTER : COLL; }
 const $ = (s, r=document) => r.querySelector(s);
 const csrf = {"Authorization": "Bearer " + TOKEN};
@@ -544,7 +575,6 @@ function switchPage(name){
   if(name==="config") loadConfig();
   if(name==="aliases") loadAliases();
   if(name==="admin") loadAdmin();
-  if(name==="account") loadAccount();
   if(name==="logs"){ loadLogs(); startLogTimer(); }
 }
 document.querySelectorAll(".nav").forEach(b=> b.onclick=()=>switchPage(b.dataset.page));
@@ -588,7 +618,11 @@ async function loadOverview(){
         <button class="btn-primary" style="float:right;padding:4px 10px" data-g="${g.group_id}">去管理 →</button></div>`;
       gl.appendChild(d);
     });
-    gl.querySelectorAll("button[data-g]").forEach(b=> b.onclick=()=>{ switchPage("collect"); });
+    gl.querySelectorAll("button[data-g]").forEach(b=> b.onclick=()=>{
+      // 进入收集管理页后展开这个群、收起其他群（手机上尤其有用）
+      FOCUS_GID = parseInt(b.dataset.g, 10);
+      switchPage("collect");
+    });
   }catch(e){ if(e.message!=="unauthorized") console.warn("overview 加载失败", e); }
 }
 $("#winSel").onchange = e=>{ CUR_WIN=e.target.value; loadOverview(); };
@@ -655,6 +689,7 @@ async function loadCollect(){
     const groups = COLL.groups||[];
     if(!groups.length){ wrap.innerHTML=`<div class="empty">该窗口下暂无收集记录。</div>`; return; }
     groups.forEach(g=> wrap.appendChild(renderGroupCard(g, COLL.selected_window)) );
+    applyFocus(wrap);
   }catch(e){ if(e.message!=="unauthorized") console.warn("collect 加载失败", e); }
 }
 async function loadMaster(){
@@ -668,7 +703,7 @@ async function loadMaster(){
     const wrap=$("#masterGroups"); wrap.innerHTML="";
     const groups = MASTER.groups||[];
     if(!groups.length){ wrap.innerHTML=`<div class="empty">总库还是空的。分享歌曲（启用总库后）或点上方「📥 汇总现有窗口到总库」即可填充。</div>`; }
-    else { groups.forEach(g=> wrap.appendChild(renderGroupCard(g, MASTER_KEY)) ); }
+    else { groups.forEach(g=> wrap.appendChild(renderGroupCard(g, MASTER_KEY)) ); applyFocus(wrap); }
     fillImportGroup();
   }catch(e){ if(e.message!=="unauthorized") console.warn("master 加载失败", e); }
 }
@@ -715,6 +750,34 @@ function onChkClick(e, chk, gid){
   const selall = card.querySelector(`input.selall[data-g="${gid}"]`);
   if (selall) selall.checked = all.length > 0 && all.every(c=> c.checked);
 }
+/* 群卡片折叠：手机上默认收起（列表很长时不至于刷屏），桌面保持展开。
+   点某个群标题 → 展开它并收起同容器里的其他群（手风琴），避免手机上要找半天。 */
+function setCardCollapsed(card, collapsed){
+  card.classList.toggle("collapsed", !!collapsed);
+  const caret = card.querySelector(".gtitle .caret");
+  if(caret) caret.textContent = collapsed ? "▸" : "▾";
+}
+function toggleGroupCard(card, exclusive){
+  const collapsed = !card.classList.contains("collapsed");
+  if(exclusive && !collapsed){
+    const wrap = card.parentElement;
+    Array.from(wrap.children).forEach(c=>{ if(c!==card && c.classList.contains("gcard")) setCardCollapsed(c, true); });
+  }
+  setCardCollapsed(card, collapsed);
+}
+/* 从概览「去管理 →」进来：展开目标群、收起其他群，并滚到它 */
+function applyFocus(wrap){
+  if(FOCUS_GID===null) return;
+  const gid = FOCUS_GID; FOCUS_GID = null;
+  const cards = Array.from(wrap.querySelectorAll(".gcard"));
+  if(!cards.length) return;
+  cards.forEach(c=>{
+    const hit = parseInt(c.dataset.gid,10)===gid;
+    setCardCollapsed(c, !hit);
+    c.classList.toggle("focus", hit);
+    if(hit) c.scrollIntoView({behavior:"smooth", block:"start"});
+  });
+}
 function renderGroupCard(g, wk){
   const card=document.createElement("div"); card.className="gcard"; card.dataset.wk=wk||""; card.dataset.gid=g.group_id;
   const pl = g.playlist_url
@@ -759,7 +822,15 @@ function renderGroupCard(g, wk){
   const tbl=`<table class="gtbl"><thead><tr>
     <th style="width:34px"><input type="checkbox" class="selall" data-g="${g.group_id}" title="全选 / 取消全选本群"></th><th>#</th><th>歌曲 / 歌手（可拖拽行排序）</th><th>分享者</th><th>平台</th><th>收录日期</th><th>匹配</th><th></th>
   </tr></thead><tbody>${rows}</tbody></table>`;
-  card.innerHTML=`<div class="gtitle">群 ${g.group_id}<span class="cnt">${g.count} 首</span></div>${ops}${tbl}`;
+  card.innerHTML=`<div class="gtitle" title="点击展开 / 收起本群">
+      <span class="caret">▾</span><span>群 ${g.group_id}</span><span class="cnt">${g.count} 首</span>
+    </div><div class="gbody">${ops}${tbl}</div>`;
+  const head = card.querySelector(".gtitle");
+  if(head) head.onclick = (e)=>{
+    if(e.target.closest("button,input,a")) return;   // 标题行里的按钮不触发折叠
+    toggleGroupCard(card, isNarrow());
+  };
+  if(isNarrow()) setCardCollapsed(card, true);       // 手机上默认全部收起
   card.querySelectorAll("button[data-act]").forEach(b=> b.onclick=()=>groupAction(b.dataset.act,b.dataset.g, wk));
   card.querySelectorAll("button[data-mv]").forEach(b=> b.onclick=()=>moveRow(g.group_id, parseInt(b.dataset.idx,10), parseInt(b.dataset.mv,10), wk));
   card.querySelectorAll("button[data-edit]").forEach(b=> b.onclick=()=>openEdit(g.group_id, parseInt(b.dataset.idx,10), wk));
@@ -947,28 +1018,38 @@ $("#pvClose").onclick=closePreview; $("#pvMask").onclick=closePreview;
 document.addEventListener("keydown", e=>{ if(e.key==="Escape") closePreview(); });
 
 /* ---- 配置表单 ---- */
-function fieldControl(f, value){
+/* 吸顶栈：量出「配置对象」条的真实高度写进 --cfg-bar-h，跳转栏才知道该贴在哪 */
+function syncStickyOffsets(){
+  const bar=$("#cfgBar");
+  const h = bar && !bar.classList.contains("hidden") ? bar.offsetHeight : 0;
+  document.documentElement.style.setProperty("--cfg-bar-h", (h+8)+"px");
+}
+window.addEventListener("resize", ()=>{ syncStickyOffsets(); if($("#cfgGroupSel")) buildGroupSelOptions(); });
+
+function fieldControl(f, value, disabled){
   const wrap=document.createElement("div"); wrap.className="fctrl";
+  if(disabled) wrap.classList.add("disabled");
   if(f.type==="bool"){
     const id="f_"+f.key.replace(/\./g,"_"); const lbl=document.createElement("label"); lbl.className="chk";
     const cb=document.createElement("input"); cb.type="checkbox"; cb.id=id; cb.checked=!!value;
-    cb.onchange=()=>markDirty(f.key, cb.checked);
+    if(!disabled) cb.onchange=()=>markDirty(f.key, cb.checked);
     const sp=document.createElement("span"); sp.textContent=f.label; lbl.appendChild(cb); lbl.appendChild(sp); wrap.appendChild(lbl);
   } else if(f.type==="enum"){
     const sel=document.createElement("select");
     (f.enum||[]).forEach(o=>{const op=document.createElement("option");op.value=o;op.textContent=o;sel.appendChild(op);});
-    sel.value=value??""; sel.onchange=()=>markDirty(f.key,sel.value); wrap.appendChild(sel);
+    sel.value=value??""; if(!disabled) sel.onchange=()=>markDirty(f.key,sel.value); wrap.appendChild(sel);
   } else if(f.type==="int"||f.type==="float"){
     const inp=document.createElement("input"); inp.type="number"; inp.value=value??"";
-    inp.step = f.type==="int"?"1":"any"; inp.oninput=()=>markDirty(f.key,inp.value); wrap.appendChild(inp);
+    inp.step = f.type==="int"?"1":"any"; if(!disabled) inp.oninput=()=>markDirty(f.key,inp.value); wrap.appendChild(inp);
   } else if(f.type==="intlist"||f.type==="strlist"){
     const inp=document.createElement("input"); inp.type="text";
     inp.value=Array.isArray(value)?value.join(", "):(value??""); inp.placeholder="逗号分隔";
-    inp.oninput=()=>markDirty(f.key,inp.value); wrap.appendChild(inp);
+    if(!disabled) inp.oninput=()=>markDirty(f.key,inp.value); wrap.appendChild(inp);
   } else {
-    if(f.multiline){ const ta=document.createElement("textarea"); ta.value=value??""; ta.oninput=()=>markDirty(f.key,ta.value); wrap.appendChild(ta); }
-    else { const inp=document.createElement("input"); inp.type=f.secret?"password":"text"; inp.value=value??""; inp.oninput=()=>markDirty(f.key,inp.value); wrap.appendChild(inp); }
+    if(f.multiline){ const ta=document.createElement("textarea"); ta.value=value??""; if(!disabled) ta.oninput=()=>markDirty(f.key,ta.value); wrap.appendChild(ta); }
+    else { const inp=document.createElement("input"); inp.type=f.secret?"password":"text"; inp.value=value??""; if(!disabled) inp.oninput=()=>markDirty(f.key,inp.value); wrap.appendChild(inp); }
   }
+  if(disabled) wrap.querySelectorAll("input,select,textarea").forEach(x=>x.disabled=true);
   return wrap;
 }
 function markDirty(key,val){
@@ -986,8 +1067,29 @@ function refreshDirty(){
     if(ctrl) ctrl.classList.toggle("dirty", !!DIRTY[k]);
   });
 }
-function renderForm(schema, values){
+
+/* 「配置对象」下拉：全局默认 + 各群（群号排序） */
+function buildGroupSelOptions(){
+  const sel=$("#cfgGroupSel"); if(!sel) return;
+  const keep = CFG_GID===null ? "" : String(CFG_GID);
+  sel.innerHTML = "";
+  const op0=document.createElement("option"); op0.value=""; op0.textContent="全局默认（所有群）"; sel.appendChild(op0);
+  CFG_GROUPS.forEach(g=>{
+    const op=document.createElement("option"); op.value=String(g);
+    const over=(CFG_OVER_BY_GROUP[String(g)]||[]).length;
+    op.textContent = `群 ${g}` + (over?`（已单独配置 ${over} 项）`:"");
+    sel.appendChild(op);
+  });
+  sel.value = (keep && CFG_GROUPS.some(g=>String(g)===keep)) ? keep : "";
+  if(sel.value!==keep) CFG_GID = sel.value==="" ? null : parseInt(sel.value,10);
+}
+let CFG_OVER_BY_GROUP = {};
+
+function renderForm(schema, values, meta){
+  meta = meta || {};
   ORIG=Object.assign({},values); DIRTY={};
+  CFG_OVER = new Set(meta.overridden||[]);
+  const isGroup = CFG_GID!==null;
   const form=$("#configForm"); form.innerHTML="";
   const nav=$("#cfgNav"); nav.innerHTML="";
   const navItems=[];
@@ -997,12 +1099,32 @@ function renderForm(schema, values){
     const h=document.createElement("h2"); h.innerHTML=`<span class="dot"></span>${sec.title}`; card.appendChild(h);
     sec.fields.forEach(f=>{
       if(f.type==="map") return;
-      const fr=document.createElement("div"); fr.className="field"; fr.dataset.key=f.key;
+      const globalOnly = !!f.global_only;
+      const locked = isGroup && globalOnly;
+      const overridden = isGroup && CFG_OVER.has(f.key);
+      const fr=document.createElement("div");
+      fr.className="field"+(overridden?" overridden":"")+(locked?" global-only":"");
+      fr.dataset.key=f.key;
       const lab=document.createElement("div"); lab.className="flabel";
-      lab.innerHTML=`${f.label}${f.hint?`<span class="hint">${f.hint}</span>`:""}`;
-      const ctrl=fieldControl(f, values[f.key]);
-      fr.appendChild(lab); fr.appendChild(ctrl); card.appendChild(fr);
+      let extra = "";
+      if(overridden) extra += `<span class="ink">本群自定义</span>`;
+      else if(isGroup && !locked) extra += `<span class="inh">继承全局</span>`;
+      if(locked) extra = `<span class="inh">进程级设置，始终取全局值</span>`;
+      lab.innerHTML=`${f.label}${extra}${f.hint?`<span class="hint">${f.hint}</span>`:""}`;
+      const row=document.createElement("div"); row.className="frow";
+      const ctrl=fieldControl(f, values[f.key], locked);
+      row.appendChild(ctrl);
+      if(overridden){
+        const rb=document.createElement("button"); rb.type="button";
+        rb.className="revert-btn"; rb.textContent="↺ 继承全局";
+        rb.title="删掉本项的本群自定义值，恢复继承全局默认";
+        rb.onclick=()=>revertOne(f.key);
+        row.appendChild(rb);
+      }
+      fr.appendChild(lab); fr.appendChild(row); card.appendChild(fr);
     });
+    // 网易云登录分组：把原先独立的「网易云账号」页内嵌到这里
+    if(sec.key==="netease") card.appendChild(buildAccountBlock());
     form.appendChild(card);
     // 顶部跳转栏：分组多、页面长，点一下直接滚到对应分组
     const btn=document.createElement("button");
@@ -1019,6 +1141,51 @@ function renderForm(schema, values){
   CFG_NAV=navItems;
   refreshDirty();
   syncCfgNav();
+  syncStickyOffsets();
+  updateScopeBar();
+}
+
+function updateScopeBar(){
+  const badge=$("#cfgScopeBadge"), hint=$("#cfgScopeHint"), btn=$("#cfgResetAll");
+  if(CFG_GID===null){
+    badge.textContent="全局默认";
+    hint.textContent="这里的改动对所有「没有单独配置过」的群生效";
+    btn.classList.add("hidden");
+  } else {
+    badge.textContent="群 "+CFG_GID;
+    hint.textContent = CFG_OVER.size
+      ? `已单独配置 ${CFG_OVER.size} 项，其余继承全局默认`
+      : "尚未单独配置，全部继承全局默认";
+    btn.classList.toggle("hidden", CFG_OVER.size===0);
+  }
+  const sel=$("#cfgGroupSel");
+  if(sel) sel.value = CFG_GID===null ? "" : String(CFG_GID);
+}
+
+/* 网易云账号：状态 + 重新登录 + 粘贴 MUSIC_U 登录 / 退出 */
+function buildAccountBlock(){
+  const box=document.createElement("div"); box.className="acc-box";
+  box.innerHTML=`
+    <div class="acc-title">网易云账号</div>
+    <div id="accStatus" class="muted">加载中…</div>
+    <div class="row end" style="margin-top:12px">
+      <button id="accRelogin" title="用配置里的手机号+密码（或 cookie 续期）重新登录一次">重新登录</button>
+    </div>
+    <p class="muted" style="margin-top:8px">开启「掉登录自动重登」后，写歌单简介遇到「需要登录」会自动续期 / 重登并重试；上面这个按钮是手动触发一次。手机号密码填在本分组里。</p>
+    <div id="accLogin" class="hidden" style="margin-top:14px">
+      <p class="muted">粘贴浏览器 Cookie 里的 <code>MUSIC_U=xxxx</code>（只要 xx 部分也行）。建议私聊机器人用 <code>/music cookie</code> 设置。</p>
+      <input id="accCookie" placeholder="MUSIC_U=xxxx 或仅 xxxx">
+      <div class="row end" style="margin-top:12px">
+        <button id="accLogout" class="btn-danger">退出登录</button>
+        <button id="accLoginBtn" class="btn-primary">登录</button>
+      </div>
+    </div>`;
+  // 元素建好后再绑事件（这几个按钮每次重建表单都要重新绑一次）
+  box.querySelector("#accLoginBtn").onclick=onAccLogin;
+  box.querySelector("#accLogout").onclick=onAccLogout;
+  box.querySelector("#accRelogin").onclick=onAccRelogin;
+  setTimeout(loadAccount, 0);
+  return box;
 }
 
 /* 滚动时高亮当前所在的分组 */
@@ -1030,28 +1197,77 @@ function syncCfgNav(){
   CFG_NAV.forEach((it,i)=>it.btn.classList.toggle("active", i===active));
 }
 window.addEventListener("scroll",()=>{ if(!$("#page-config").classList.contains("hidden")) syncCfgNav(); },{passive:true});
+
+function cfgQuery(){ return CFG_GID===null ? "" : "?group_id="+encodeURIComponent(CFG_GID); }
 async function loadConfig(){
   try{
-    const [c,s]=await Promise.all([api("/api/music-admin/config"), api("/api/music-admin/status")]);
-    const cj=await c.json(); renderForm(cj.schema, cj.values);
+    const q=cfgQuery();
+    const [c,s,g]=await Promise.all([
+      api("/api/music-admin/config"+q),
+      api("/api/music-admin/status"+q),
+      api("/api/music-admin/groups"),
+    ]);
+    const cj=await c.json(); renderForm(cj.schema, cj.values, cj);
     const sj=await s.json();
     $("#statusPill").textContent = sj.collecting?"● 收集中":"○ 空闲";
     $("#statusPill").className="status-pill"+(sj.collecting?" on":"");
+    // 群列表与「各群覆盖了几项」取自 groups 接口，下拉里才能标出「已单独配置 N 项」
+    let gj={};
+    try{ gj=await g.json(); }catch(e){ gj={}; }
+    const gids = (gj.groups||[]).length ? gj.groups : (cj.groups||[]);
+    if(gids.length || CFG_GROUPS.length===0) CFG_GROUPS = gids;
+    CFG_OVER_BY_GROUP = gj.overrides||{};
+    buildGroupSelOptions();
+    updateScopeBar();
     flashOp("");
   }catch(e){ if(e.message!=="unauthorized") flashOp("加载失败: "+e.message,"bad"); }
 }
 async function saveConfig(){
-  setMsg("保存中…");
+  const scope = CFG_GID===null ? "全局默认" : ("群 "+CFG_GID);
+  setMsg(`保存到「${scope}」中…`);
   try{
-    const r=await api("/api/music-admin/config",{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({values:DIRTY})});
+    const r=await api("/api/music-admin/config",{method:"PATCH",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({values:DIRTY, group_id:CFG_GID})});
     const j=await r.json();
     if(!j.ok){ const msgs=Object.entries(j.errors||{}).map(([k,v])=>`${k}: ${v}`).join("；"); setMsg("保存失败 — "+msgs,"bad"); return; }
     setMsg("已保存 ✓","ok"); await loadConfig();
   }catch(e){ setMsg("保存失败: "+e.message,"bad"); }
 }
+/* 取消某一项的本群覆盖，恢复继承全局默认 */
+async function revertOne(key){
+  if(CFG_GID===null) return;
+  try{
+    const j=await (await api("/api/music-admin/config",{method:"PATCH",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({group_id:CFG_GID, reset:[key]})})).json();
+    if(!j.ok){ toast("恢复失败："+JSON.stringify(j.errors||{}),"bad"); return; }
+    toast("已恢复继承全局默认","ok");
+    await loadConfig();
+  }catch(e){ toast("恢复失败："+e.message,"bad"); }
+}
+async function revertAll(){
+  if(CFG_GID===null || !CFG_OVER.size) return;
+  if(!confirm(`确定把「群 ${CFG_GID}」单独配置过的 ${CFG_OVER.size} 项全部恢复成继承全局默认？`)) return;
+  try{
+    const j=await (await api("/api/music-admin/config",{method:"PATCH",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({group_id:CFG_GID, reset:Array.from(CFG_OVER)})})).json();
+    if(!j.ok){ toast("恢复失败："+JSON.stringify(j.errors||{}),"bad"); return; }
+    toast("已全部恢复继承全局默认","ok");
+    await loadConfig();
+  }catch(e){ toast("恢复失败："+e.message,"bad"); }
+}
 function setMsg(t,kind=""){ const m=$("#saveMsg"); m.textContent=t; m.className="msg"+(kind?(" "+kind):""); }
 $("#saveBtn").onclick=saveConfig;
 $("#resetBtn").onclick=()=>{ DIRTY={}; document.querySelectorAll(".fctrl.dirty").forEach(c=>c.classList.remove("dirty")); refreshDirty(); setMsg("已重置本地改动"); };
+$("#cfgResetAll").onclick=revertAll;
+$("#cfgGroupSel").onchange=async (e)=>{
+  const v=e.target.value;
+  if(Object.keys(DIRTY).length && !confirm("当前有未保存的改动，切换配置对象会丢弃它们，继续？")){
+    updateScopeBar(); return;
+  }
+  DIRTY={};
+  CFG_GID = v==="" ? null : parseInt(v,10);
+  await loadConfig();
+};
 
 /* ---- 昵称映射 ---- */
 function dictToLines(m){ return Object.keys(m||{}).map(k=>k+"="+m[k]).join("\n"); }
@@ -1093,28 +1309,29 @@ $("#suSave").onclick=async()=>{
   }catch(e){ $("#suNote").textContent="保存失败: "+e.message; }
 };
 
-/* ---- 网易云账号 ---- */
+/* ---- 网易云账号（内嵌在「配置 → 网易云登录」分组里） ---- */
 async function loadAccount(){
   try{ const j=await (await api("/api/music-admin/account")).json(); renderAccount(j); }
   catch(e){ if(e.message!=="unauthorized") console.warn("account 加载失败",e); }
 }
 function renderAccount(j){
-  const box=$("#accStatus");
-  if(j.valid){ box.innerHTML=`<span class="badge ok">已登录</span> 昵称：<b>${esc(j.nickname||"")}</b>　userId：${esc(j.userId||"")}`; $("#accLogin").classList.add("hidden"); }
-  else if(j.logged_in){ box.innerHTML=`<span class="badge bad">凭证存在但已失效</span> 请重新登录。`; $("#accLogin").classList.remove("hidden"); }
-  else { box.innerHTML=`<span class="badge bad">未登录</span> 请粘贴 MUSIC_U 登录。`; $("#accLogin").classList.remove("hidden"); }
+  const box=$("#accStatus"); if(!box) return;   // 配置页还没渲染时不报错
+  const login=$("#accLogin");
+  if(j.valid){ box.innerHTML=`<span class="badge ok">已登录</span> 昵称：<b>${esc(j.nickname||"")}</b>　userId：${esc(j.userId||"")}`; if(login) login.classList.add("hidden"); }
+  else if(j.logged_in){ box.innerHTML=`<span class="badge bad">凭证存在但已失效</span> 请重新登录。`; if(login) login.classList.remove("hidden"); }
+  else { box.innerHTML=`<span class="badge bad">未登录</span> 请粘贴 MUSIC_U 登录。`; if(login) login.classList.remove("hidden"); }
 }
-$("#accLoginBtn").onclick=async()=>{
-  const cookie=$("#accCookie").value.trim(); if(!cookie){ return; }
+async function onAccLogin(){
+  const inp=$("#accCookie"); const cookie=(inp?inp.value:"").trim(); if(!cookie){ return; }
   try{ const j=await (await api("/api/music-admin/account",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"login",cookie})})).json();
-    if(!j.ok){ $("#accStatus").textContent=j.message; return; } renderAccount(j); loadStatus(); }
-  catch(e){ $("#accStatus").textContent="登录失败: "+e.message; }
-};
-$("#accLogout").onclick=async()=>{
+    if(!j.ok){ const b=$("#accStatus"); if(b) b.textContent=j.message; return; } renderAccount(j); loadStatus(); }
+  catch(e){ const b=$("#accStatus"); if(b) b.textContent="登录失败: "+e.message; }
+}
+async function onAccLogout(){
   try{ const j=await (await api("/api/music-admin/account",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"logout"})})).json();
     if(j.ok){ renderAccount(j); loadStatus(); } } catch(e){}
-};
-$("#accRelogin").onclick=async()=>{
+}
+async function onAccRelogin(){
   const btn=$("#accRelogin"); const old=btn.textContent; btn.disabled=true; btn.textContent="重登中…";
   try{
     const j=await (await api("/api/music-admin/account",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"relogin"})})).json();
@@ -1122,7 +1339,7 @@ $("#accRelogin").onclick=async()=>{
     renderAccount(j);
   }catch(e){ toast("重新登录失败: "+e.message,"bad"); }
   finally{ btn.disabled=false; btn.textContent=old; }
-};
+}
 
 /* ---- 运行日志 ---- */
 function stopLogTimer(){ if(LOG_TIMER){ clearInterval(LOG_TIMER); LOG_TIMER=null; } }

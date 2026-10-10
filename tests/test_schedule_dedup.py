@@ -99,6 +99,52 @@ def test_card_breaker():
     assert off.blocked("qq", 0, 10) is False
 
 
+def test_per_group_window_schedules():
+    """某群单独改过收集窗口 → 为它注册独立任务，并从全局任务里摘出去。
+
+    否则同一时刻该群会被全局任务和按群任务各播报一次（撞点重复）。
+    """
+    from music_collector import scheduler as sch
+    from music_collector.config import config_manager, group_overrides
+
+    cfg = config_manager.config
+    weekly = cfg.window.weekly
+    snap = (weekly.start, weekly.summary, weekly.end, weekly.archive)
+    weekly.start, weekly.summary = "MON 20:00", "SUN 22:00"
+    weekly.end = weekly.archive = "SUN 22:30"
+
+    gid, other = 777000111, 777000222
+    try:
+        sch.reload_jobs()
+        ids = {j.id for j in sch.scheduler.get_jobs()}
+        assert "music_collector_start" in ids
+        assert not any(i.endswith(f"_g{gid}") for i in ids)
+        assert sch.per_group_scheduled() == set()
+
+        group_overrides.set(gid, "window.weekly.start", "TUE 09:00")
+        sch.reload_jobs()
+        ids = {j.id for j in sch.scheduler.get_jobs()}
+        assert f"music_collector_start_g{gid}" in ids, ids
+        assert gid in sch.per_group_scheduled()
+
+        # 全局任务必须把该群排除掉，否则重复播报
+        assert sch._global_targets([gid, other], "2026-W01") == [other]
+
+        # 取消覆盖 → 按群任务撤掉、标记清空
+        group_overrides.clear(gid)
+        sch.reload_jobs()
+        ids = {j.id for j in sch.scheduler.get_jobs()}
+        assert not any(i.endswith(f"_g{gid}") for i in ids), ids
+        assert sch.per_group_scheduled() == set()
+        assert sch._global_targets([gid, other], "2026-W01") == [gid, other]
+    finally:
+        group_overrides.clear(gid)
+        weekly.start, weekly.summary, weekly.end, weekly.archive = snap
+        sch.reload_jobs()
+        sch.remove_jobs()
+        assert sch.per_group_scheduled() == set()
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

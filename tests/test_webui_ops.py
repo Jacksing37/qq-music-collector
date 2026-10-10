@@ -76,7 +76,8 @@ class _FakeService:
         def __init__(self): self.key = "2026-W33"
     @property
     def config(self): return self._Cfg(self._groups)
-    def current_window(self): return _State()
+    def cfg(self, group_id=None): return self._Cfg(self._groups)
+    def current_window(self, group_id=None): return _State()
     @property
     def netease(self):
         class _N:
@@ -104,7 +105,7 @@ class _FakeService:
         async def get_archive(self, gid, wk): return getattr(self._p, "_archives", {}).get((gid, wk))
     @property
     def store(self): return self._Store(self)
-    def set_collect_override(self, value):
+    def set_collect_override(self, value, group_id=None):
         self.override_calls.append(value)
         return {"on": "已开启", "off": "已关闭", "auto": "已恢复"}[value]
     async def target_groups(self, wk): return list(self._songs.keys())

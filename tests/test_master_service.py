@@ -235,7 +235,7 @@ async def test_build_master_dup_text_period_date():
     orig_count = svc_singleton.store.count
     orig_cw = svc_singleton.current_window
     svc_singleton.store.count = _count
-    svc_singleton.current_window = lambda: type("S", (), {"label": "x"})()
+    svc_singleton.current_window = lambda group_id=None: type("S", (), {"label": "x"})()
     try:
         text = await init_mod.build_master_dup_text(song, 3, 6001, "李四")
     finally:

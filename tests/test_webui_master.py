@@ -83,7 +83,10 @@ class _FakeService:
     def config(self):
         return self._Cfg()
 
-    def current_window(self):
+    def cfg(self, group_id=None):
+        return self._Cfg()
+
+    def current_window(self, group_id=None):
         return _State()
 
     @property

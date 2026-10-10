@@ -21,7 +21,10 @@ class _FakeService:
     class _State:
         key = "W1"
 
-    def current_window(self):
+    def cfg(self, group_id=None):
+        return self._State()
+
+    def current_window(self, group_id=None):
         return self._State()
 
     async def manual_add_song(self, gid, wk, song):

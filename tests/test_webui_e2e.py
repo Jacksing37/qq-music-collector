@@ -63,5 +63,65 @@ def test_endpoints():
         print("webui e2e OK")
 
 
+def test_per_group_endpoints():
+    """按群配置：下拉数据源 / 按群读写 / 恢复继承 / 进程级项自动落全局。"""
+    app = get_app()
+    gid = 999000111
+    with TestClient(app) as client:
+        H = {"Authorization": "Bearer smoke-token"}
+
+        # 下拉数据源
+        g = client.get("/api/music-admin/groups", headers=H)
+        assert g.status_code == 200
+        assert "groups" in g.json() and "overrides" in g.json()
+
+        # 按群写一个值
+        base = client.get("/api/music-admin/config", headers=H).json()["values"]
+        p = client.patch("/api/music-admin/config", headers=H,
+                         json={"group_id": gid, "values": {"playlist.seq": 4321}})
+        assert p.status_code == 200 and p.json()["ok"] is True
+
+        # 群视图能读到覆盖值 + 标记为「已覆盖」，且未覆盖项继承全局
+        c = client.get(f"/api/music-admin/config?group_id={gid}", headers=H).json()
+        assert c["group_id"] == gid
+        assert c["values"]["playlist.seq"] == 4321
+        assert "playlist.seq" in c["overridden"]
+        assert c["values"]["window.mode"] == base["window.mode"]
+        # 全局视图不受影响
+        assert client.get("/api/music-admin/config", headers=H).json()["values"]["playlist.seq"] == base["playlist.seq"]
+
+        # 群出现在下拉里，并标出覆盖项数
+        gj = client.get("/api/music-admin/groups", headers=H).json()
+        assert gid in gj["groups"]
+        assert "playlist.seq" in gj["overrides"][str(gid)]
+
+        # 按群状态接口
+        s = client.get(f"/api/music-admin/status?group_id={gid}", headers=H)
+        assert s.status_code == 200 and "window_label" in s.json()
+
+        # 进程级配置项：带群号提交也应落到全局，不进群覆盖
+        old_keep = base["clear.keep_days"]
+        p2 = client.patch("/api/music-admin/config", headers=H,
+                          json={"group_id": gid, "values": {"clear.keep_days": old_keep}})
+        assert p2.status_code == 200 and p2.json()["ok"] is True
+        assert "clear.keep_days" not in client.get(
+            f"/api/music-admin/config?group_id={gid}", headers=H).json()["overridden"]
+
+        # 恢复继承
+        r = client.patch("/api/music-admin/config", headers=H,
+                         json={"group_id": gid, "reset": ["playlist.seq"]})
+        assert r.status_code == 200 and r.json()["ok"] is True
+        c2 = client.get(f"/api/music-admin/config?group_id={gid}", headers=H).json()
+        assert c2["values"]["playlist.seq"] == base["playlist.seq"]
+        assert "playlist.seq" not in c2["overridden"]
+
+        # 全局层没有可恢复的覆盖
+        r2 = client.patch("/api/music-admin/config", headers=H, json={"reset": ["playlist.seq"]})
+        assert r2.status_code == 400 and r2.json()["ok"] is False
+
+        print("webui per-group OK")
+
+
 if __name__ == "__main__":
     test_endpoints()
+    test_per_group_endpoints()
