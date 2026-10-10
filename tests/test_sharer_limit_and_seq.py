@@ -324,6 +324,55 @@ async def test_sharer_limit_text_placeholders():
         service.store = real_store
 
 
+async def test_delete_releases_sharer_claim():
+    print("\n[G] 管理员删掉本期的歌 → 该分享者的名额随之释放")
+    tmp = Path(tempfile.mkdtemp())
+    svc, store, api = _make_svc(tmp)
+    await store.init()
+    gid = 7007
+    config_manager.config.playlist.one_per_sharer = True
+
+    async def _resolve(link):
+        return _song(link.song_id, f"歌{link.song_id}")
+
+    real = svc.providers.resolve
+    svc.providers.resolve = _resolve
+    try:
+        r1 = await svc.handle_segments(gid, _seg("1101"), 123, "张三")
+        check("张三五首发被收录", len(r1.accepted) == 1, str(r1.accepted))
+        r2 = await svc.handle_segments(gid, _seg("1201"), 456, "李四")
+        check("李四的首发也被收录", len(r2.accepted) == 1, str(r2.accepted))
+        r3 = await svc.handle_segments(gid, _seg("1102"), 123, "张三")
+        check("张三第二首被拦", len(r3.sharer_limited) == 1, str(r3.sharer_limited))
+
+        wk = svc.current_window().key
+        n = await svc.clear_indices(gid, wk, [1])        # 删掉本期第 1 首（张三的）
+        check("按序号删除成功", n == 1, str(n))
+        check("张三的占位记录已释放",
+              await store.get_sharer_claim(gid, wk, 123) is None)
+        check("李四的占位不受影响",
+              await store.get_sharer_claim(gid, wk, 456) is not None)
+
+        r4 = await svc.handle_segments(gid, _seg("1103"), 123, "张三")
+        check("删掉后张三可以再分享", len(r4.accepted) == 1, str(r4.accepted))
+        check("再分享不再被拦", len(r4.sharer_limited) == 0, str(r4.sharer_limited))
+
+        # 清空整个窗口同样要释放全部占位
+        await svc.clear_window(gid, wk)
+        check("清空窗口后占位也没了",
+              await store.get_sharer_claim(gid, wk, 123) is None
+              and await store.get_sharer_claim(gid, wk, 456) is None)
+
+        # 总库是跨窗口聚合视图：在里面删歌不该误放某个具体窗口的名额
+        await store.add_sharer_claim(gid, wk, 123, "歌1105")
+        released = await store.release_claims_for(gid, MASTER_KEY, [123])
+        check("总库视图删除不释放窗口占位", released == 0, str(released))
+        check("那个占位仍然在",
+              await store.get_sharer_claim(gid, wk, 123) is not None)
+    finally:
+        svc.providers.resolve = real
+
+
 async def main() -> None:
     await test_auto_archive_consumes_seq()
     await test_master_auto_archive_consumes_seq()
@@ -331,6 +380,7 @@ async def main() -> None:
     await test_matched_song_has_no_notice()
     await test_one_per_sharer()
     await test_sharer_limit_text_placeholders()
+    await test_delete_releases_sharer_claim()
     print("\n====================================================")
     print(f"通过 {PASSED} 项，失败 {FAILED} 项")
     if FAILED:

@@ -186,6 +186,11 @@ FIELD_META["logs.file"] = (
     "额外把日志写到该文件（相对路径基于项目根目录），按 5MB 轮转、保留 3 份，可跨重启留存；留空表示不落盘。内存缓冲不受影响",
     False,
 )
+FIELD_META["logs.trace_messages"] = (
+    "记录收发消息",
+    "把「收到的群消息」和「机器人发出的回复」都记一条摘要（含普通聊天）。想在日志页看清谁在什么时候发了什么就保持开启；嫌吵可关掉，收集开关 / 改设置 / 归档结果等事件日志仍会记录",
+    False,
+)
 
 
 # -------------------------------------------------------------------- 网易云登录字段元信息
@@ -932,9 +937,16 @@ async def _api_logs(request: Request):
         limit = None
     return JSONResponse({
         "ok": True,
-        "logs": logbuffer.snapshot(level=qp.get("level"), query=qp.get("q"), limit=limit),
+        "logs": logbuffer.snapshot(
+            level=qp.get("level"),
+            query=qp.get("q"),
+            limit=limit,
+            source=qp.get("source"),
+        ),
         "stats": logbuffer.stats(),
         "levels": list(logbuffer.LEVELS),
+        "sources": logbuffer.sources(),
+        "bot_logger": logbuffer.BOT_LOGGER,
     })
 
 

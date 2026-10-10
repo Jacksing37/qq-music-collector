@@ -102,6 +102,50 @@ def test_snapshot_limit_keeps_newest() -> None:
     assert len(logbuffer.buffer.snapshot(limit="abc")) == 10
 
 
+def test_snapshot_source_filter() -> None:
+    """按 logger 名过滤：服务器上噪音来自 nonebot（协议端）与 uvicorn（网页请求）。"""
+    _reset()
+    logbuffer.buffer.push("INFO", logbuffer.BOT_LOGGER, "开始归档")
+    logbuffer.buffer.push("SUCCESS", "nonebot", "OneBot V11 | [message.group.normal] ...")
+    logbuffer.buffer.push("INFO", "uvicorn", 'GET /api/music-admin/logs HTTP/1.1" 200')
+    logbuffer.buffer.push("WARNING", logbuffer.BOT_LOGGER, "写简介失败")
+
+    assert len(logbuffer.buffer.snapshot()) == 4
+    assert [i["message"] for i in logbuffer.buffer.snapshot(source="nonebot")] == [
+        "OneBot V11 | [message.group.normal] ..."
+    ]
+    assert len(logbuffer.buffer.snapshot(source="uvicorn")) == 1
+    # 只看机器人：三种写法都认
+    for alias in ("bot", "music", "self", logbuffer.BOT_LOGGER):
+        got = logbuffer.buffer.snapshot(source=alias)
+        assert len(got) == 2, (alias, got)
+        assert all(i["name"] == logbuffer.BOT_LOGGER for i in got)
+    # 与关键词过滤可叠加
+    both = logbuffer.buffer.snapshot(source="bot", query="归档")
+    assert len(both) == 1 and both[0]["message"] == "开始归档"
+
+
+def test_sources_counts_and_order() -> None:
+    _reset()
+    for _ in range(3):
+        logbuffer.buffer.push("INFO", "nonebot", "n")
+    logbuffer.buffer.push("INFO", "uvicorn", "u")
+    logbuffer.buffer.push("INFO", logbuffer.BOT_LOGGER, "b")
+
+    rows = logbuffer.buffer.sources()
+    assert rows[0]["name"] == logbuffer.BOT_LOGGER, rows     # 机器人永远排最前
+    assert rows[0]["count"] == 1
+    counts = {r["name"]: r["count"] for r in rows}
+    assert counts == {logbuffer.BOT_LOGGER: 1, "nonebot": 3, "uvicorn": 1}, counts
+    # 其余按条数从多到少
+    assert [r["name"] for r in rows[1:]] == ["nonebot", "uvicorn"], rows
+    # 空缓冲不炸
+    logbuffer.buffer.clear()
+    assert logbuffer.buffer.sources() == []
+    # 模块级快捷方式与实例方法一致
+    assert logbuffer.sources() == logbuffer.buffer.sources()
+
+
 def test_ring_eviction_keeps_capacity() -> None:
     _reset()
     logbuffer.buffer.set_capacity(50)
@@ -274,11 +318,25 @@ def test_frontend_has_logs_entry_and_page() -> None:
     assert "/api/music-admin/logs" in html, "前端要引用日志接口"
     assert 'id="logView"' in html
     assert 'id="logLevel"' in html
+    assert 'id="logSource"' in html, "要有来源筛选（只看机器人 / 只看协议端）"
     assert 'id="logAuto"' in html
     # switchPage 里要把 logs 页接上加载逻辑
     idx = html.index("function switchPage(name){")
     body = html[idx:idx + 900]
     assert 'name==="logs"' in body, "switchPage 要处理 logs 页"
+
+
+def test_api_logs_source_param_roundtrip() -> None:
+    """接口要把 source 参数透传下去，并把来源清单 / 机器人 logger 名回给前端。"""
+    _reset()
+    webui.logbuffer.buffer.push("INFO", logbuffer.BOT_LOGGER, "机器人日志")
+    webui.logbuffer.buffer.push("INFO", "nonebot", "协议端日志")
+    res = asyncio.run(webui._api_logs(_Req(params={"source": "bot"})))
+    payload = json.loads(res.body)
+    assert [i["message"] for i in payload["logs"]] == ["机器人日志"], payload["logs"]
+    assert payload["bot_logger"] == logbuffer.BOT_LOGGER
+    names = {r["name"] for r in payload["sources"]}
+    assert {logbuffer.BOT_LOGGER, "nonebot"} <= names, payload["sources"]
 
 
 def test_api_logs_route_registered() -> None:
@@ -291,11 +349,45 @@ def test_schema_exposes_logs_section() -> None:
     titles = {s["key"]: s["title"] for s in webui.SCHEMA}
     assert titles.get("logs") == "运行日志", titles.get("logs")
     keys = {f["key"] for s in webui.SCHEMA for f in s["fields"]}
-    assert {"logs.lines", "logs.level", "logs.file"} <= keys, keys
-    # 三个字段都要有中文标签（否则页面上会出现英文 key）
-    for key in ("logs.lines", "logs.level", "logs.file"):
+    assert {"logs.lines", "logs.level", "logs.file", "logs.trace_messages"} <= keys, keys
+    # 所有字段都要有中文标签（否则页面上会出现英文 key）
+    for key in ("logs.lines", "logs.level", "logs.file", "logs.trace_messages"):
         field = webui.KEY_INDEX[key]
         assert any("\u4e00" <= ch <= "\u9fff" for ch in field["label"]), (key, field["label"])
+
+
+def test_config_page_has_jump_bar() -> None:
+    """配置页很长，顶部要有分组跳转栏（点一下滚到对应分组）。"""
+    html = webui.DASHBOARD_HTML
+    assert 'id="page-config"' in html, "要有配置页区块"
+    # 跳转栏必须在配置页内部、位于表单之前
+    sec = html.index('id="page-config"')
+    nav = html.index('id="cfgNav"', sec)
+    form = html.index('id="configForm"', sec)
+    assert sec < nav < form, "cfgNav 要在 configForm 之前"
+    # 渲染时给每个分组打 id 并生成按钮，滚动时高亮当前分组
+    assert 'card.id="cfg-sec-"' in html
+    assert "cfg-nav-btn" in html
+    assert "syncCfgNav" in html
+    assert "scrollIntoView" in html
+    assert ".cfg-sec{scroll-margin-top:" in html, "要留出吸顶导航的偏移，否则标题被挡住"
+
+
+def test_mobile_media_queries_present() -> None:
+    """手机端适配：窄屏下侧边栏变顶部导航条、配置项上下排布、表格可横向滚动。"""
+    html = webui.DASHBOARD_HTML
+    assert "@media (max-width:900px)" in html, "要有平板/手机断点"
+    assert "@media (max-width:560px)" in html, "要有小屏断点"
+    # 断点里必须真的改掉桌面端的固定侧边栏宽度
+    idx = html.index("@media (max-width:900px)")
+    block = html[idx: html.index("@media (max-width:560px)")]
+    assert "flex-direction:column" in block, "布局要改成纵向"
+    assert "overflow-x:auto" in block, "侧边栏要能横向滑动"
+    assert ".field{grid-template-columns:1fr" in block, "配置项要改成上下排布"
+    assert ".gtbl{min-width:" in block, "表格要能横向滚动"
+    assert ".footbar{left:0" in block, "底部保存条要占满宽度"
+    # 别名页也要适配
+    assert "@media (max-width:640px)" in webui.ALIASES_HTML, "别名页也要有手机断点"
 
 
 class _Req:
@@ -370,6 +462,8 @@ if __name__ == "__main__":
     test_snapshot_level_filter()
     test_snapshot_query_matches_message_name_and_exc()
     test_snapshot_limit_keeps_newest()
+    test_snapshot_source_filter()
+    test_sources_counts_and_order()
     test_ring_eviction_keeps_capacity()
     test_capacity_change_drops_oldest_and_clamps()
     test_level_name_normalization()
@@ -384,7 +478,10 @@ if __name__ == "__main__":
     test_frontend_has_logs_entry_and_page()
     test_api_logs_route_registered()
     test_schema_exposes_logs_section()
+    test_config_page_has_jump_bar()
+    test_mobile_media_queries_present()
     test_api_logs_get_filters()
+    test_api_logs_source_param_roundtrip()
     test_api_logs_post_clears()
     test_api_logs_requires_token()
     logbuffer.uninstall()

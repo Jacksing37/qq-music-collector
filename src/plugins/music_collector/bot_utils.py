@@ -141,6 +141,56 @@ def image_segment(path: Path) -> Optional[MessageSegment]:
         return None
 
 
+# ---------------------------------------------------------------- 收发消息留痕
+#
+# 网页端「运行日志」页要能看清「机器人收到了什么、发出去了什么」。这里把消息
+# 压成一行摘要（文本 + [图片]/[卡片] 之类的标记）再记日志，避免把整段榜单刷屏。
+# 开关是 ``logs.trace_messages``，关掉后不再记录。
+
+_PREVIEW_MARKS: dict[str, str] = {
+    "image": "[图片]", "json": "[卡片]", "xml": "[卡片]", "music": "[音乐]",
+    "face": "[表情]", "record": "[语音]", "video": "[视频]", "file": "[文件]",
+    "at": "[@]", "reply": "[回复]",
+}
+
+
+def message_preview(message: Message | str, limit: int = 160) -> str:
+    """把一条消息压成一行摘要，供日志展示。"""
+    if isinstance(message, str):
+        extra, text = "", message
+    else:
+        text = message.extract_plain_text()
+        seen: list[str] = []
+        for seg in message:
+            tag = _PREVIEW_MARKS.get(seg.type)
+            if tag and tag not in seen:
+                seen.append(tag)
+        extra = "".join(seen)
+    text = " ".join(text.split())          # 折行 / 连续空白压成单个空格
+    if len(text) > limit:
+        text = text[: limit - 1] + "…"
+    return (extra + text) or "（空消息）"
+
+
+def trace_messages_enabled() -> bool:
+    """是否记录收发消息（``logs.trace_messages``）。
+
+    延迟导入 ``service``：bot_utils 是更底层的模块，模块级导入会成环。
+    """
+    try:
+        from .service import service
+
+        return bool(getattr(service.config.logs, "trace_messages", True))
+    except Exception:  # noqa: BLE001 — 配置尚未就绪时静默跳过，不能影响发消息
+        return False
+
+
+def trace_out(preview: str, where: str = "") -> None:
+    """记一条「机器人发出去了什么」。"""
+    if trace_messages_enabled():
+        logger.info(f"[music] → {where} {preview}".rstrip())
+
+
 def split_text(text: str, limit: int = MAX_TEXT_LEN) -> list[str]:
     if len(text) <= limit:
         return [text]
@@ -161,10 +211,11 @@ def split_text(text: str, limit: int = MAX_TEXT_LEN) -> list[str]:
 async def safe_send_group(bot: Bot, group_id: int, message: Message | str) -> bool:
     try:
         await bot.send_group_msg(group_id=group_id, message=message)
-        return True
     except Exception as exc:
         logger.warning(f"[music] 发送群消息失败 group={group_id}: {exc}")
         return False
+    trace_out(message_preview(message), f"群{group_id}")
+    return True
 
 
 async def send_report(

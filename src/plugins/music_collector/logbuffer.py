@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import traceback
@@ -35,6 +36,10 @@ except Exception:  # pragma: no cover - 仅极端环境
 DEFAULT_LINES = 2000
 #: 默认记录的最低等级（与 bot 默认的 LOG_LEVEL 一致）
 DEFAULT_LEVEL = "INFO"
+
+#: 本插件自己的 logger 名（插件包名）。服务器上日志的大头是 OneBot 适配器
+#: （logger=nonebot）与 uvicorn 的访问日志，「只看机器人」就是按这个名字过滤。
+BOT_LOGGER = "music_collector"
 
 #: 等级名 -> 数值。顺序即严重程度，供前端下拉与后端过滤共用。
 LEVEL_ORDER: dict[str, int] = {
@@ -125,10 +130,16 @@ class LogBuffer:
         level: Optional[str] = None,
         query: Optional[str] = None,
         limit: Optional[int] = None,
+        source: Optional[str] = None,
     ) -> list[dict[str, Any]]:
-        """按等级 / 关键词过滤后返回（时间升序）。
+        """按等级 / 关键词 / 来源过滤后返回（时间升序）。
 
         ``limit`` 取**最新**的 N 条（截尾），符合"看最近的日志"的直觉。
+
+        ``source`` 是 logger 名（如 ``music_collector`` / ``nonebot`` / ``uvicorn``）。
+        特殊值 ``bot`` 表示"只看本插件的日志"，等价于 ``source=BOT_LOGGER``——
+        服务器上 OneBot 适配器与 uvicorn 的访问日志占了大头，只想看脚本干了什么
+        时用这个一键过滤。
         """
         with self._lock:
             items = list(self._buf)
@@ -137,6 +148,10 @@ class LogBuffer:
             if lv in LEVEL_ORDER:
                 min_no = LEVEL_ORDER[lv]
                 items = [i for i in items if i["levelno"] >= min_no]
+        src = (source or "").strip()
+        if src:
+            want = BOT_LOGGER if src.lower() in ("bot", "music", "self") else src
+            items = [i for i in items if i["name"] == want]
         q = (query or "").strip().lower()
         if q:
             items = [
@@ -154,6 +169,21 @@ class LogBuffer:
             if n > 0:
                 items = items[-n:]
         return items
+
+    def sources(self) -> list[dict[str, Any]]:
+        """缓冲区里出现过的 logger 名及条数（多的在前，本插件永远排最前）。
+
+        供网页端「来源」下拉框用：用户一眼能看出噪音都来自谁。
+        """
+        with self._lock:
+            items = list(self._buf)
+        counter: dict[str, int] = {}
+        for i in items:
+            key = i["name"] or "(未知)"
+            counter[key] = counter.get(key, 0) + 1
+        rows = [{"name": k, "count": v} for k, v in counter.items()]
+        rows.sort(key=lambda r: (r["name"] != BOT_LOGGER, -r["count"], r["name"]))
+        return rows
 
     def clear(self) -> int:
         """清空缓冲，返回清掉的条数。"""
@@ -174,6 +204,9 @@ class LogBuffer:
             "started_at": self._started,
             "installed": _sink_id is not None,
             "file": str(_file_path) if _file_path else None,
+            # stdlib→loguru 的桥是否装上：没装的话插件里用 logging.getLogger 的模块
+            # （archiver / service / config…）的日志不会出现在这里
+            "bridge": stdlib_bridge_installed(),
         }
 
     # ------------------------------------------------------------ 设置
@@ -289,7 +322,53 @@ def install(
         _sink_id = None
         _file_path = _resolve_path(file)
 
+    _install_stdlib_bridge()
     return buffer.stats()
+
+
+# ---------------------------------------------------------------- stdlib 桥接
+
+#: 需要桥接的 stdlib logger 树（插件的模块都叫 music_collector.xxx）
+_STDLIB_ROOT_LOGGER = "music_collector"
+
+
+def _install_stdlib_bridge() -> bool:
+    """把插件的 stdlib logger 桥接进 loguru，返回本次是否新装。
+
+    **为什么必须自己装**：nonebot 只给 uvicorn（``drivers/fastapi.py`` 里配
+    ``LoguruHandler``）和 apscheduler（插件自己 addHandler）各自接了桥，**没有全局桥**。
+    而插件的 archiver / service / config / detector / cache / netease_api 用的都是
+    ``logging.getLogger("music_collector.xxx")``，stdlib root 默认等级是 WARNING——
+    它们的 INFO 日志既到不了 loguru（也就进不了这个缓冲），也不会打到 stdout。
+    结果就是「网页端日志页只看得到协议端和 uvicorn 在刷屏，看不到机器人自己干了什么」。
+
+    桥接后这些日志会经 loguru 走一遍，``nonebot`` 的 ``_log_patcher`` 会把
+    ``record["name"]`` 归一成插件名（``music_collector``），所以日志页的
+    「只看机器人」筛选能一次盖住全部模块。
+
+    幂等：重复调用不会装出第二个 handler 导致日志翻倍。
+    """
+    if _loguru is None:  # pragma: no cover - 仅缺 loguru 的极端环境
+        return False
+    try:
+        from nonebot.log import LoguruHandler
+    except Exception:  # pragma: no cover - 离线脚本里没有 nonebot
+        return False
+
+    lg = logging.getLogger(_STDLIB_ROOT_LOGGER)
+    if getattr(lg, "_music_collector_bridged", False):
+        return False
+    lg.setLevel(logging.DEBUG)   # 子 logger 继承；真正的等级由 loguru 的 sink 决定
+    lg.addHandler(LoguruHandler())
+    # 别再往 root 传：否则会再走一遍 lastResort / 用户自配的 root handler，同一条日志出两次
+    lg.propagate = False
+    lg._music_collector_bridged = True  # type: ignore[attr-defined]
+    return True
+
+
+def stdlib_bridge_installed() -> bool:
+    """自检用：stdlib→loguru 的桥是否已装上。"""
+    return bool(getattr(logging.getLogger(_STDLIB_ROOT_LOGGER), "_music_collector_bridged", False))
 
 
 def uninstall() -> None:
@@ -325,7 +404,13 @@ def clear() -> int:
     return buffer.clear()
 
 
+def sources() -> list[dict[str, Any]]:
+    """模块级快捷方式，等价于 ``buffer.sources()``。"""
+    return buffer.sources()
+
+
 __all__ = [
+    "BOT_LOGGER",
     "DEFAULT_LEVEL",
     "DEFAULT_LINES",
     "LEVELS",
@@ -336,6 +421,8 @@ __all__ = [
     "configure_from",
     "install",
     "snapshot",
+    "sources",
     "stats",
+    "stdlib_bridge_installed",
     "uninstall",
 ]

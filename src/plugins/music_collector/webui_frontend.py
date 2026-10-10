@@ -56,7 +56,7 @@ input[type=checkbox]{width:18px;height:18px;accent-color:var(--accent)}
 .nav{display:block;width:100%;text-align:left;margin-bottom:6px;background:transparent;border:none;color:var(--txt)}
 .nav:hover{background:var(--input);transform:none}
 .nav.active{background:linear-gradient(135deg,rgba(110,168,254,.18),rgba(167,139,250,.18));
-  border:1px solid var(--card-bd);color:#fff;font-weight:600}
+  border:1px solid var(--card-bd);color:var(--txt);font-weight:600}
 .content{flex:1;padding:22px 24px 120px;overflow:auto}
 .page{max-width:1000px;margin:0 auto}
 .card{background:var(--card);border:1px solid var(--card-bd);border-radius:18px;padding:18px 20px;
@@ -173,6 +173,70 @@ button:disabled{opacity:.5;cursor:not-allowed}
 [data-theme="light"] .log-lv-WARNING .ll{color:#a16207}
 .log-lv-ERROR .ll,.log-lv-CRITICAL .ll{color:var(--bad)}
 .log-line.log-lv-ERROR,.log-line.log-lv-CRITICAL{background:rgba(248,113,113,.06)}
+
+/* 配置页分组跳转栏 */
+.cfg-nav{position:sticky;top:57px;z-index:20;display:flex;flex-wrap:wrap;gap:8px;
+  margin-bottom:14px;padding:10px 12px;background:var(--bg2);border:1px solid var(--card-bd);
+  border-radius:14px;box-shadow:var(--shadow)}
+.cfg-nav .cn-title{font-size:12px;color:var(--muted);align-self:center;padding-right:2px}
+.cfg-nav-btn{background:var(--input);border:1px solid var(--card-bd);color:var(--muted);
+  padding:5px 12px;border-radius:999px;font-size:13px;white-space:nowrap}
+.cfg-nav-btn:hover{color:var(--txt)}
+.cfg-nav-btn.active{color:var(--txt);font-weight:600;border-color:var(--accent);
+  background:linear-gradient(135deg,rgba(110,168,254,.22),rgba(167,139,250,.22))}
+.cfg-sec{scroll-margin-top:118px}
+
+/* ---------------- 手机 / 小屏适配 ---------------- */
+@media (max-width:900px){
+  /* 手机上顶栏不再吸顶，把屏幕顶部让给吸顶的导航条；否则两者会在 top:0 打架 */
+  .topbar{position:static;padding:10px 12px;gap:10px}
+  .topbar h1{font-size:16px}
+  /* 侧边栏改成顶部横向可滑动的导航条 */
+  .layout{flex-direction:column;min-height:0}
+  .sidebar{position:sticky;top:0;z-index:25;width:auto;flex:none;height:auto;
+    display:flex;gap:8px;overflow-x:auto;overflow-y:hidden;padding:9px 10px;
+    background:var(--side);border-right:none;border-bottom:1px solid var(--card-bd);
+    -webkit-overflow-scrolling:touch;scrollbar-width:none}
+  .sidebar::-webkit-scrollbar{display:none}
+  .sidebar .brand{display:none}
+  .nav{flex:0 0 auto;width:auto;margin-bottom:0;white-space:nowrap;padding:7px 13px;
+    border:1px solid var(--card-bd);border-radius:999px;font-size:13px;background:var(--input)}
+  .nav:hover{transform:none}
+  .content{padding:14px 12px 110px}
+  .page{max-width:100%}
+  .card{padding:14px 14px;border-radius:16px}
+  .card h2{font-size:15px}
+  /* 配置项：标签与控件上下排布，窄屏更好点 */
+  .field{grid-template-columns:1fr;gap:6px;padding:10px 0}
+  .flabel{font-size:13px}
+  /* 跳转栏在手机上不吸顶（顶部已被导航条占用），随页面滚走即可 */
+  .cfg-nav{position:static;margin-bottom:12px;padding:9px 10px;gap:6px}
+  .cfg-nav-btn{padding:5px 10px;font-size:12px}
+  .cfg-sec{scroll-margin-top:70px}
+  .stat-grid{grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}
+  /* 表格：容器横向滚动，别把列挤成一团 */
+  .gcard{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .gtbl{min-width:600px}
+  .log-view{height:min(58vh,520px);font-size:12px}
+  .log-toolbar{gap:8px}
+  .log-toolbar input#logSearch{flex:1 1 100%;min-width:0}
+  .footbar{left:0;padding:10px 12px}
+  .toast{top:auto;bottom:12px;transform:translateX(-50%) translateY(12px)}
+  .toast.show{transform:translateX(-50%) translateY(0)}
+}
+@media (max-width:560px){
+  .topbar h1{font-size:15px}
+  .topbar button{padding:6px 10px;font-size:13px}
+  .status-pill{display:none}         /* 超窄屏先舍掉状态胶囊，给标题和按钮腾地方 */
+  .content{padding:12px 10px 120px}
+  .stat-grid{grid-template-columns:1fr 1fr}
+  .gtbl{min-width:0;font-size:12px}
+  .gtbl .date{display:none}          /* 小屏先舍掉日期列，表格才放得下 */
+  .gtbl th,.gtbl td{padding:6px 5px}
+  .gtitle{font-size:14px}
+  .pv-drawer{width:100vw}
+  .pv-body{padding:14px 14px 26px}
+}
 </style>
 </head>
 <body>
@@ -278,6 +342,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
 
     <!-- 配置 -->
     <section id="page-config" class="page hidden">
+      <nav id="cfgNav" class="cfg-nav hidden" aria-label="配置分组跳转"></nav>
       <div id="configForm"></div>
     </section>
 
@@ -332,6 +397,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
       <div class="card">
         <h2><span class="dot"></span>运行日志</h2>
         <div class="log-toolbar">
+          <label class="muted">来源 <select id="logSource" title="按打出这条日志的模块筛选"></select></label>
           <label class="muted">级别 <select id="logLevel" title="只看该等级及以上"></select></label>
           <input id="logSearch" placeholder="搜索关键词（消息 / 模块名 / 异常堆栈）…">
           <label class="chk"><input type="checkbox" id="logAuto" checked> 自动刷新（3 秒）</label>
@@ -342,7 +408,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
         </div>
         <div id="logMeta" class="muted" style="margin-bottom:8px"></div>
         <div class="log-view" id="logView"><div class="empty">加载中…</div></div>
-        <p class="muted" style="margin-top:10px">这里只显示<strong>本次进程启动后</strong>的日志（内存环形缓冲，重启即清空）。条目数、最低等级、是否额外落盘文件，在「配置」页的<strong>运行日志</strong>分组里改，保存后立即生效。</p>
+        <p class="muted" style="margin-top:10px">这里只显示<strong>本次进程启动后</strong>的日志（内存环形缓冲，重启即清空）。条目数、最低等级、是否额外落盘文件，在「配置」页的<strong>运行日志</strong>分组里改，保存后立即生效。<br>服务器上日志的大头是协议端（<code>nonebot</code>）与网页请求（<code>uvicorn</code>），想看机器人自己干了什么，把「来源」切到 <strong>🤖 只看机器人</strong> 即可。</p>
       </div>
     </section>
 
@@ -923,8 +989,11 @@ function refreshDirty(){
 function renderForm(schema, values){
   ORIG=Object.assign({},values); DIRTY={};
   const form=$("#configForm"); form.innerHTML="";
-  schema.forEach(sec=>{
-    const card=document.createElement("section"); card.className="card";
+  const nav=$("#cfgNav"); nav.innerHTML="";
+  const navItems=[];
+  schema.forEach((sec,si)=>{
+    const card=document.createElement("section"); card.className="card cfg-sec";
+    card.id="cfg-sec-"+si;
     const h=document.createElement("h2"); h.innerHTML=`<span class="dot"></span>${sec.title}`; card.appendChild(h);
     sec.fields.forEach(f=>{
       if(f.type==="map") return;
@@ -935,9 +1004,32 @@ function renderForm(schema, values){
       fr.appendChild(lab); fr.appendChild(ctrl); card.appendChild(fr);
     });
     form.appendChild(card);
+    // 顶部跳转栏：分组多、页面长，点一下直接滚到对应分组
+    const btn=document.createElement("button");
+    btn.type="button"; btn.className="cfg-nav-btn"; btn.textContent=sec.title;
+    btn.title="跳到「"+sec.title+"」";
+    btn.onclick=()=>card.scrollIntoView({behavior:"smooth",block:"start"});
+    nav.appendChild(btn); navItems.push({btn,card});
   });
+  if(navItems.length>1){
+    const tip=document.createElement("span"); tip.className="cn-title"; tip.textContent="跳转";
+    nav.insertBefore(tip, nav.firstChild);
+  }
+  nav.classList.toggle("hidden", navItems.length<2);
+  CFG_NAV=navItems;
   refreshDirty();
+  syncCfgNav();
 }
+
+/* 滚动时高亮当前所在的分组 */
+let CFG_NAV=[];
+function syncCfgNav(){
+  if(!CFG_NAV.length) return;
+  let active=0;
+  CFG_NAV.forEach((it,i)=>{ if(it.card.getBoundingClientRect().top<=130) active=i; });
+  CFG_NAV.forEach((it,i)=>it.btn.classList.toggle("active", i===active));
+}
+window.addEventListener("scroll",()=>{ if(!$("#page-config").classList.contains("hidden")) syncCfgNav(); },{passive:true});
 async function loadConfig(){
   try{
     const [c,s]=await Promise.all([api("/api/music-admin/config"), api("/api/music-admin/status")]);
@@ -1053,17 +1145,32 @@ function copyText(text){
 async function loadLogs(silent){
   const lv=$("#logLevel").value||"";
   const q=$("#logSearch").value.trim();
+  const src=$("#logSource").value||"";
   let url="/api/music-admin/logs?limit=2000";
   if(lv) url+="&level="+encodeURIComponent(lv);
   if(q) url+="&q="+encodeURIComponent(q);
+  if(src) url+="&source="+encodeURIComponent(src);
   try{
     const j=await (await api(url)).json();
     fillLogLevels(j.levels);
+    fillLogSources(j.sources, j.bot_logger);
     renderLogs(j.logs||[], j.stats||{});
   }catch(e){
     if(e.message==="unauthorized") return;
     if(!silent) toast("日志加载失败："+e.message,"bad");
   }
+}
+
+function fillLogSources(sources, botName){
+  const sel=$("#logSource");
+  const keep=sel.value;                        // 保留用户选中的来源
+  const rows=sources||[];
+  let html='<option value="">全部来源</option>';
+  if(botName) html+=`<option value="bot">🤖 只看机器人</option>`;
+  html+=rows.map(s=>`<option value="${esc(s.name)}">${esc(s.name)}（${s.count}）</option>`).join("");
+  sel.innerHTML=html;
+  // 原来选中的来源还在就保留；否则回落「全部来源」
+  if(keep && (keep==="bot" ? botName : rows.some(s=>s.name===keep))) sel.value=keep; else sel.value="";
 }
 
 function fillLogLevels(levels){
@@ -1092,6 +1199,7 @@ function renderLogs(items, st){
   }
   const bits=[];
   if(st.installed===false) bits.push("⚠ 日志捕获未生效（请检查启动日志）");
+  if(st.bridge===false) bits.push("⚠ 机器人自身的日志未接入（archiver/service 等模块的日志看不到）");
   bits.push(`本次启动共 ${st.total||0} 条`);
   bits.push(`缓冲 ${st.size||0}/${st.capacity||0}`);
   if(st.level) bits.push(`记录等级 ≥ ${st.level}`);
@@ -1103,6 +1211,7 @@ function renderLogs(items, st){
 
 $("#logRefresh").onclick=()=>loadLogs();
 $("#logLevel").onchange=()=>loadLogs(true);
+$("#logSource").onchange=()=>loadLogs(true);
 $("#logAuto").onchange=startLogTimer;
 $("#logSearch").addEventListener("input",()=>{
   clearTimeout(LOG_SEARCH_T);
@@ -1195,6 +1304,17 @@ textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba
 .modal h3{margin:0 0 6px}
 .modal p{color:var(--muted);font-size:13px;margin:0 0 14px}
 .modal input{width:100%;background:var(--input);border:1px solid var(--card-bd);color:var(--txt);border-radius:10px;padding:10px;font:inherit;margin-bottom:14px}
+
+/* 手机适配 */
+@media (max-width:640px){
+  .wrap{padding:16px 12px 110px}
+  .hrow{gap:10px}
+  .hrow h1{font-size:16px}
+  .hrow button{padding:7px 11px;font-size:13px}
+  .card{padding:14px;border-radius:16px}
+  .card h2{font-size:15px}
+  textarea{min-height:150px}
+}
 .hidden{display:none!important}
 </style>
 </head>

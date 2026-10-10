@@ -9,6 +9,7 @@ from __future__ import annotations
 import time
 
 from nonebot import get_driver, on_message, require
+from nonebot.adapters import Event
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageSegment
 from nonebot.log import logger
 from nonebot.plugin import PluginMetadata
@@ -16,7 +17,13 @@ from nonebot.rule import Rule
 
 require("nonebot_plugin_apscheduler")
 
-from .bot_utils import safe_send_group, send_music_card  # noqa: E402
+from .bot_utils import (  # noqa: E402
+    message_preview,
+    safe_send_group,
+    send_music_card,
+    trace_messages_enabled,
+    trace_out,
+)
 from .models import PLATFORM_NAMES, Song  # noqa: E402
 from .naming import build_context, render_template, resolve_alias  # noqa: E402
 from .scheduler import reload_jobs  # noqa: E402
@@ -57,6 +64,26 @@ async def _looks_like_music(event: GroupMessageEvent) -> bool:
 
 
 music_listener = on_message(rule=Rule(_looks_like_music), priority=99, block=False)
+
+# 收到消息先留一条痕（priority=1、block=False，只观察不影响其它 matcher）。
+# 想关掉就到「配置 → 运行日志」里把 logs.trace_messages 关掉。
+trace_listener = on_message(priority=1, block=False)
+
+
+@trace_listener.handle()
+async def _trace_incoming(bot: Bot, event: Event) -> None:
+    if not trace_messages_enabled():
+        return
+    group_id = getattr(event, "group_id", None)
+    sender = getattr(event, "sender", None)
+    if sender is not None:
+        nick = getattr(sender, "card", "") or getattr(sender, "nickname", "") or str(event.user_id)
+    else:
+        nick = str(event.user_id)
+    where = f"群{group_id}" if group_id else "私聊"
+    logger.info(
+        f"[music] ← {where} {nick}({event.user_id}): {message_preview(event.message)}"
+    )
 
 
 # ----------------------------------------------------- 被 @ 时回复自我介绍
@@ -364,10 +391,12 @@ async def _reply_song(
     except Exception as exc:
         logger.warning(f"[music] 回复失败: {exc}")
         return
+    trace_out(message_preview(msg), f"群{event.group_id}")
     if not with_card:
         return
     # 卡片单独发一条：签名服务挂掉时内部会自动降到自定义卡片 / 文字兜底
     way = await send_music_card(bot, event, song, service.config.card)
+    trace_out(f"卡片《{song.title}》[{way}]", f"群{event.group_id}")
     logger.debug(f"[music] 《{song.title}》卡片发送方式: {way}")
 
 
@@ -388,6 +417,12 @@ async def handle_music_share(bot: Bot, event: GroupMessageEvent) -> None:
 
     if not result.any_music:
         return
+
+    logger.info(
+        f"[music] 分享处理 · 群{group_id} {sharer_name}({event.user_id}) · "
+        f"收录 {len(result.accepted)} / 同窗重复 {len(result.duplicated)} / "
+        f"已分享过 {len(result.sharer_limited)} / 未识别 {len(result.unidentified)}"
+    )
 
     cfg = service.config
 

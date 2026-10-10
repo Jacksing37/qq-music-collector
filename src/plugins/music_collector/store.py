@@ -694,6 +694,9 @@ class Store:
         target = songs[index - 1]
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("DELETE FROM songs WHERE id=?", (target.row_id,))
+            # 歌被管理员删掉后，该分享者的「本期已分享」占位也要一并释放，
+            # 否则本人再分享会被当成重复、永远收不进来。
+            await self._release_claims(db, group_id, window_key, {target.sharer_id})
             await db.commit()
         return target
 
@@ -711,17 +714,56 @@ class Store:
         """
         songs = await self.list_songs(group_id, window_key, newest_first=newest_first)
         row_ids: set[int] = set()
+        sharer_ids: set[int] = set()
         for i in indices:
             if 1 <= i <= len(songs) and songs[i - 1].row_id is not None:
                 row_ids.add(songs[i - 1].row_id)
+                if songs[i - 1].sharer_id:
+                    sharer_ids.add(int(songs[i - 1].sharer_id))
         if not row_ids:
             return 0
         async with aiosqlite.connect(self.db_path) as db:
             await db.executemany(
                 "DELETE FROM songs WHERE id=?", [(rid,) for rid in row_ids]
             )
+            # 顺手释放这些分享者的「本期已分享」占位：管理员把歌删掉，就说明
+            # 想把名额还给他（否则他再分享会被拦，且提示的还是已删掉的那首）。
+            await self._release_claims(db, group_id, window_key, sharer_ids)
             await db.commit()
         return len(row_ids)
+
+    async def _release_claims(
+        self, db: aiosqlite.Connection, group_id: int, window_key: str,
+        sharer_ids: "set[int] | list[int]",
+    ) -> int:
+        """在已打开的连接里删除这些分享者在该窗口的占位，返回删除条数。
+
+        ``sharer_claims`` 是按 (群, 窗口, 用户) 唯一的，所以只有「把他这个窗口的
+        收录记录删干净」才该释放——这也是调用方的语义。
+        总库（MASTER_KEY）是跨窗口聚合视图，占位只属于具体窗口，直接跳过，
+        避免管理员在总库视图里删一首歌就把某个窗口的名额误放掉。
+        """
+        if window_key == MASTER_KEY:
+            return 0
+        ids = sorted({int(s) for s in sharer_ids if s})
+        if not ids:
+            return 0
+        marks = ",".join("?" for _ in ids)
+        cur = await db.execute(
+            f"DELETE FROM sharer_claims WHERE group_id=? AND window_key=? "
+            f"AND sharer_id IN ({marks})",
+            (group_id, window_key, *ids),
+        )
+        return cur.rowcount
+
+    async def release_claims_for(
+        self, group_id: int, window_key: str, sharer_ids: Sequence[int]
+    ) -> int:
+        """在独立连接里释放占位（供 service / 测试直接调用）。"""
+        async with aiosqlite.connect(self.db_path) as db:
+            n = await self._release_claims(db, group_id, window_key, set(sharer_ids))
+            await db.commit()
+        return n
 
     async def delete_window(self, group_id: int, window_key: str) -> int:
         """清空某个群在某个窗口下的全部已收集歌曲（含该窗口的分享占位记录）。"""

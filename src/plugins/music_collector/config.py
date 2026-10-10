@@ -356,6 +356,10 @@ class LogsConfig(BaseModel):
     #: 额外落盘的文件路径（相对路径基于项目根目录）；留空表示不落盘。
     #: 按 5MB 轮转、保留最近 3 份
     file: str = ""
+    #: 记录「收到 / 发出的群消息」摘要（含普通聊天，不只音乐分享）。
+    #: 想在日志页看到「谁在什么时候发了什么、机器人回了什么」就保持开启；
+    #: 嫌吵可以关掉——开关收集、改设置、归档结果这些事件日志不受影响。
+    trace_messages: bool = True
 
 
 class CacheConfig(BaseModel):
@@ -431,6 +435,28 @@ class AppConfig(BaseModel):
     reply: ReplyConfig = Field(default_factory=ReplyConfig)
     master: MasterConfig = Field(default_factory=MasterConfig)
     logs: LogsConfig = Field(default_factory=LogsConfig)
+
+
+#: 键名里含这些词的配置项属于敏感信息，写日志时打码，别把密码 / cookie 记进日志页
+_SECRET_KEYWORDS = ("password", "cookie", "token", "secret", "access_key")
+
+
+def _mask_value(key: str, value: object) -> str:
+    """把配置值渲染成适合写进日志的一行：敏感项打码、长文本截断、换行转义。"""
+    low = key.lower()
+    if any(word in low for word in _SECRET_KEYWORDS):
+        return "******" if value else "(空)"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "(空)"
+    if isinstance(value, dict):
+        return f"{{…{len(value)} 项…}}" if value else "{}"
+    if isinstance(value, (list, tuple)):
+        shown = ", ".join(str(v) for v in list(value)[:6])
+        return f"[{shown}{', …' if len(value) > 6 else ''}]"
+    text = str(value).replace("\n", "\\n")
+    return text if len(text) <= 80 else text[:77] + "…"
 
 
 class ConfigManager:
@@ -539,10 +565,18 @@ class ConfigManager:
             cursor = cursor[part]
         if parts[-1] not in cursor:
             raise KeyError(f"配置项不存在: {dotted_key}")
+        old = cursor[parts[-1]]
         cursor[parts[-1]] = value
         # 先校验再落盘，避免写坏配置
         self._config = AppConfig.model_validate(data)
         self.save()
+        # 所有通道（网页端 / 群内 /music 命令 / 代码内部）的配置改动都汇到这里，
+        # 统一记一条，网页端「日志」页就能看清「什么时候改了什么设置」。
+        if old != value:
+            logger.info(
+                f"[config] 修改 {dotted_key}: {_mask_value(dotted_key, old)} → "
+                f"{_mask_value(dotted_key, value)}"
+            )
 
 
 config_manager = ConfigManager()

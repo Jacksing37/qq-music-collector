@@ -124,11 +124,14 @@ class CollectorService:
         if value not in ("auto", "on", "off"):
             raise ValueError("collect_override 只能是 auto / on / off")
         config_manager.update("collect_override", value)
-        return {
+        note = {
             "auto": "已恢复按时间表自动收集",
             "on": "已手动开启收集（无视时间窗口）",
             "off": "已手动关闭收集（无视时间窗口）",
         }[value]
+        # 单独记一条「收集开关」事件，日志页一眼能看出什么时候被手动改过状态
+        logger.info(f"[music] 收集开关 → {note}")
+        return note
 
     # ------------------------------------------------------------ 缓存
 
