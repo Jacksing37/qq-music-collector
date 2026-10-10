@@ -267,6 +267,7 @@ class MasterConfig(BaseModel):
     #:   {platform} 来源平台名     {sharer}   本次分享者（已套昵称映射）
     #:   {who}      总库首发者（首次进总库的人）   {index}  该歌在总库中的序号
     #:   {count}    总库当前总首数               {window} 当前窗口文案
+    #:   {period}   首发所在期号（来源窗口）      {date}   首发分享日期 YY/MM/DD
     notify_template: str = DEFAULT_MASTER_DUP
     #: 分享即归档：每收到新分享立即把总库增量同步到总库歌单（静默执行，不刷屏）
     auto_archive: bool = False

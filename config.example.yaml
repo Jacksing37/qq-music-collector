@@ -143,7 +143,8 @@ master:
   # 重复提示文案，用 \n 表示换行。可用占位符：
   #   {title}歌名 {artists}歌手 {platform}来源 {sharer}本次分享者
   #   {who}总库首发者 {index}总库序号 {count}总库总数 {window}当前窗口
-  notify_template: " 这首《{title}》之前已经有人分享过了（总库第 {index} 位，首发: {who}）"
+  #   {period}首发所在期号（来源窗口） {date}首发分享日期(YY/MM/DD)
+  notify_template: " 这首《{title}》在 {date} 已经有人分享过了（总库第 {index} 位，首发: {who}）"
   # 分享即归档：每收到新分享立即把总库增量同步到总库歌单（静默执行，不刷屏）
   auto_archive: false
   # 总库归档用歌单配置（与上面 playlist 段互相独立，可分别设置）
