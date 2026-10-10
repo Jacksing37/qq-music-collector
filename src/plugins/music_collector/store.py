@@ -108,6 +108,9 @@ CREATE TABLE IF NOT EXISTS sharer_claims (
     title        TEXT    NOT NULL DEFAULT '',
     artists      TEXT    NOT NULL DEFAULT '',
     platform     TEXT    NOT NULL DEFAULT '',
+    -- 首发那首的平台 key（与 songs.song_id 同一套），用于判断占位是否已失效：
+    -- 管理员把歌删掉后，靠它就能认出「这个名额所指的歌已经不在库里了」。
+    song_id      TEXT    NOT NULL DEFAULT '',
     created_at   REAL    NOT NULL,
     UNIQUE(group_id, window_key, sharer_id)
 );
@@ -182,6 +185,14 @@ class Store:
             if "src_window" not in scols:
                 await db.execute(
                     "ALTER TABLE songs ADD COLUMN src_window TEXT NOT NULL DEFAULT ''"
+                )
+            # 老库迁移：sharer_claims 表补 song_id 列（判定占位是否失效用）。
+            # 老占位没有这一列，回落到按歌名匹配，见 claim_song_in_library()。
+            async with db.execute("PRAGMA table_info(sharer_claims)") as cur:
+                ccols = [row[1] for row in await cur.fetchall()]
+            if "song_id" not in ccols:
+                await db.execute(
+                    "ALTER TABLE sharer_claims ADD COLUMN song_id TEXT NOT NULL DEFAULT ''"
                 )
             await db.commit()
 
@@ -796,8 +807,8 @@ class Store:
     ) -> Optional[dict]:
         """取某用户在某窗口的首发占位记录；没有则 None。
 
-        返回的 dict 含 ``title`` / ``artists`` / ``platform`` / ``created_at``，
-        提示文案里的「你已经分享过《…》」就是用这里的首发歌名。
+        返回的 dict 含 ``title`` / ``artists`` / ``platform`` / ``song_id`` /
+        ``created_at``，提示文案里的「你已经分享过《…》」就是用这里的首发歌名。
         """
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -818,24 +829,61 @@ class Store:
         artists: str = "",
         platform: str = "",
         sharer_name: str = "",
+        song_id: str = "",
     ) -> bool:
         """登记首发占位。返回 True 表示本次真的占上了（此前没有记录）。
 
         并发分享同一窗口时用 ``INSERT OR IGNORE`` 兜底：只有第一个写进去的
         算占位成功，后来者会拿到 False 并被拦截。
+        ``song_id`` 存首发歌的平台 key，供 ``claim_song_in_library`` 判断占位
+        是否已失效（歌被删了，名额就该还回去）。
         """
         async with aiosqlite.connect(self.db_path) as db:
             cur = await db.execute(
                 "INSERT OR IGNORE INTO sharer_claims "
-                "(group_id, window_key, sharer_id, sharer_name, title, artists, platform, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "(group_id, window_key, sharer_id, sharer_name, title, artists, "
+                " platform, song_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     group_id, window_key, sharer_id, sharer_name,
-                    title, artists, platform, time.time(),
+                    title, artists, platform, song_id or "", time.time(),
                 ),
             )
             await db.commit()
         return cur.rowcount > 0
+
+    async def claim_song_in_library(
+        self, group_id: int, window_key: str, claim: dict
+    ) -> bool:
+        """占位所指的那首歌是否还在库里（该窗口 或 该群总库）。
+
+        用于识别「幽灵名额」：管理员在网页端把歌删掉（哪些视图、哪条路径都可能）、
+        或清理任务把它带走之后，占位还在，本人再分享就会被拦、而且提示的还是
+        那首已经没了的歌。此时应把名额还回去。
+
+        - 优先按 (platform, song_id) 精确匹配，与 ``add_song`` 的去重键一致；
+        - 老占位没有 ``song_id``（升级前登记的），退回按歌名精确匹配；
+        - 两者都没有信息时保守返回 True（宁可继续拦，也不误放名额）。
+        """
+        song_key = str(claim.get("song_id") or "").strip()
+        title = str(claim.get("title") or "").strip()
+        if song_key:
+            key_sql = "(platform=? AND song_id=?)"
+            key_args: tuple = (str(claim.get("platform") or ""), song_key)
+        elif title:
+            key_sql = "title=?"
+            key_args = (title,)
+        else:
+            return True
+        sql = (
+            f"SELECT 1 FROM songs WHERE group_id=? AND window_key IN (?, ?) "
+            f"AND {key_sql} LIMIT 1"
+        )
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                sql, (group_id, window_key, MASTER_KEY, *key_args)
+            ) as cur:
+                return await cur.fetchone() is not None
 
     async def first_song_of_sharer(
         self, group_id: int, window_key: str, sharer_id: int

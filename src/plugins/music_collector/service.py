@@ -216,10 +216,26 @@ class CollectorService:
                     first = await self.store.get_sharer_claim(
                         group_id, state.key, sharer_id
                     )
+                    # 「幽灵名额」：占位所指的那首歌已经被删掉了（网页端删除 / 清空 /
+                    # 清理任务，任何路径都可能），名额却还留着 —— 本人再分享会被拦，
+                    # 而且提示的还是那首已经不在库里的歌。这里判定到占位已失效就
+                    # 主动释放，当作他没分享过。
+                    if first is not None and not await self.store.claim_song_in_library(
+                        group_id, state.key, first
+                    ):
+                        await self.store.release_claims_for(
+                            group_id, state.key, [sharer_id]
+                        )
+                        logger.info(
+                            f"[music] 群{group_id} {state.key} 的分享占位"
+                            f"「{first.get('title')}」已不在库里，自动释放"
+                        )
+                        first = None
                 if first is None:
                     claimed = await self.store.add_sharer_claim(
                         group_id, state.key, sharer_id,
                         song.title, song.artists, song.platform, sharer_name,
+                        song_id=song.song_id,
                     )
                     if claimed:
                         claims_in_batch[sharer_id] = {

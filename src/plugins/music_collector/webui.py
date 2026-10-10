@@ -112,7 +112,7 @@ FIELD_META: dict[str, tuple[str, str, bool]] = {
     "playlist.desc_show_artist": ("清单带歌手", "简介清单条目是否带歌手名", False),
     "playlist.desc_blank_line": ("清单空行", "简介清单条目之间是否插空行", False),
     "playlist.sharer_aliases": ("分享者昵称映射", "每行 原昵称或QQ号码=显示名，如 菜老名=Jacksing 或 123456789=Jacksing；仅做展示层替换，入库仍保留原始昵称。建议在「昵称映射」独立页编辑", True),
-    "playlist.one_per_sharer": ("每人本期只收一首", "同一窗口内同一用户只收录第一首；该用户首次分享即占位（即使那首因重复/无法匹配没进榜），之后再分享只回提示不入榜。提示文案见「同一用户重复提示」", False),
+    "playlist.one_per_sharer": ("每人本期只收一首", "同一窗口内同一用户只收录第一首；该用户首次分享即占位（即使那首因重复/无法匹配没进榜），之后再分享只回提示不入榜。占位所指的歌被管理员删掉后名额会自动还给该用户（下次分享时自检）。提示文案见「同一用户重复提示」", False),
     "playlist.notify_unmatched": ("提示无法匹配", "非网易云歌曲在分享时就探测能否匹配到网易云，匹配不到则把提示附在收录消息里（文案见「无法匹配提示」）。关闭可省掉这次预搜索", False),
 
     "card.mode": ("卡片模式", "native=平台原生(依赖签名服务) / custom=自定义卡片 / off=只发文字+封面", False),

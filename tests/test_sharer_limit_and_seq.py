@@ -373,6 +373,67 @@ async def test_delete_releases_sharer_claim():
         svc.providers.resolve = real
 
 
+async def test_stale_claim_auto_released():
+    print("\n[H] 占位所指的歌已被删掉 → 下次分享自动把名额还回去（幽灵名额）")
+    tmp = Path(tempfile.mkdtemp())
+    svc, store, api = _make_svc(tmp)
+    await store.init()
+    gid = 7008
+    config_manager.config.playlist.one_per_sharer = True
+    config_manager.config.master.enabled = True
+
+    async def _resolve(link):
+        return _song(link.song_id, f"歌{link.song_id}")
+
+    real = svc.providers.resolve
+    svc.providers.resolve = _resolve
+    try:
+        wk = svc.current_window().key
+        # 复刻线上 543486099 的状态：歌早就在总库里，占位是本窗口分享时留下的，
+        # 但本窗口并没有它的行 —— 这时删掉总库那行，歌就哪儿都不在了。
+        await store.add_song(gid, MASTER_KEY, _song("3001", "歌3001"))
+        await store.add_sharer_claim(
+            gid, wk, 123, "歌3001", artists="测试歌手", platform="netease",
+            sharer_name="张三", song_id="3001",
+        )
+
+        r1 = await svc.handle_segments(gid, _seg("3001"), 123, "张三")
+        check("歌还在库里时照旧拦下", len(r1.sharer_limited) == 1, str(r1.sharer_limited))
+
+        # 管理员在网页端「总库」页把这首歌删掉（这条路径本就刻意不释放窗口占位，
+        # 占位就成了幽灵名额 —— 线上用户遇到的正是它）
+        n = await svc.clear_indices(gid, MASTER_KEY, [1])
+        check("总库里的那行已删除", n == 1, str(n))
+        check("窗口占位仍留着（这就是幽灵名额的成因）",
+              await store.get_sharer_claim(gid, wk, 123) is not None)
+
+        r2 = await svc.handle_segments(gid, _seg("3001"), 123, "张三")
+        check("幽灵名额不再拦人", len(r2.sharer_limited) == 0, str(r2.sharer_limited))
+        check("同一首被重新收录", len(r2.accepted) == 1, str(r2.accepted))
+        claim = await store.get_sharer_claim(gid, wk, 123)
+        check("占位已重建成这首新歌", (claim or {}).get("song_id") == "3001", str(claim))
+        check("重收的歌也进了总库", await store.find_in_window(
+            gid, MASTER_KEY, _song("3001", "歌3001")) is not None)
+
+        # 重建后的占位依旧是「本期一首」：再发第二首还是会被拦
+        r3 = await svc.handle_segments(gid, _seg("3002"), 123, "张三")
+        check("重收之后名额照样只有一个", len(r3.sharer_limited) == 1, str(r3.sharer_limited))
+
+        # 老占位（升级前登记、没有 song_id）也要能靠歌名判失效
+        await store.add_sharer_claim(gid, wk, 456, "早就没了的歌", sharer_name="李四")
+        r4 = await svc.handle_segments(gid, _seg("3003"), 456, "李四")
+        check("老占位按歌名判失效后放行", len(r4.accepted) == 1, str(r4.accepted))
+        check("老占位已释放", len(r4.sharer_limited) == 0, str(r4.sharer_limited))
+
+        # 歌还在窗口里 → 占位有效，必须继续拦（别把正常名额误放了）
+        await store.add_sharer_claim(gid, wk, 789, "歌3003", platform="netease",
+                                     sharer_name="王五", song_id="3003")
+        r5 = await svc.handle_segments(gid, _seg("3003"), 789, "王五")
+        check("歌还在窗口里则继续拦", len(r5.sharer_limited) == 1, str(r5.sharer_limited))
+    finally:
+        svc.providers.resolve = real
+
+
 async def main() -> None:
     await test_auto_archive_consumes_seq()
     await test_master_auto_archive_consumes_seq()
@@ -381,6 +442,7 @@ async def main() -> None:
     await test_one_per_sharer()
     await test_sharer_limit_text_placeholders()
     await test_delete_releases_sharer_claim()
+    await test_stale_claim_auto_released()
     print("\n====================================================")
     print(f"通过 {PASSED} 项，失败 {FAILED} 项")
     if FAILED:
