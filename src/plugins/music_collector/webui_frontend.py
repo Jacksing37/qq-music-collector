@@ -228,6 +228,9 @@ button:disabled{opacity:.5;cursor:not-allowed}
 /* 网易云账号（内嵌在「配置 → 网易云登录」分组里） */
 .acc-box{margin-top:14px;padding-top:14px;border-top:1px dashed var(--card-bd)}
 .acc-box .acc-title{font-size:13px;color:var(--muted);margin-bottom:8px}
+/* 风控人工验证提示（code=8810）：醒目但仍跟主题走 */
+.acc-risk{margin-top:10px;padding:10px 12px;border:1px solid var(--bad);background:var(--input);border-radius:8px;line-height:1.7;word-break:break-all}
+.acc-risk a{color:var(--accent);font-weight:600}
 
 /* ---------------- 手机 / 小屏适配 ---------------- */
 @media (max-width:900px){
@@ -1188,7 +1191,7 @@ function buildAccountBlock(){
       <button id="accRelogin" title="优先用配置里的手机号+密码换一套全新 cookie；换不到时退回 cookie 续期">重新登录</button>
     </div>
     <p class="muted" style="margin-top:8px">开启「掉登录自动重登」后，写歌单简介遇到「需要登录」会自动续期 / 重登并重试；上面这个按钮是手动触发一次（优先账密换新 cookie，并告诉你指纹有没有变）。手机号密码填在本分组里。</p>
-    <p class="muted" style="margin-top:6px">⚠️ 若提示 <code>code=8810 网络环境存在安全风险</code>，说明本机 IP 被网易云风控，账密重登会被拒，只能粘贴新的 <code>MUSIC_U</code>。简介报 <code>code=405 操作频繁</code> 则是写接口频控，与登录态无关，等一会儿会自动补写。</p>
+    <p class="muted" style="margin-top:6px">⚠️ 若提示 <code>code=8810 网络环境存在安全风险</code>，说明本机 IP 被网易云风控、账密重登会被拒；此时下方会给出<b>人工验证链接</b>（网易易盾），在浏览器打开过一遍验证后点「重新登录」即可。实在换不掉时，仍可粘贴浏览器登录后的 <code>MUSIC_U</code>。简介报 <code>code=405 操作频繁</code> 则是写接口频控，与登录态无关，等一会儿会自动补写。</p>
     <div id="accLogin" class="hidden" style="margin-top:14px">
       <p class="muted">粘贴浏览器 Cookie 里的 <code>MUSIC_U=xxxx</code>（只要 xx 部分也行）。建议私聊机器人用 <code>/music cookie</code> 设置。</p>
       <input id="accCookie" placeholder="MUSIC_U=xxxx 或仅 xxxx">
@@ -1340,9 +1343,12 @@ function renderAccount(j){
   const login=$("#accLogin");
   /* cookie 指纹（MUSIC_U 短哈希）：点完「重新登录」后对比它就知道 cookie 有没有真被换掉 */
   const fp = j.cookie_fp ? `　cookie 指纹：<code title="MUSIC_U 的短哈希，用来判断重登后 cookie 有没有真的换掉">${esc(j.cookie_fp)}</code>` : "";
-  if(j.valid){ box.innerHTML=`<span class="badge ok">已登录</span> 昵称：<b>${esc(j.nickname||"")}</b>　userId：${esc(j.userId||"")}${fp}`; if(login) login.classList.add("hidden"); }
-  else if(j.logged_in){ box.innerHTML=`<span class="badge bad">凭证存在但已失效</span> 请重新登录。${fp}`; if(login) login.classList.remove("hidden"); }
-  else { box.innerHTML=`<span class="badge bad">未登录</span> 请粘贴 MUSIC_U 登录。`; if(login) login.classList.remove("hidden"); }
+  /* 风控人工验证链接（code=8810）：账密登录被拒时网易云会给一个易盾验证页， */
+  /* 在浏览器打开过一遍验证即可放行本机 IP，然后再点「重新登录」。 */
+  const risk = j.risk_url ? `<div class="acc-risk">⚠️ 本机 IP 被网易云风控（<code>code=8810</code>），账密登录被拒。<br>请<b>在浏览器打开</b>下面的链接完成人工验证，再点一次「重新登录」：<br><a href="${esc(j.risk_url)}" target="_blank" rel="noopener">${esc(j.risk_url)}</a></div>` : "";
+  if(j.valid){ box.innerHTML=`<span class="badge ok">已登录</span> 昵称：<b>${esc(j.nickname||"")}</b>　userId：${esc(j.userId||"")}${fp}${risk}`; if(login) login.classList.add("hidden"); }
+  else if(j.logged_in){ box.innerHTML=`<span class="badge bad">凭证存在但已失效</span> 请重新登录。${fp}${risk}`; if(login) login.classList.remove("hidden"); }
+  else { box.innerHTML=`<span class="badge bad">未登录</span> 请粘贴 MUSIC_U 登录。${risk}`; if(login) login.classList.remove("hidden"); }
 }
 async function onAccLogin(){
   const inp=$("#accCookie"); const cookie=(inp?inp.value:"").trim(); if(!cookie){ return; }

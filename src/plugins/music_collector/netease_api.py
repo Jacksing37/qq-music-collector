@@ -168,6 +168,11 @@ class NeteaseAPI:
         #: 上次自动重登尝试的单调时钟，用于冷却（初值 -inf：进程刚起时不因
         #: 「系统开机不足 cooldown 秒」被误判进冷却）
         self._last_relogin: float = -float("inf")
+        #: 最近一次账密登录撞到风控（code=8810「网络环境存在安全风险」）时，
+        #: 网易云随响应下发的**人工验证跳转链接**。只有拿它在真实浏览器里过一遍
+        #: 验证，本机 IP 才可能被放行。仅存内存（单次尝试有效、会过期），每次
+        #: 账密登录开始前重置，成功后清空；供 WebUI / 日志展示。
+        self.last_risk_url: str = ""
         self._load_session()
 
     # ------------------------------------------------------------ session
@@ -454,6 +459,36 @@ class NeteaseAPI:
         """失败条目是否来自 linuxapi 通道（``linuxapi`` / ``linuxapi(pc)``）。"""
         return (text or "").startswith("linuxapi")
 
+    @staticmethod
+    def _extract_risk_url(data: Any) -> str:
+        """从登录响应里挖出风控「人工验证」跳转链接。
+
+        code=8810 时网易云会随响应下发，形如::
+
+            {"code": 8810, "message": "您当前的网络环境存在安全风险",
+             "redirectUrl": "https://y.music.163.com/g/yida/<token>"}
+
+        不同通道 / 版本字段名可能变（``redirectUrl`` / ``redirect_url``），甚至
+        藏在子字典里，所以既查已知键名，也兜底扫任何指向 ``/g/yida/`` 的 http
+        链接。挖不到时返回空串。
+        """
+        found = ""
+        stack: list[Any] = [data]
+        while stack:
+            cur = stack.pop()
+            if isinstance(cur, dict):
+                for key, val in cur.items():
+                    if isinstance(val, str):
+                        if key.lower() in ("redirecturl", "redirect_url") and val.startswith("http"):
+                            return val
+                        if not found and val.startswith("http") and "/yida/" in val:
+                            found = val
+                    elif isinstance(val, (dict, list)):
+                        stack.append(val)
+            elif isinstance(cur, list):
+                stack.extend(cur)
+        return found
+
     async def refresh_token(self) -> bool:
         """用现有 cookie 续期（``/login/token/refresh``），不需要账号密码。"""
         if not self.logged_in:
@@ -489,6 +524,8 @@ class NeteaseAPI:
             "rememberLogin": "true",
         }
         last = "所有通道都失败"
+        # 每次尝试重算：风控链接只反映「本次」是否撞上，避免展示上一次的旧链接。
+        self.last_risk_url = ""
         for label, call in (
             ("weapi", lambda: self._post("/login/cellphone", payload)),
             ("eapi", lambda: self._eapi_post("/login/cellphone", payload)),
@@ -501,14 +538,26 @@ class NeteaseAPI:
                 continue
             code = data.get("code")
             if code == 200:
+                self.last_risk_url = ""
                 self._save_session()
                 logger.info(
                     f"[netease] 账密登录成功（{label}），cookie 指纹 {self.cookie_fingerprint}"
                 )
                 return True, label
+            # 8810「网络环境存在安全风险」会带一个 redirectUrl，指向网易易盾的
+            # 人工验证页；留在 self.last_risk_url 里给 WebUI / 日志展示，操作员可
+            # 拿它在浏览器过一遍验证再重试。
+            risk_url = self._extract_risk_url(data)
+            if risk_url:
+                self.last_risk_url = risk_url
             last = f"{label}: code={code} {data.get('message') or data.get('msg') or ''}".strip()
             if code in (501, 502):  # 账号不存在 / 密码错误，换通道也一样
                 break
+        if self.last_risk_url:
+            logger.warning(
+                f"[netease] 账密登录被风控拦截（{last}）；"
+                f"请在浏览器打开以下链接完成人工验证后重试：{self.last_risk_url}"
+            )
         return False, last
 
     async def ensure_logged_in(

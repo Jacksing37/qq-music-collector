@@ -541,6 +541,9 @@ async def netease_account_status() -> dict:
         "userId": (profile or {}).get("userId") if profile else None,
         # MUSIC_U 的短指纹：点完「重新登录」后对比它就能看出 cookie 到底换没换
         "cookie_fp": _cookie_fingerprint(),
+        # 最近一次账密登录撞到风控（code=8810）时网易云下发的人工验证链接。
+        # 前端把它渲染成可点链接，操作员在浏览器过一遍验证即可放行本机 IP。
+        "risk_url": _risk_url(),
     }
 
 
@@ -548,6 +551,14 @@ def _cookie_fingerprint() -> str:
     """取网易云 cookie 指纹（旧客户端对象没有该属性时退回空串）。"""
     try:
         return service.netease.cookie_fingerprint
+    except Exception:
+        return ""
+
+
+def _risk_url() -> str:
+    """取「账密登录被风控」时网易云给的人工验证链接（无则空串）。"""
+    try:
+        return service.netease.last_risk_url or ""
     except Exception:
         return ""
 
@@ -761,6 +772,11 @@ async def _api_account(request: Request):
             note = (
                 "重新登录未成功：请检查 netease.phone / password（或 password_md5），"
                 "或直接粘贴新的 MUSIC_U"
+            )
+        if _risk_url():
+            note += (
+                "　⚠️ 本机 IP 被网易云风控（code=8810），请先在下方「人工验证链接」"
+                "的浏览器里完成验证，再点一次「重新登录」。"
             )
         return JSONResponse({"ok": bool(ok), "message": note, **await netease_account_status()})
     return JSONResponse({"ok": False, "message": f"未知操作: {action}"}, status_code=400)

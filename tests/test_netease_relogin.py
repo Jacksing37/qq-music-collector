@@ -13,7 +13,9 @@
 9. ``ensure_logged_in(fresh=True)``：跳过续期、直接用账密换一套全新 cookie；
 10. 405「操作频繁」的处理：**不重登**（实测换 cookie 无效），只如实报错并
     保留 ``code=405`` 供上层识别；eapi / api 回 405 是常态，不算频控；
-11. 归档器：命中频控只试 1 次就入队（越试越频繁），非频控失败照旧重试 3 次。
+11. 归档器：命中频控只试 1 次就入队（越试越频繁），非频控失败照旧重试 3 次；
+12. 账密登录撞风控（code=8810）时把响应里的**人工验证链接**（``redirectUrl``）
+    存进 ``last_risk_url`` 供 WebUI / 日志展示；登录成功后清空。
 """
 
 import asyncio
@@ -524,9 +526,94 @@ async def test_rate_limit_note_is_readable_without_credentials() -> None:
     assert "linuxapi" in note, note
 
 
+def test_extract_risk_url() -> None:
+    """8810 响应里的人工验证链接要能被挖出来（含字段名/嵌套兜底）。"""
+    url = "https://y.music.163.com/g/yida/e60c57537a0e41c4b3aecde63701369a"
+    assert NeteaseAPI._extract_risk_url(
+        {"code": 8810, "message": "您当前的网络环境存在安全风险", "redirectUrl": url}
+    ) == url
+    # 下划线命名
+    assert NeteaseAPI._extract_risk_url({"code": 8810, "redirect_url": url}) == url
+    # 藏在子字典里
+    assert NeteaseAPI._extract_risk_url({"data": {"x": {"redirectUrl": url}}}) == url
+    # 只给了一个 /g/yida/ 链接、键名不认识，也能兜底扫到
+    assert NeteaseAPI._extract_risk_url({"weird": url}) == url
+    # 正常响应 / 空数据 -> 空串
+    assert NeteaseAPI._extract_risk_url({"code": 200}) == ""
+    assert NeteaseAPI._extract_risk_url({}) == ""
+    assert NeteaseAPI._extract_risk_url(None) == ""
+
+
+async def test_login_8810_surfaces_verify_link() -> None:
+    """账密登录撞风控：返回失败、拿到 redirectUrl、把链接存进 last_risk_url。"""
+    api, _ = new_api(make_cfg())
+    api._cookies["MUSIC_U"] = "flagged"
+    url = "https://y.music.163.com/g/yida/deadbeef"
+    err = {"code": 8810, "message": "您当前的网络环境存在安全风险", "redirectUrl": url}
+
+    async def always_8810(*_a, **_k):
+        return dict(err)
+
+    api._post = always_8810
+    api._eapi_post = always_8810
+    api._linux_post = always_8810
+    # 账密登录成功后才会 _save_session；此处不应被调用到（保证 8810 不算账密错误）
+    ok, note = await api.login_with_password()
+    assert ok is False
+    assert "8810" in note, note
+    assert api.last_risk_url == url, api.last_risk_url
+
+
+async def test_login_success_clears_risk_url() -> None:
+    """一旦账密登录成功，旧的验证链接应被清掉（不再误导）。"""
+    api, _ = new_api(make_cfg())
+    api._cookies["MUSIC_U"] = "old"
+    api.last_risk_url = "https://y.music.163.com/g/yida/old"
+    risks: list[str] = []
+
+    async def weapi(path, payload):
+        if path == "/login/cellphone":
+            risks.append(api.last_risk_url)  # 成功前应已重置
+            return {"code": 200, "account": {"id": 1}}
+        return {"code": 301}
+
+    api._post = weapi
+    api._cookies["__csrf"] = "csrf"
+    ok, _ = await api.login_with_password()
+    assert ok is True
+    assert api.last_risk_url == "", api.last_risk_url
+    assert risks == [""], risks
+
+
+async def test_ensure_logged_in_fresh_keeps_risk_link_on_refresh_fallback() -> None:
+    """fresh 重登撞 8810 后靠续期救回：登录态虽可用，但风控链接仍保留给人工验证。"""
+    api, _ = new_api(make_cfg())
+    api._cookies["MUSIC_U"] = "flagged"
+    url = "https://y.music.163.com/g/yida/cafe"
+
+    async def always_8810(*_a, **_k):
+        return {"code": 8810, "message": "您当前的网络环境存在安全风险", "redirectUrl": url}
+
+    async def fake_refresh():
+        return True
+
+    async def fake_valid():
+        return True
+
+    api._post = always_8810
+    api._eapi_post = always_8810
+    api._linux_post = always_8810
+    api.refresh_token = fake_refresh
+    api.session_valid = fake_valid
+
+    assert await api.ensure_logged_in(force=True, fresh=True) is True
+    assert api.last_risk_url == url, api.last_risk_url
+
+
 async def main() -> None:
     test_pure_helpers()
     test_rate_limit_helpers()
+    test_extract_risk_url()
     await test_disabled_keeps_old_behaviour()
     await test_refresh_then_password_login()
     await test_update_description_auto_relogin_retry()
@@ -538,6 +625,9 @@ async def main() -> None:
     await test_rate_limit_note_is_readable_without_credentials()
     await test_archiver_stops_retrying_on_rate_limit()
     await test_archiver_still_retries_non_rate_limit_failures()
+    await test_login_8810_surfaces_verify_link()
+    await test_login_success_clears_risk_url()
+    await test_ensure_logged_in_fresh_keeps_risk_link_on_refresh_fallback()
     print("OK test_netease_relogin")
 
 
