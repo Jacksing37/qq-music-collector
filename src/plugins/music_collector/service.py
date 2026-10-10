@@ -62,9 +62,15 @@ class CollectResult:
 
     @property
     def any_music(self) -> bool:
+        """这条消息是否「跟音乐有关、需要回话」。
+
+        必须包含 ``master_duplicated``：否则「分享了一首总库已存在的歌」会被
+        ``handle_music_share`` 在 ``if not result.any_music: return`` 处直接静默
+        返回——用户既看不到总库重复提示，也看不到任何日志（2026-10-10 线上实证）。
+        """
         return bool(
             self.accepted or self.duplicated or self.unidentified
-            or self.sharer_limited or self.unmatched
+            or self.sharer_limited or self.unmatched or self.master_duplicated
         )
 
 
@@ -196,6 +202,27 @@ class CollectorService:
         #: 本批消息里已经占位的分享者 -> 首发占位记录。
         #: 同一条消息里贴了多首时，也只有第一首能过（其余按已分享处理）。
         claims_in_batch: dict[int, dict] = {}
+        #: 本批里**由这次分享新占下**的名额 -> 那首歌的 (platform, song_id)。
+        #: 若这首最后被判定成重复（同窗口已有 / 总库已有）而什么都没收录，名额要
+        #: 还回去，否则本人再分享别的歌会被误拦「本期已经分享过《…》」。
+        claimed_here: dict[int, tuple[str, str]] = {}
+
+        async def _rollback_claim(song: Song) -> None:
+            """本条分享什么都没收录时，把**本次刚占下**的名额还回去。
+
+            只还本批新占的：本人早先真正收录的那首不会被牵连（那种情况下本批压根
+            不会被走到这里——占位检查会先一步把他拦成 sharer_limited）。
+            """
+            key = (song.platform, song.song_id)
+            if claimed_here.get(sharer_id) != key:
+                return
+            await self.store.release_claims_for(group_id, state.key, [sharer_id])
+            claimed_here.pop(sharer_id, None)
+            claims_in_batch.pop(sharer_id, None)
+            logger.info(
+                f"[music] 群{group_id} {state.key} {sharer_name}({sharer_id}) 分享的"
+                f"《{song.title}》未收录（重复），已归还本次分享名额"
+            )
 
         for link in links:
             song = await self.providers.resolve(link)
@@ -208,8 +235,10 @@ class CollectorService:
                 continue
 
             # 同一窗口同一用户只收录第一首。
-            # 注意占位发生在「分享」而非「收录成功」这一刻：首发那首即使因重复 /
-            # 无法匹配没进榜，名额也算用掉了（否则同一人可以靠反复试探多占坑）。
+            # 占位发生在「分享」这一刻（同一条消息里贴多首时才不会互相插队），
+            # 但若这首最终被判定为**重复**（同窗口已有 / 总库已有）而什么都没收录，
+            # 名额会在下面 _rollback_claim 里还给本人；真正收录了（含网易云搜不到
+            # 但那首本身已入榜的）才占住名额。
             if pl.one_per_sharer:
                 first = claims_in_batch.get(sharer_id)
                 if first is None:
@@ -238,6 +267,7 @@ class CollectorService:
                         song_id=song.song_id,
                     )
                     if claimed:
+                        claimed_here[sharer_id] = (song.platform, song.song_id)
                         claims_in_batch[sharer_id] = {
                             "title": song.title,
                             "artists": song.artists,
@@ -276,6 +306,7 @@ class CollectorService:
                     result.duplicated.append(win_stored)
                 else:
                     result.master_duplicated.append(master_dup_stored)
+                await _rollback_claim(song)
                 continue
 
             inserted, stored = await self.store.add_song(group_id, state.key, song)
@@ -302,6 +333,9 @@ class CollectorService:
                         await asyncio.sleep(SEARCH_INTERVAL)
             else:
                 result.duplicated.append(stored)
+                # 同窗口已有这首歌、这次没收录：把本次刚占下的名额还回去，
+                # 让本人还能分享别的歌（否则会被误判成「本期已经分享过」）。
+                await _rollback_claim(song)
             if master_dup_stored is not None:
                 result.master_duplicated.append(master_dup_stored)
 

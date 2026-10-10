@@ -4,6 +4,17 @@
 跳过了同窗口去重判定，导致 result.duplicated 不被填充、notify_duplicate 形同虚设——
 重复分享完全静默（除非单独打开 compare_on_share）。
 
+追加（2026-10-10 线上报障「分享总库已有的歌机器人完全不回话，随后换一首却被拦
+『本期已经分享过』」）：
+  [D] ``CollectResult.any_music`` 必须包含 ``master_duplicated``——否则
+      ``handle_music_share`` 的 ``if not result.any_music: return`` 会直接静默
+      返回（连日志都没有）；
+  [E] 因「总库已有」而没收录的歌，不能白占该用户本期的名额；
+  [F] 因「同窗口已有」而没收录的歌，同样要归还名额；
+  [G] 真正收录了才占住名额（不能被上面的修复误放）；
+  [H] 总库重复提示的「首发者」：歌单导入进总库的行没有分享者信息，
+      不能再渲染成「首发: 0」。
+
 运行: PYTHONDONTWRITEBYTECODE=1 ./.venv/Scripts/python.exe tests/test_dup_notify.py
 """
 
@@ -21,6 +32,7 @@ import nonebot  # noqa: E402
 
 nonebot.init(driver="~fastapi")
 
+import music_collector as mc  # noqa: E402
 from music_collector.archiver import Archiver  # noqa: E402
 from music_collector.config import config_manager  # noqa: E402
 from music_collector.models import Song  # noqa: E402
@@ -166,10 +178,199 @@ async def test_same_window_dup_without_master():
         svc.providers.resolve = real
 
 
+# --------------------------------------------------------------------------
+# 2026-10-10 线上报障：总库重复「完全不回话」+ 名额被白占
+# --------------------------------------------------------------------------
+
+def _links(*ids: str) -> list[dict]:
+    return [
+        {"type": "text", "data": {"text": f"https://music.163.com/song?id={i}"}}
+        for i in ids
+    ]
+
+
+def _patch_resolve(svc, mapping: dict[str, Song]):
+    """按 ``link.song_id`` 返回对应歌曲，并返回还原函数。"""
+    real = svc.providers.resolve
+
+    async def _resolve(link):
+        sid = str(link.song_id or "")
+        return mapping.get(sid) or _song(sid, f"歌曲{sid}")
+
+    svc.providers.resolve = _resolve
+    return lambda: setattr(svc.providers, "resolve", real)
+
+
+def _quiet_side_effects():
+    """关掉「分享即归档 / 预探测」，让这些用例只看收集结果本身。"""
+    config_manager.config.playlist.auto_archive_on_share = False
+    config_manager.config.master.auto_archive = False
+
+
+async def test_master_dup_is_not_silent():
+    """[D] 跨窗口重复：result.any_music 必须为真（否则 handler 静默 return，无提示无日志）。"""
+    print("\n[D] 总库已有的歌：any_music 必须为真，否则机器人完全不回话")
+    tmp = Path(tempfile.mkdtemp())
+    svc, store = _make_svc(tmp)
+    await store.init()
+    gid = 6204
+    _quiet_side_effects()
+    config_manager.config.master.enabled = True
+    config_manager.config.master.compare_on_share = True
+    config_manager.config.playlist.one_per_sharer = True
+
+    # 预置：这首歌已在总库（来自另一个窗口 / 歌单导入），但当前窗口没有
+    await store.add_song(gid, MASTER_KEY, _song("555", "孤勇者"), src_window="import")
+
+    restore = _patch_resolve(svc, {"555": _song("555", "孤勇者")})
+    try:
+        r = await svc.handle_segments(gid, _links("555"), 123, "张三")
+        check("跨窗口重复不入当前窗口", len(r.accepted) == 0, str(r.accepted))
+        check("记 master_duplicated", len(r.master_duplicated) == 1, str(r.master_duplicated))
+        check(
+            "any_music 为真（修复前是 False -> handle_music_share 直接 return，用户看不到任何提示）",
+            r.any_music is True,
+        )
+    finally:
+        restore()
+
+
+async def test_master_dup_returns_claim():
+    """[E] 因「总库已有」没收录，不能白占名额：换一首新歌要能正常收录。"""
+    print("\n[E] 总库重复不占名额：本人换一首歌仍能被收录")
+    tmp = Path(tempfile.mkdtemp())
+    svc, store = _make_svc(tmp)
+    await store.init()
+    gid = 6205
+    _quiet_side_effects()
+    config_manager.config.master.enabled = True
+    config_manager.config.master.compare_on_share = True
+    config_manager.config.playlist.one_per_sharer = True
+
+    wk = svc.current_window(gid).key
+    await store.add_song(gid, MASTER_KEY, _song("555", "孤勇者"), src_window="import")
+
+    restore = _patch_resolve(svc, {"555": _song("555", "孤勇者"), "666": _song("666", "海阔天空")})
+    try:
+        r1 = await svc.handle_segments(gid, _links("555"), 123, "张三")
+        check("总库已有的歌不收录", len(r1.accepted) == 0, str(r1.accepted))
+        check(
+            "本次没收录 -> 占位已归还",
+            await store.get_sharer_claim(gid, wk, 123) is None,
+            str(await store.get_sharer_claim(gid, wk, 123)),
+        )
+        r2 = await svc.handle_segments(gid, _links("666"), 123, "张三")
+        check("换一首新歌能正常收录（修复前会被拦『本期已经分享过』）",
+              len(r2.accepted) == 1, str(r2.accepted))
+        check("此时不报 sharer_limited", len(r2.sharer_limited) == 0, str(r2.sharer_limited))
+        claim = await store.get_sharer_claim(gid, wk, 123)
+        check("收录后占位落在新歌上", bool(claim) and claim.get("song_id") == "666",
+              str(claim))
+    finally:
+        restore()
+
+
+async def test_window_dup_returns_claim():
+    """[F] 因「同窗口已有」（别人先收了）没收录，同样要归还名额。"""
+    print("\n[F] 同窗口重复不占名额：本人换一首歌仍能被收录")
+    tmp = Path(tempfile.mkdtemp())
+    svc, store = _make_svc(tmp)
+    await store.init()
+    gid = 6206
+    _quiet_side_effects()
+    config_manager.config.master.enabled = False  # 隔离：只走普通窗口去重
+    config_manager.config.playlist.one_per_sharer = True
+
+    wk = svc.current_window(gid).key
+    restore = _patch_resolve(svc, {"555": _song("555", "孤勇者"), "666": _song("666", "海阔天空")})
+    try:
+        r0 = await svc.handle_segments(gid, _links("555"), 456, "李四")
+        check("李四先收录", len(r0.accepted) == 1, str(r0.accepted))
+
+        r1 = await svc.handle_segments(gid, _links("555"), 123, "张三")
+        check("张三再分享同一首 -> 同窗重复", len(r1.duplicated) == 1, str(r1.duplicated))
+        check(
+            "同窗重复 -> 占位也归还",
+            await store.get_sharer_claim(gid, wk, 123) is None,
+            str(await store.get_sharer_claim(gid, wk, 123)),
+        )
+        r2 = await svc.handle_segments(gid, _links("666"), 123, "张三")
+        check("张三换歌能收录", len(r2.accepted) == 1, str(r2.accepted))
+    finally:
+        restore()
+
+
+async def test_accepted_still_holds_claim():
+    """[G] 真正收录了才占住名额——修复不能把「一人一首」误放成「随便贴」。"""
+    print("\n[G] 收录成功仍占住名额，本人再分享别的歌依旧被拦")
+    tmp = Path(tempfile.mkdtemp())
+    svc, store = _make_svc(tmp)
+    await store.init()
+    gid = 6207
+    _quiet_side_effects()
+    config_manager.config.master.enabled = False
+    config_manager.config.playlist.one_per_sharer = True
+
+    wk = svc.current_window(gid).key
+    restore = _patch_resolve(svc, {"555": _song("555", "孤勇者"), "666": _song("666", "海阔天空")})
+    try:
+        r1 = await svc.handle_segments(gid, _links("555"), 123, "张三")
+        check("首次收录成功", len(r1.accepted) == 1, str(r1.accepted))
+        check("占位仍在", await store.get_sharer_claim(gid, wk, 123) is not None)
+        r2 = await svc.handle_segments(gid, _links("666"), 123, "张三")
+        check("同一人再分享被拦（sharer_limited）", len(r2.sharer_limited) == 1, str(r2.sharer_limited))
+        check("被拦的歌不进榜", len(r2.accepted) == 0, str(r2.accepted))
+        check("占位没被误放", await store.get_sharer_claim(gid, wk, 123) is not None)
+    finally:
+        restore()
+
+
+async def test_master_dup_text_who_fallback():
+    """[H] 歌单导入进总库的行没有分享者 -> 不能渲染成「首发: 0」."""
+    print("\n[H] 总库重复提示：导入行不显示「首发: 0」")
+    tmp = Path(tempfile.mkdtemp())
+    svc, store = _make_svc(tmp)
+    await store.init()
+    gid = 6208
+    _quiet_side_effects()
+    config_manager.config.master.enabled = True
+    config_manager.config.master.notify_template = (
+        " 这首《{title}》{date} 由 {who} 分享过了（总库第 {index} 位）"
+    )
+
+    imported = Song(
+        platform="netease", song_id="2754200273", title="空と約束", artists="测试歌手",
+        sharer_id=0, sharer_name="", url="", netease_id="2754200273", matched=True,
+        created_at=1791625463.0,
+    )
+    imported.src_window = "import"
+
+    real_service = mc.service
+    mc.service = svc
+    try:
+        text = await mc.build_master_dup_text(imported, 3, gid, "李四")
+        check("不含「首发: 0」", "0 分享过了" not in text or "未知" in text, text)
+        check("含未知占位文案", "未知（总库导入）" in text, text)
+        check("歌名正确", "空と約束" in text, text)
+        check("日期已渲染（非占位符残留）", "{date}" not in text, text)
+
+        normal = _song("555", "孤勇者")
+        normal.src_window = "W20260925-1200"
+        text2 = await mc.build_master_dup_text(normal, 1, gid, "李四")
+        check("正常记录仍显示分享者", "张三" in text2, text2)
+    finally:
+        mc.service = real_service
+
+
 async def main() -> None:
     await test_same_window_dup_with_master()
     await test_cross_window_dup_still_master()
     await test_same_window_dup_without_master()
+    await test_master_dup_is_not_silent()
+    await test_master_dup_returns_claim()
+    await test_window_dup_returns_claim()
+    await test_accepted_still_holds_claim()
+    await test_master_dup_text_who_fallback()
     print("\n====================================================")
     print(f"通过 {PASSED} 项，失败 {FAILED} 项")
     if FAILED:

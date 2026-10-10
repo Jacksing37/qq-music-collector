@@ -6,8 +6,9 @@
    记录已存在、``created_new=False``，于是期号永远不动。这里锁死「自动归档建歌单
    同样要消耗期号，复用时不重复消耗」。
 2. **无法匹配提示**：非网易云歌搜不到时，要在收录消息**同一条**里附带提示。
-3. **同窗口同一用户只收录第一首**：判定基准是「首次分享」（首发那首即使因重复 /
-   无法匹配没进榜，名额也算用掉）。
+3. **同窗口同一用户只收录第一首**：判定基准是「首次分享」，但若首发那首最终因
+   **重复**（同窗口已有 / 总库已有）而没进榜，名额会还给本人（2026-10-10 线上更正：
+   否则他既没收到歌、又被判「本期已经分享过」，换歌也被拦）。真正收录了才占住名额。
 
 运行: PYTHONDONTWRITEBYTECODE=1 ./.venv/Scripts/python.exe tests/test_sharer_limit_and_seq.py
 """
@@ -260,16 +261,25 @@ async def test_one_per_sharer():
         r4 = await svc.handle_segments(gid, _seg("902"), 789, "王五")
         check("换人发同一首歌正常收录", len(r4.accepted) == 1, str(r4.accepted))
 
-        # 判定基准 = 首次分享：首发那首因重复没进榜，名额同样算用掉
+        # 2026-10-10 更正：首发那首若是因**重复**而没进榜（别人先收了 / 总库已有），
+        # 名额要还给本人——否则他「什么都没收到，还被判本期已分享过」，换歌也被拦。
+        wk = svc.current_window(gid).key
         r5 = await svc.handle_segments(gid, _seg("901"), 999, "赵六")
         check("首发就是别人已收录的歌 → 记 duplicated",
               len(r5.duplicated) == 1, str(r5.duplicated))
+        check("没收录 → 名额已归还",
+              await store.get_sharer_claim(gid, wk, 999) is None,
+              str(await store.get_sharer_claim(gid, wk, 999)))
         r6 = await svc.handle_segments(gid, _seg("905"), 999, "赵六")
-        check("首次分享即占位：后续新歌也被拦", len(r6.accepted) == 0,
+        check("重复不占名额：换个新歌能被收录", len(r6.accepted) == 1,
               str(r6.accepted))
-        check("被拦时用的仍是首发歌名",
-              r6.sharer_limited[0][1].get("title") == "歌901",
-              str(r6.sharer_limited[0][1]))
+        # 真正收录之后，名额才生效
+        r6b = await svc.handle_segments(gid, _seg("907"), 999, "赵六")
+        check("收录之后才占位：再发新歌被拦", len(r6b.sharer_limited) == 1,
+              str(r6b.sharer_limited))
+        check("被拦时用的是首发歌名",
+              r6b.sharer_limited[0][1].get("title") == "歌905",
+              str(r6b.sharer_limited[0][1]))
     finally:
         svc.providers.resolve = real
 

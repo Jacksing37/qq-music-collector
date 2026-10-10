@@ -261,9 +261,12 @@ async def build_master_dup_text(
     """
     cfg = service.cfg(group_id).master
     aliases = service.cfg(group_id).playlist.sharer_aliases
-    who = resolve_alias(
-        song.sharer_name or str(song.sharer_id), song.sharer_id, aliases
-    )
+    # 从歌单导入进总库的歌（src_window="import"）没有分享者信息（sharer_id=0、
+    # 昵称为空），直接拼 str(0) 会渲染成「首发: 0」；退回一句可读的占位文案。
+    who_raw = (song.sharer_name or "").strip()
+    if not who_raw and song.sharer_id:
+        who_raw = str(song.sharer_id)
+    who = resolve_alias(who_raw, song.sharer_id, aliases) if who_raw else "未知（总库导入）"
     nick = resolve_alias(sharer_name, 0, aliases)
     try:
         count = await service.store.count(group_id, MASTER_KEY)
@@ -637,9 +640,15 @@ async def handle_music_share(bot: Bot, event: GroupMessageEvent) -> None:
                 text = await build_master_dup_text(song, index, group_id, sharer_name)
             except Exception as exc:
                 logger.warning(f"[music] 总库重复提示渲染失败，回退内置格式: {exc}")
-                who = resolve_alias(song.sharer_name or str(song.sharer_id), song.sharer_id, cfg.playlist.sharer_aliases)
+                who = (song.sharer_name or "").strip() or (
+                    str(song.sharer_id) if song.sharer_id else "未知（总库导入）"
+                )
                 period = getattr(song, "src_window", "") or ""
-                text = f" 这首《{song.title}》在 {period} 期 {_fmt_dup_date(song.created_at)}，由 {who} 分享过了哟"
+                where = "" if period == "import" else (f"（{period} 期）" if period else "")
+                text = (
+                    f" 这首《{song.title}》{where}{_fmt_dup_date(song.created_at)}，"
+                    f"由 {who} 分享过了哟"
+                )
             await _reply_song(bot, event, text, song, with_card=cfg.reply_card)
 
     if result.unidentified:
