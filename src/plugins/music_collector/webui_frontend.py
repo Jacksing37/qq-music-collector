@@ -1185,9 +1185,10 @@ function buildAccountBlock(){
     <div class="acc-title">网易云账号</div>
     <div id="accStatus" class="muted">加载中…</div>
     <div class="row end" style="margin-top:12px">
-      <button id="accRelogin" title="用配置里的手机号+密码（或 cookie 续期）重新登录一次">重新登录</button>
+      <button id="accRelogin" title="优先用配置里的手机号+密码换一套全新 cookie；换不到时退回 cookie 续期">重新登录</button>
     </div>
-    <p class="muted" style="margin-top:8px">开启「掉登录自动重登」后，写歌单简介遇到「需要登录」会自动续期 / 重登并重试；上面这个按钮是手动触发一次。手机号密码填在本分组里。</p>
+    <p class="muted" style="margin-top:8px">开启「掉登录自动重登」后，写歌单简介遇到「需要登录」会自动续期 / 重登并重试；上面这个按钮是手动触发一次（优先账密换新 cookie，并告诉你指纹有没有变）。手机号密码填在本分组里。</p>
+    <p class="muted" style="margin-top:6px">⚠️ 若提示 <code>code=8810 网络环境存在安全风险</code>，说明本机 IP 被网易云风控，账密重登会被拒，只能粘贴新的 <code>MUSIC_U</code>。简介报 <code>code=405 操作频繁</code> 则是写接口频控，与登录态无关，等一会儿会自动补写。</p>
     <div id="accLogin" class="hidden" style="margin-top:14px">
       <p class="muted">粘贴浏览器 Cookie 里的 <code>MUSIC_U=xxxx</code>（只要 xx 部分也行）。建议私聊机器人用 <code>/music cookie</code> 设置。</p>
       <input id="accCookie" placeholder="MUSIC_U=xxxx 或仅 xxxx">
@@ -1337,8 +1338,10 @@ async function loadAccount(){
 function renderAccount(j){
   const box=$("#accStatus"); if(!box) return;   // 配置页还没渲染时不报错
   const login=$("#accLogin");
-  if(j.valid){ box.innerHTML=`<span class="badge ok">已登录</span> 昵称：<b>${esc(j.nickname||"")}</b>　userId：${esc(j.userId||"")}`; if(login) login.classList.add("hidden"); }
-  else if(j.logged_in){ box.innerHTML=`<span class="badge bad">凭证存在但已失效</span> 请重新登录。`; if(login) login.classList.remove("hidden"); }
+  /* cookie 指纹（MUSIC_U 短哈希）：点完「重新登录」后对比它就知道 cookie 有没有真被换掉 */
+  const fp = j.cookie_fp ? `　cookie 指纹：<code title="MUSIC_U 的短哈希，用来判断重登后 cookie 有没有真的换掉">${esc(j.cookie_fp)}</code>` : "";
+  if(j.valid){ box.innerHTML=`<span class="badge ok">已登录</span> 昵称：<b>${esc(j.nickname||"")}</b>　userId：${esc(j.userId||"")}${fp}`; if(login) login.classList.add("hidden"); }
+  else if(j.logged_in){ box.innerHTML=`<span class="badge bad">凭证存在但已失效</span> 请重新登录。${fp}`; if(login) login.classList.remove("hidden"); }
   else { box.innerHTML=`<span class="badge bad">未登录</span> 请粘贴 MUSIC_U 登录。`; if(login) login.classList.remove("hidden"); }
 }
 async function onAccLogin(){

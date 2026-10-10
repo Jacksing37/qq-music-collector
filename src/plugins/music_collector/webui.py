@@ -539,7 +539,17 @@ async def netease_account_status() -> dict:
         "valid": valid,
         "nickname": (profile or {}).get("nickname") if profile else None,
         "userId": (profile or {}).get("userId") if profile else None,
+        # MUSIC_U 的短指纹：点完「重新登录」后对比它就能看出 cookie 到底换没换
+        "cookie_fp": _cookie_fingerprint(),
     }
+
+
+def _cookie_fingerprint() -> str:
+    """取网易云 cookie 指纹（旧客户端对象没有该属性时退回空串）。"""
+    try:
+        return service.netease.cookie_fingerprint
+    except Exception:
+        return ""
 
 
 # -------------------------------------------------------------------- 路由
@@ -729,14 +739,29 @@ async def _api_account(request: Request):
         service.netease.clear_session()
         return JSONResponse({"ok": True, **await netease_account_status()})
     if action == "relogin":
-        # 手动触发：续期 → 账密重登；忽略冷却，方便排查时连点
-        ok = await service.netease.ensure_logged_in(force=True, ignore_cooldown=True)
-        note = (
-            "已重新登录成功"
-            if ok
-            else "重新登录未成功：请检查 netease.phone / password（或 password_md5），"
-                 "或直接粘贴新的 MUSIC_U"
+        # 手动触发：优先**账密换一套全新 cookie**（fresh=True）。
+        # 不先走「原地续期」——实测（2026-10-10 线上）续期返回 code=200 却
+        # **不下发新 cookie**（指纹前后一模一样），拿它当「重新登录」是自欺欺人。
+        # 忽略冷却，方便排查时连点。
+        before = _cookie_fingerprint()
+        ok = await service.netease.ensure_logged_in(
+            force=True, ignore_cooldown=True, fresh=True
         )
+        after = _cookie_fingerprint()
+        if ok and after and after != before:
+            note = f"重新登录成功，cookie 已刷新（{before} → {after}）"
+        elif ok:
+            note = (
+                f"登录态可用，但 cookie 没有变化（{after or '未知'}）。"
+                "本环境账密登录可能被网易云判为风险网络（code=8810 网络环境存在安全风险），"
+                "此时只有「续期」会成功、换不掉 cookie；"
+                "若确实要换新 cookie，请在浏览器登录网易云后复制 MUSIC_U 粘贴保存。"
+            )
+        else:
+            note = (
+                "重新登录未成功：请检查 netease.phone / password（或 password_md5），"
+                "或直接粘贴新的 MUSIC_U"
+            )
         return JSONResponse({"ok": bool(ok), "message": note, **await netease_account_status()})
     return JSONResponse({"ok": False, "message": f"未知操作: {action}"}, status_code=400)
 

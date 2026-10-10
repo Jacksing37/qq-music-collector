@@ -11,8 +11,9 @@
 8. ``_capture_cookies``：eapi / linuxapi / api 通道下发的 Set-Cookie 也必须
    吸收并落盘（原先只有 weapi 收，于是走 eapi 通道登录「成功但 cookie 没换」）；
 9. ``ensure_logged_in(fresh=True)``：跳过续期、直接用账密换一套全新 cookie；
-10. 405「操作频繁」的归因：只有 **linuxapi 也回 405** 才算疑似风控、才重登；
-    eapi / api 回 405 是常态（这两条通道本来就写不进简介），不得触发重登。
+10. 405「操作频繁」的处理：**不重登**（实测换 cookie 无效），只如实报错并
+    保留 ``code=405`` 供上层识别；eapi / api 回 405 是常态，不算频控；
+11. 归档器：命中频控只试 1 次就入队（越试越频繁），非频控失败照旧重试 3 次。
 """
 
 import asyncio
@@ -35,9 +36,8 @@ nonebot.init(driver="~fastapi")
 from music_collector import netease_api as na  # noqa: E402
 from music_collector.netease_api import NeteaseAPI  # noqa: E402
 
-# 测试里不要把通道之间的 1 秒间隔 / 405 退避真的等出来
+# 测试里不要把通道之间的 1 秒间隔真的等出来
 na.CHANNEL_GAP_SECONDS = 0.0
-na.RATE_LIMIT_BACKOFF_SECONDS = 0.0
 
 
 def _resp(payload: dict, set_cookies: dict | None = None) -> httpx.Response:
@@ -368,67 +368,45 @@ async def test_ensure_logged_in_fresh_skips_refresh() -> None:
     assert calls2 == ["/login/token/refresh"], calls2
 
 
-async def test_update_description_rate_limit_relogin_after_backoff() -> None:
-    """连 linuxapi 都 405（疑似这套 cookie 被风控）-> 账密换新 cookie -> 重试成功。"""
+async def test_rate_limit_does_not_relogin() -> None:
+    """405 频控**不重登**（换 cookie 治不了），但 reason 要保住 ``code=405`` 供上层识别。
+
+    依据 2026-10-10 线上实测：同一个 cookie 4 秒前刚写成功另一个歌单；
+    eapi 续期返回 code=200 却不下发新 cookie；服务器 IP 的账密登录被
+    网易云判「网络环境存在安全风险」(code=8810) 直接拒。故 405 只报错。
+    """
     api, _ = new_api(make_cfg())
     api._cookies["MUSIC_U"] = "flagged"
-    state = {"blocked": True, "written": "", "fingerprints": []}
-    seen: list[tuple[str, str]] = []
+    calls = {"n": 0}
 
-    async def fake_linux(path, payload, os_name="linux"):
-        seen.append(("linux", path))
-        if path == "/playlist/desc/update":
-            if state["blocked"]:
-                return {"code": 405, "message": "操作频繁，请稍候再试"}
-            state["written"] = payload["desc"]
-            return {"code": 200}
-        return {"code": 200}
-
-    async def fake_405(*_a, **_k):
-        return {"code": 405, "message": "操作频繁，请稍候再试"}
-
-    async def fake_weapi(path, payload):
-        seen.append(("weapi", path))
-        if path == "/login/cellphone":
-            state["blocked"] = False
-            api._cookies["MUSIC_U"] = "brand-new"
-            return {"code": 200}
+    async def always_405(*_a, **_k):
+        calls["n"] += 1
         return {"code": 405, "message": "操作频繁，请稍候再试"}
 
     async def fake_desc(_pid):
-        return state["written"]
+        return ""
 
-    async def fake_valid():
-        return True
+    async def boom(*_a, **_k):
+        raise AssertionError("405 频控不该触发重登或续期（换 cookie 无效）")
 
-    api._linux_post = fake_linux
-    api._eapi_post = fake_405
-    api._api_post = fake_405
-    api._post = fake_weapi
+    api._linux_post = always_405
+    api._eapi_post = always_405
+    api._api_post = always_405
+    api._post = always_405
     api.playlist_description = fake_desc
-    api.session_valid = fake_valid
-
-    # 记录每次写盘时的指纹，用于确认「重登确实换了 cookie」
-    orig_save = api._save_session
-
-    def spy_save():
-        state["fingerprints"].append(api._cookies.get("MUSIC_U", ""))
-        orig_save()
-
-    api._save_session = spy_save
+    api.login_with_password = boom
+    api.refresh_token = boom
 
     ok, note = await api.update_description(123, "第一行\n第二行")
-    assert ok is True, note
-    assert "自动重登后" in note, note
-    assert state["written"] == "第一行\n第二行"
-    assert ("weapi", "/login/cellphone") in seen, seen
-    assert ("weapi", "/login/token/refresh") not in seen, "405 场景应跳过续期直接换 cookie"
-    # 重登时确实写入了新 cookie（指纹从 flagged 变成了 brand-new）
-    assert "brand-new" in state["fingerprints"], state["fingerprints"]
+    assert ok is False
+    assert "code=405" in note, note
+    assert "频控" in note, note
+    # 六条通道各试一次（linuxapi(pc) / linuxapi / linuxapi-batch / eapi / api / weapi）
+    assert calls["n"] == 6, calls["n"]
 
 
-async def test_plain_405_alone_does_not_relogin() -> None:
-    """eapi / api 回 405 是常态：linuxapi 没回 405 时不得触发重登。"""
+async def test_plain_405_alone_is_not_labelled_rate_limited() -> None:
+    """eapi / api 回 405 是常态：linuxapi 没回 405 时既不算频控、也不重登。"""
     api, _ = new_api(make_cfg())
     api._cookies["MUSIC_U"] = "ok"
     seen: list[str] = []
@@ -461,7 +439,64 @@ async def test_plain_405_alone_does_not_relogin() -> None:
     assert "/login/cellphone" not in seen and "/login/token/refresh" not in seen
 
 
-async def test_rate_limit_without_credentials_is_readable() -> None:
+async def test_archiver_stops_retrying_on_rate_limit() -> None:
+    """归档器：命中频控只试 1 次就入队（原地重试只会越试越频繁）。"""
+    from music_collector.archiver import Archiver
+
+    api, _ = new_api(make_cfg())
+    calls = {"n": 0}
+    saved: dict = {}
+
+    async def always_405(playlist_id, desc, name=""):
+        calls["n"] += 1
+        return False, "linuxapi(pc):code=405 操作频繁，请稍候再试（网易云写接口频控）"
+
+    class FakeStore:
+        async def drop_pending_desc(self, playlist_id):
+            return None
+
+        async def save_pending_desc(self, playlist_id, name, group_id, desc, note, **kw):
+            saved.update(pid=playlist_id, note=note, gid=group_id)
+
+    api.update_description = always_405
+    arch = Archiver(api, FakeStore())
+    ok, note = await arch.write_description(
+        999, "简介内容", name="歌单名", group_id=1, retries=3
+    )
+    assert ok is False
+    assert calls["n"] == 1, f"频控只该试 1 次，实际 {calls['n']}"
+    assert saved["pid"] == "999" and saved["gid"] == 1
+    assert "code=405" in saved["note"], saved["note"]
+
+
+async def test_archiver_still_retries_non_rate_limit_failures() -> None:
+    """非频控失败照旧退避重试 3 次（对照组，防止把重试整个关掉）。"""
+    from music_collector.archiver import Archiver
+
+    api, _ = new_api(make_cfg())
+    calls = {"n": 0}
+    saved: dict = {}
+
+    async def always_fail(playlist_id, desc, name=""):
+        calls["n"] += 1
+        return False, "weapi:code=-1 weapi 返回空响应（通道被拦截）"
+
+    class FakeStore:
+        async def drop_pending_desc(self, playlist_id):
+            return None
+
+        async def save_pending_desc(self, playlist_id, name, group_id, desc, note, **kw):
+            saved.update(pid=playlist_id)
+
+    api.update_description = always_fail
+    arch = Archiver(api, FakeStore())
+    ok, _ = await arch.write_description(888, "简介", name="n", group_id=2, retries=3)
+    assert ok is False
+    assert calls["n"] == 3, calls["n"]
+    assert saved["pid"] == "888"
+
+
+async def test_rate_limit_note_is_readable_without_credentials() -> None:
     """405 且没配账密：给可读原因，并且提示已入队等待补写。"""
     api, _ = new_api(make_cfg(phone="", password="", password_md5=""))
     api._cookies["MUSIC_U"] = "flagged"
@@ -498,9 +533,11 @@ async def main() -> None:
     await test_update_description_relogin_failed_is_readable()
     await test_capture_cookies_covers_eapi_and_linuxapi()
     await test_ensure_logged_in_fresh_skips_refresh()
-    await test_update_description_rate_limit_relogin_after_backoff()
-    await test_plain_405_alone_does_not_relogin()
-    await test_rate_limit_without_credentials_is_readable()
+    await test_rate_limit_does_not_relogin()
+    await test_plain_405_alone_is_not_labelled_rate_limited()
+    await test_rate_limit_note_is_readable_without_credentials()
+    await test_archiver_stops_retrying_on_rate_limit()
+    await test_archiver_still_retries_non_rate_limit_failures()
     print("OK test_netease_relogin")
 
 

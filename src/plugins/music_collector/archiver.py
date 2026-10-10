@@ -273,6 +273,11 @@ class Archiver:
 
         ``window_key`` / ``snapshot`` 会随队列一起存下来，让补写时能按当前数据
         （或归档时的快照）重新生成简介，而不是直接重推这段旧文本。
+
+        命中频控（``code=405`` 操作频繁）时**不再原地重试**：那是账号级的写接口
+        频率限制，隔几秒重试只会越试越频繁（线上实测：连续三次重试全部 405，
+        而 4 秒前另一个歌单还写成功过）。直接入队，交给 ``job_descfix`` 隔一段
+        时间补写 —— 频控本来就是「等」出来的，不是「重试」出来的。
         """
         note = "未尝试"
         for attempt in range(1, max(1, retries) + 1):
@@ -280,6 +285,12 @@ class Archiver:
             if ok:
                 await self.store.drop_pending_desc(str(playlist_id))
                 return True, note
+            if NeteaseAPI._is_rate_limit(note):
+                logger.info(
+                    f"[netease] 简介写入命中频控，跳过原地重试改为入队补写"
+                    f" playlist={playlist_id}"
+                )
+                break
             if attempt < max(1, retries):
                 await asyncio.sleep(min(3 * attempt, 10))
         await self.store.save_pending_desc(

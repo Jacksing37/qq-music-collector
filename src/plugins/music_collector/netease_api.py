@@ -58,10 +58,6 @@ _BASE62 = string.ascii_letters + string.digits
 #: 挨着发容易触发 406「操作频繁」）。测试里可置 0 避免空等。
 CHANNEL_GAP_SECONDS = 1.0
 
-#: 命中 405「操作频繁」时的退避秒数：先等一会儿再重登重试，别在风控期
-#: 火上浇油。测试里可置 0 避免空等。
-RATE_LIMIT_BACKOFF_SECONDS = 6.0
-
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -447,8 +443,8 @@ class NeteaseAPI:
         """失败原因是否命中频控（``code=405``「操作频繁」）。
 
         注意：**eapi / api 的 ``desc/update`` 回 405 是常态**（这两条通道本来
-        就写不进简介，见模块头注释），所以不能一看到 405 就去重登；只有
-        ``linuxapi`` 系（唯一能写进简介的通道）也回 405 时才可疑。
+        就写不进简介，见模块头注释），所以不能一看到 405 就当成「真被频控」；
+        配合 ``_is_linux_channel_error`` 一起用：只有 linuxapi 系也回 405 才算。
         """
         t = text or ""
         return ("code=405" in t) or ("操作频繁" in t) or ("操作过于频繁" in t)
@@ -549,8 +545,12 @@ class NeteaseAPI:
             ok, note = await self.login_with_password()
             if ok and await self.session_valid():
                 return True
+            logger.info(f"[netease] 账密重登未成功（{note}），改试 cookie 续期兜底")
             if await self.refresh_token() and await self.session_valid():
-                logger.info("[netease] 账密重登不可用，已退回 cookie 续期")
+                logger.info(
+                    "[netease] 续期成功，但注意：续期通常**不下发新 cookie**，"
+                    f"指纹仍为 {self.cookie_fingerprint}"
+                )
                 return True
             logger.warning(f"[netease] 强制换 cookie 重登未成功：{note}")
             return False
@@ -886,31 +886,33 @@ class NeteaseAPI:
         if ok:
             return True, note
 
-        # ---- 失败归因：是「登录态没了」还是「这套 cookie 被风控了」----
-        # 301 / 需要登录 = cookie 已失效，续期往往就够。
+        # ---- 失败归因：是「登录态没了」还是「被频控了」----
+        # ① 301 / 需要登录 = cookie 已失效，续期 / 账密重登能救。
         auth_failed = any(self._is_auth_error(e) for e in errors)
-        # 405「操作频繁」：eapi / api 回 405 是常态（这俩通道本来就写不进简介），
-        # 不足为据；只有**唯一能写进简介的 linuxapi 系通道也回 405** 时才当作
-        # 「这套 cookie 被风控标记了」——续期治不了（cookie 内容不变），得账密换新的。
-        rate_blocked = any(
-            self._is_linux_channel_error(e) and self._is_rate_limit(e) for e in errors
-        )
+        # ② 405「操作频繁」= 写接口的**账号级频控**，换 cookie 治不了。
+        #    2026-10-10 在线上实测确认：
+        #      · 同一个 cookie 在 16:23:35 刚用 linuxapi 写成功另一个歌单，
+        #        4 秒后写第二个就 405 —— 与登录态无关；
+        #      · eapi 续期返回 code=200 但**不下发新 cookie**（指纹前后一致）；
+        #      · 服务器 IP 的账密登录被网易云判「网络环境存在安全风险」
+        #        （code=8810）直接拒绝。
+        #    所以 405 只如实报错、**不重登**，把「等一会儿」交给上层：
+        #    归档器见到频控就不再原地重试（越试越频繁），直接入队等 job_descfix 补写。
+        #    注意 eapi / api 的 desc/update 回 405 是常态（这俩通道本来就写不进简介），
+        #    不足为据，只有 linuxapi 系也回 405 才算「真被频控」。
+        def _rate_blocked(errs: list[str]) -> bool:
+            return any(
+                self._is_linux_channel_error(e) and self._is_rate_limit(e) for e in errs
+            )
 
-        if auth_failed or rate_blocked:
-            if rate_blocked and not auth_failed:
-                # 风控期连着重登只会火上浇油，先退避一会儿
-                await asyncio.sleep(RATE_LIMIT_BACKOFF_SECONDS)
-                logger.info(
-                    "[netease] 连 linuxapi 都返回 405（疑似这套 cookie 被风控），"
-                    f"退避后换新 cookie 重试（当前指纹 {self.cookie_fingerprint}）"
-                )
-            else:
-                logger.info(
-                    f"[netease] 简介写入判定为登录态失效，尝试重新登录后重试"
-                    f"（cookie 指纹 {self.cookie_fingerprint}）"
-                )
-            # 405 场景直接买「全新 cookie」（fresh=True），续期换不掉风控标记
-            if await self.ensure_logged_in(force=True, fresh=rate_blocked):
+        rate_blocked = _rate_blocked(errors)
+
+        if auth_failed:
+            logger.info(
+                f"[netease] 简介写入判定为登录态失效，尝试重新登录后重试"
+                f"（cookie 指纹 {self.cookie_fingerprint}）"
+            )
+            if await self.ensure_logged_in(force=True):
                 logger.info(
                     f"[netease] 已自动重新登录，重试写简介"
                     f"（cookie 指纹 {self.cookie_fingerprint}）"
@@ -919,18 +921,12 @@ class NeteaseAPI:
                 if ok2:
                     return True, f"{note2}（自动重登后）"
                 errors = errors2
+                rate_blocked = _rate_blocked(errors)
             else:
                 try:
                     valid = await self.session_valid()
                 except Exception:
                     valid = False
-                if rate_blocked:
-                    return (
-                        False,
-                        "网易云持续返回 405「操作频繁」（连唯一可用的 linuxapi 通道也被拒），"
-                        f"换新 cookie 重试后仍未恢复（cookie 指纹 {self.cookie_fingerprint}）；"
-                        "已入队等待自动补写，也可稍后在配置页手动「重新登录」",
-                    )
                 if not valid:
                     return (
                         False,
@@ -946,6 +942,9 @@ class NeteaseAPI:
             except Exception:
                 pass
         reason = " | ".join(errors[:4]) or "未知原因"
+        if rate_blocked:
+            # 保留原始 code=405 串，方便上层（归档器 / 补写队列）识别为频控
+            reason += "（网易云写接口频控：换 cookie 也无效，需隔一段时间再写，已入队等自动补写）"
         logger.warning(f"[netease] 简介写入失败 playlist={playlist_id} -> {reason}")
         return False, reason
 
