@@ -40,7 +40,15 @@ from .config import (
     reset_config_value,
 )
 from . import logbuffer
-from .llm import llm_bot, normalize_endpoint
+from .llm import (
+    is_reasoning_model,
+    llm_bot,
+    normalize_endpoint,
+    parse_extra_body,
+    payload_preview,
+    resolve_thinking_style,
+    thinking_budget,
+)
 from .models import PLATFORM_NAMES
 from .store import MASTER_KEY
 from .naming import resolve_alias
@@ -285,12 +293,62 @@ FIELD_META["llm.system_prompt"] = (
 )
 FIELD_META["llm.temperature"] = (
     "温度",
-    "0 最稳、2 最飘。闲聊建议 0.7~0.9",
+    "0 最稳、2 最飘。闲聊建议 0.7~0.9。推理模型（o1/o3/gpt-5/reasoner）不认这个参数，会自动省掉",
     False,
+)
+FIELD_META["llm.top_p"] = (
+    "核采样 top_p",
+    "只从累计概率最高的这部分词里挑，1.0 = 不启用。一般只调温度或只调 top_p，两个一起调会互相打架",
+    False,
+)
+FIELD_META["llm.presence_penalty"] = (
+    "话题新鲜度",
+    "-2~2，0 = 不干预；调大更愿意换话题，调小更贴着上文说",
+    False,
+)
+FIELD_META["llm.frequency_penalty"] = (
+    "词频惩罚",
+    "-2~2，0 = 不干预；调大少重复用词，调小允许复读（群聊刷梗可以给一点负值）",
+    False,
+)
+FIELD_META["llm.stop"] = (
+    "停止词",
+    "生成到这些词就立刻收尾，逗号分隔。群聊一般用不到，留空即可",
+    False,
+)
+FIELD_META["llm.seed"] = (
+    "随机种子",
+    "-1 = 不发送（每次随机）。填固定数字后同样的提问更容易得到同样的回复，调试用",
+    False,
+)
+FIELD_META["llm.thinking"] = (
+    "思考模式",
+    "推理模型的“想多久”：自动 = 不干预、用模型默认；关闭 = 尽量关掉思考；低/中/高 = 开思考并给强度。"
+    "非推理模型选什么都不起作用",
+    False,
+)
+FIELD_META["llm.thinking_style"] = (
+    "思考参数写法",
+    "各家 API 不统一：自动 = 按接口地址和模型名猜（通义→enable_thinking、GLM/Claude→thinking 对象、"
+    "OpenAI→reasoning_effort、DeepSeek→不发）。猜错了就在下面「额外请求参数」里手动覆盖",
+    False,
+)
+FIELD_META["llm.thinking_budget"] = (
+    "思考预算 token",
+    "0 = 按档位默认（低 1024 / 中 4096 / 高 12000）。预算会占用最大回复 token 的额度，"
+    "超过“最大回复 token - 256”时会被自动压下来——想真正高强度思考，先把最大回复 token 调大",
+    False,
+)
+FIELD_META["llm.extra_body"] = (
+    "额外请求参数 (JSON)",
+    '原样合并进请求体，最万能的兜底。例如 {"top_k": 20} 或 {"chat_template_kwargs": {"enable_thinking": true}}。'
+    "写在这里的键会覆盖上面所有同名参数",
+    True,
 )
 FIELD_META["llm.max_tokens"] = (
     "最大回复 token",
-    "单次生成的上限。太大容易一次刷满屏，群聊一般 256~800 足够",
+    "单次生成的上限，群聊一般 256~800 足够。⚠️ 开了思考模式时、思考的 token 也算在这里，"
+    "记得留出余量（否则会出现“只有思考没有回答”）",
     False,
 )
 FIELD_META["llm.timeout"] = (
@@ -763,7 +821,11 @@ async def _api_patch(request: Request):
         # 进程级唯一的项在按群视图里被前端灰掉了，但接口也要兜住：
         # 直接落到全局，避免存下一个永远不会生效的覆盖值
         try:
-            coerced[k] = coerce_value(desc["type"], desc.get("enum"), raw)
+            value = coerce_value(desc["type"], desc.get("enum"), raw)
+            # extra_body 是手写 JSON：保存时就校验，别等群里 @ 了才发现机器人坏了
+            if k == "llm.extra_body":
+                parse_extra_body(str(value))
+            coerced[k] = value
         except Exception as exc:
             perr[k] = str(exc)
     if perr:
@@ -1247,6 +1309,15 @@ async def _api_bot(request: Request):
             # 上下文只在内存里：重启清零，这里顺带把「哪个群还留着几轮」摆出来
             "history": {str(g): n for g, n in llm_bot.history_sizes().items()},
             "last_error": llm_bot.last_error,
+            # 思考模式：档位 + 实际采用的写法 + 真实预算（可能被 max_tokens 压过）
+            "thinking": {
+                "mode": cfg.thinking,
+                "style": resolve_thinking_style(cfg),
+                "budget": thinking_budget(cfg),
+                "reasoning_model": is_reasoning_model(cfg.model),
+            },
+            # 「实际发出去的参数」预览：让「思考模式到底有没有生效」一眼可见
+            "payload": payload_preview(cfg),
         },
     })
 

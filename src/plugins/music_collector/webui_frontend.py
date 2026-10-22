@@ -1071,6 +1071,15 @@ function syncStickyOffsets(){
 }
 window.addEventListener("resize", ()=>{ syncStickyOffsets(); if($("#cfgGroupSel")) buildGroupSelOptions(); });
 
+/* 枚举值的中文标签：schema 里传的是英文字面量，直接显示 off/low/high 太生硬，
+   这里只给需要解释的键做映射，没登记的照旧显示原值 */
+const ENUM_LABELS={
+  "llm.thinking":{auto:"自动（用模型默认）",off:"关闭思考",low:"低 · 快而省",medium:"中 · 平衡",high:"高 · 慢而深"},
+  "llm.thinking_style":{auto:"自动识别接口",reasoning_effort:"reasoning_effort（OpenAI 系）",
+    enable_thinking:"enable_thinking（通义 / 百炼）",thinking_object:"thinking 对象（GLM / Claude / moonshot）",
+    none:"不发送任何思考参数"}
+};
+function enumLabel(key,val){ const m=ENUM_LABELS[key]; return (m&&m[val])||val; }
 function fieldControl(f, value, disabled, setter){
   const wrap=document.createElement("div"); wrap.className="fctrl";
   /* setter 让同一条渲染逻辑能被「配置」页和「机器人」页各自复用（两页各有自己的待保存表） */
@@ -1083,7 +1092,7 @@ function fieldControl(f, value, disabled, setter){
     const sp=document.createElement("span"); sp.textContent=f.label; lbl.appendChild(cb); lbl.appendChild(sp); wrap.appendChild(lbl);
   } else if(f.type==="enum"){
     const sel=document.createElement("select");
-    (f.enum||[]).forEach(o=>{const op=document.createElement("option");op.value=o;op.textContent=o;sel.appendChild(op);});
+    (f.enum||[]).forEach(o=>{const op=document.createElement("option");op.value=o;op.textContent=enumLabel(f.key,o);sel.appendChild(op);});
     sel.value=value??""; if(!disabled) sel.onchange=()=>put(f.key,sel.value); wrap.appendChild(sel);
   } else if(f.type==="int"||f.type==="float"){
     const inp=document.createElement("input"); inp.type="number"; inp.value=value??"";
@@ -1338,16 +1347,41 @@ function refreshBotDirty(){
     const ctrl=fr.querySelector(".fctrl"); if(ctrl) ctrl.classList.toggle("dirty", !!BOT_DIRTY[fr.dataset.key]);
   });
 }
+/* 字段分组：llm 段的字段越来越多（连接 / 采样 / 思考 / 限流 / 高级），
+   一坨平铺下来找不到重点，这一页按用途切成几张卡。
+   没登记的字段会自动落到最后的「其它」卡，新加配置项不会“凭空消失”。 */
+const BOT_GROUPS=[
+  {title:"连接与身份", keys:["llm.enabled","llm.groups","llm.base_url","llm.api_key","llm.model","llm.system_prompt"]},
+  {title:"采样参数",
+   note:"控制“怎么选词”。<b>温度和 top_p 一般只动一个</b>；两项惩罚 0 = 不干预。推理模型会自动跳过这些参数。",
+   keys:["llm.temperature","llm.top_p","llm.presence_penalty","llm.frequency_penalty","llm.max_tokens"]},
+  {title:"思考模式",
+   note:"推理模型的“想多久”。<b>自动</b> = 不干预用模型默认；<b>关闭</b> = 尽量不发思考；<b>低/中/高</b> = 打开思考并给强度。<br>"
+      + "不同厂商的参数名不一样（OpenAI 叫 reasoning_effort、通义叫 enable_thinking、GLM/Claude 用 thinking 对象），"
+      + "默认按接口地址和模型名自动识别，识别不准可手动指定写法。",
+   keys:["llm.thinking","llm.thinking_style","llm.thinking_budget"]},
+  {title:"上下文与频率限制",
+   keys:["llm.history_rounds","llm.cooldown","llm.max_input_chars","llm.max_reply_chars","llm.at_sender","llm.fallback_intro","llm.timeout"]},
+  {title:"高级",
+   note:"厂商私有参数（top_k、repetition_penalty、chat_template_kwargs…）在这里用 JSON 直接塞进请求体，会覆盖上面同名项。",
+   keys:["llm.extra_body","llm.stop","llm.seed"]}
+];
 /* 这一页只有 llm 一段，字段渲染直接复用 fieldControl，只是把「记到哪张待保存表」换掉，
    避免和配置页共用 DIRTY 互相污染（配置页的「保存」不该带上大模型改动） */
 function renderBotForm(schema, values){
   BOT_ORIG=Object.assign({},values||{}); BOT_DIRTY={};
   const form=$("#botForm"); if(!form) return; form.innerHTML="";
-  (schema||[]).forEach(sec=>{
+  const fields={};
+  (schema||[]).forEach(sec=>(sec.fields||[]).forEach(f=>{ if(f.type!=="map") fields[f.key]=f; }));
+  const drawn=new Set();
+  const cardOut=(title, note, keys)=>{
+    const fs=keys.map(k=>fields[k]).filter(Boolean);
+    if(!fs.length) return;
     const card=document.createElement("section"); card.className="card cfg-sec";
-    const h=document.createElement("h2"); h.innerHTML=`<span class="dot"></span>${esc(sec.title)}`; card.appendChild(h);
-    (sec.fields||[]).forEach(f=>{
-      if(f.type==="map") return;
+    const h=document.createElement("h2"); h.innerHTML=`<span class="dot"></span>${esc(title)}`; card.appendChild(h);
+    if(note){ const p=document.createElement("p"); p.className="muted"; p.innerHTML=note; card.appendChild(p); }
+    fs.forEach(f=>{
+      drawn.add(f.key);
       const fr=document.createElement("div"); fr.className="field"; fr.dataset.key=f.key;
       const lab=document.createElement("div"); lab.className="flabel";
       lab.innerHTML=`${f.label}${f.hint?`<span class="hint">${f.hint}</span>`:""}`;
@@ -1356,9 +1390,15 @@ function renderBotForm(schema, values){
       fr.appendChild(lab); fr.appendChild(row); card.appendChild(fr);
     });
     form.appendChild(card);
-  });
+  };
+  BOT_GROUPS.forEach(g=>cardOut(g.title, g.note, g.keys));
+  const rest=Object.keys(fields).filter(k=>!drawn.has(k));
+  if(rest.length) cardOut("其它", "", rest);
   refreshBotDirty();
 }
+const THINK_MODE_LABEL={auto:"自动（用模型默认）",off:"关闭思考",low:"低",medium:"中",high:"高"};
+const THINK_STYLE_LABEL={reasoning_effort:"reasoning_effort",enable_thinking:"enable_thinking",
+  thinking_object:"thinking 对象",none:"不发送参数"};
 function renderBotStatus(st){
   const box=$("#botStatus"); if(!box) return;
   BOT_STATUS = st||{};
@@ -1369,9 +1409,27 @@ function renderBotStatus(st){
   else parts.push(`<span class="badge ok">已启用</span>`);
   if(st.ready) parts.push(`模型：<b>${esc(st.model||"")}</b>　接口：<code>${esc(st.endpoint||"")}</code>`);
   parts.push(`生效群：${esc((st.groups||[]).length ? st.groups.join("、") : "所有群")}`);
+  /* 思考模式：把「档位 → 实际写法 → 真实预算」摆出来，避免选了「高」却发现没生效 */
+  const th=st.thinking||{};
+  if(th.mode && th.mode!=="auto"){
+    const styleName = THINK_STYLE_LABEL[th.style] || th.style || "—";
+    let line = `思考：<b>${THINK_MODE_LABEL[th.mode]||esc(th.mode)}</b>　写法：<code>${esc(styleName)}</code>`;
+    if(th.budget) line += `　预算：<b>${th.budget}</b> token`;
+    if(th.style==="none") line += ` <span style="color:var(--warn,#b45309)">（该接口/模型不需要思考参数，档位不会生效）</span>`;
+    else if(th.mode==="off" && th.style==="reasoning_effort") line += ` <span style="color:var(--warn,#b45309)">（OpenAI 系没有“关闭”，只能是默认思考）</span>`;
+    parts.push(line);
+  } else {
+    parts.push(`思考：<b>自动</b>（不干预，用模型默认）`);
+  }
+  if(th.reasoning_model) parts.push(`<span class="muted">该模型自带思考，温度 / top_p / 惩罚项不会随请求发送</span>`);
   const hs=st.history||{}, keys=Object.keys(hs);
   parts.push(keys.length ? `上下文：${keys.map(k=>`群${k} ${hs[k]} 条`).join("、")}` : "上下文：无（只在内存里，重启即清空）");
   if(st.last_error) parts.push(`<span style="color:var(--bad)">最近一次失败：${esc(st.last_error)}</span>`);
+  /* 真正发出去的请求体（不含 Key）：排查「参数到底有没有生效」用 */
+  if(st.payload && Object.keys(st.payload).length){
+    const txt = st.payload.error ? ("参数有问题："+st.payload.error) : JSON.stringify(st.payload,null,1);
+    parts.push(`<details style="margin-top:6px"><summary style="cursor:pointer">实际请求参数（不含 Key）</summary><pre class="runs">${esc(txt)}</pre></details>`);
+  }
   box.innerHTML = parts.join("<br>");
 }
 function botMsg(t,kind=""){ const m=$("#botMsg"); if(m){ m.textContent=t; m.className="msg"+(kind?(" "+kind):""); } }
@@ -1386,6 +1444,14 @@ async function loadBot(){
 async function saveBot(){
   const n=Object.keys(BOT_DIRTY).length;
   if(!n){ botMsg("没有改动"); return; }
+  /* 手写的 JSON 先在本地校验，省得存进去之后才发现 @ 了没反应 */
+  const eb=BOT_DIRTY["llm.extra_body"];
+  if(eb!==undefined && String(eb).trim()!==""){
+    try{
+      const o=JSON.parse(eb);
+      if(!o || typeof o!=="object" || Array.isArray(o)) throw new Error("必须是一个 JSON 对象");
+    }catch(e){ botMsg("额外请求参数不是合法 JSON："+e.message,"bad"); return; }
+  }
   botMsg("保存中…");
   try{
     const j=await (await api("/api/music-admin/config",{method:"PATCH",headers:{"Content-Type":"application/json"},

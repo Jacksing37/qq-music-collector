@@ -303,8 +303,17 @@ netease:
 | `llm.api_key` | 空 | 平台 Key，日志里打码 |
 | `llm.model` | `gpt-4o-mini` | 模型名，要与你填的接口匹配 |
 | `llm.system_prompt` | 内置人设 | 系统提示词，决定说话风格 |
-| `llm.temperature` | `0.7` | 0 最稳、2 最飘 |
-| `llm.max_tokens` | `512` | 单次生成上限 |
+| `llm.temperature` | `0.7` | 0 最稳、2 最飘。推理模型（o1/o3/gpt-5/`*reasoner`）不认这个参数，会自动跳过 |
+| `llm.top_p` | `1.0` | 核采样，`1.0` = 不启用。**一般只调温度或只调 top_p**，两个一起调会互相打架 |
+| `llm.presence_penalty` | `0` | 话题新鲜度 -2~2，`0` = 不干预；调大更愿意换话题 |
+| `llm.frequency_penalty` | `0` | 词频惩罚 -2~2，`0` = 不干预；调大少重复用词 |
+| `llm.max_tokens` | `512` | 单次生成上限。⚠️ **思考 token 也算在这里**，开了思考要留余量 |
+| `llm.stop` | 空 | 停止词，逗号分隔；群聊一般用不到 |
+| `llm.seed` | `-1` | `-1` = 不发送（每次随机）；填固定值后相同提问更易得到相同回复，调试用 |
+| `llm.thinking` | `auto` | 思考档位：`auto` 不干预 / `off` 尽量关 / `low` 快而省 / `medium` 平衡 / `high` 慢而深 |
+| `llm.thinking_style` | `auto` | 思考参数写法：`auto` 按接口+模型名猜；也可固定成 `reasoning_effort`（OpenAI）/ `enable_thinking`（通义）/ `thinking_object`（GLM、Claude）/ `none` |
+| `llm.thinking_budget` | `0` | 思考 token 预算，`0` = 按档位默认（低 1024 / 中 4096 / 高 12000）；超过 `max_tokens-256` 会被自动压下 |
+| `llm.extra_body` | 空 | 原样合并进请求体的 JSON，如 `{"top_k": 20}`；厂商私有参数与「识别不准的思考参数」都塞这里，会覆盖上面同名项 |
 | `llm.timeout` | `30` | 请求超时（秒） |
 | `llm.history_rounds` | `3` | 携带最近几轮对话；`0` = 全新对话。**上下文只在内存里**，重启即清空 |
 | `llm.cooldown` | `3` | 同一用户同群的冷却（秒），防刷屏；`0` = 不限 |
@@ -315,6 +324,17 @@ netease:
 
 页面上还有两个按钮：**🧪 测试连接**（按已保存的配置发一条最小请求，直接看模型回什么、耗时多少）
 和 **🧹 清空上下文**（清掉内存里缓存的对话）。
+
+> 🧠 **思考模式怎么选**：默认 `thinking: auto` 就是「不管，用模型自己的默认行为」，绝大多数情况够用。
+> 需要更省更快就选 `low`，要它想清楚点选 `high`。写法由 `thinking_style: auto` 自动判断：
+> 通义 / 百炼 → `enable_thinking` + `thinking_budget`；GLM / Claude / OpenRouter → `thinking: {type, budget_tokens}`；
+> OpenAI 官方与 Azure → `reasoning_effort`；DeepSeek / Moonshot 这类靠模型名区分思考的 → 不发参数。
+> 猜错就在 `extra_body` 里手写，例如 `{"enable_thinking": true}` 或 `{"reasoning_effort": "high"}`。
+>
+> ⚠️ **开了思考必须同步调大 `max_tokens`**：思考的 token 与正文共用这个额度，`max_tokens: 512` 配上
+> `high` 很容易「想完没得写」——表现为模型返回空内容，网页操作日志里会直接这么报。
+> 网页「机器人」页的**实际请求参数**（可展开）会把最终发出去的 `thinking` / `reasoning_effort` / `max_tokens`
+> 全列出来，改完先看一眼就不会白折腾。
 
 > ⚠️ **这一页的设置只能在网页端改**：群内没有任何命令读写 `llm.*`（`/music set` 只认
 > 时间窗口那几个字段）。配置层也把 `llm.` 整段列为**进程级设置**、不允许「按群覆盖」——

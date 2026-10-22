@@ -32,13 +32,26 @@ from nonebot.adapters.onebot.v11.event import Sender  # noqa: E402
 
 from music_collector import handle_at  # noqa: E402
 from music_collector.config import (  # noqa: E402
+    LLMConfig,
     _mask_value,
     apply_config_value,
     config_manager,
     group_overrides,
     is_group_scopable,
 )
-from music_collector.llm import LLMBot, enabled_for, normalize_endpoint  # noqa: E402
+from music_collector.llm import (  # noqa: E402
+    LLMBot,
+    build_payload,
+    enabled_for,
+    extract_reply,
+    guess_thinking_style,
+    is_reasoning_model,
+    normalize_endpoint,
+    parse_extra_body,
+    payload_preview,
+    resolve_thinking_style,
+    thinking_budget,
+)
 from music_collector.service import service  # noqa: E402
 from music_collector.store import Store  # noqa: E402
 from music_collector.webui import BOT_SCHEMA, CONFIG_SCHEMA, KEY_INDEX  # noqa: E402
@@ -292,11 +305,148 @@ def test_config_and_schema() -> None:
           _mask_value("llm.max_tokens", 512))
 
 
-# ---------------------------------------------------------------- 10. 分流
+# ---------------------------------------------------------------- 10. 采样 / 思考
+
+
+def test_sampling_and_thinking() -> None:
+    print("\n[10] 采样参数与思考模式")
+    msgs = [{"role": "user", "content": "hi"}]
+
+    # (a) 默认：不干预
+    p = build_payload(msgs, LLMConfig())
+    check("默认不带任何思考参数",
+          not ({"reasoning_effort", "enable_thinking", "thinking"} & set(p)), str(p))
+    check("默认下发温度与 top_p", p.get("temperature") == 0.7 and p.get("top_p") == 1.0, str(p))
+    check("默认不发 seed / stop", "seed" not in p and "stop" not in p, str(p))
+    check("0 值惩罚项不发（少发无用参数）",
+          "presence_penalty" not in p and "frequency_penalty" not in p, str(p))
+
+    # (b) 推理模型：采样参数一律省掉，否则可能 400
+    for name in ("o3-mini", "gpt-5", "deepseek-reasoner", "Qwen3-32B-thinking"):
+        model_p = build_payload(msgs, LLMConfig(model=name))
+        check(f"{name} 不送 temperature/top_p",
+              "temperature" not in model_p and "top_p" not in model_p, str(model_p))
+    check("普通模型不会被误判成推理模型", is_reasoning_model("gpt-4o-mini") is False)
+
+    # (c) 写法推断
+    for url, model, want in (
+        ("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-plus", "enable_thinking"),
+        ("https://api.openai.com/v1", "gpt-4o-mini", "reasoning_effort"),
+        ("https://open.bigmodel.cn/api/paas/v4", "glm-4-plus", "thinking_object"),
+        ("https://api.deepseek.com/v1", "deepseek-chat", "none"),
+        ("https://my-proxy.example.com/v1", "o1-mini", "reasoning_effort"),
+    ):
+        got = resolve_thinking_style(LLMConfig(base_url=url, model=model))
+        check(f"{model} 推断为 {want}", got == want, got)
+    check("手选写法时不再推断",
+          resolve_thinking_style(LLMConfig(thinking_style="none", model="qwen-plus")) == "none")
+
+    # (d) 档位 -> 预算
+    check("auto / off 不给预算",
+          thinking_budget(LLMConfig()) == 0 and thinking_budget(LLMConfig(thinking="off")) == 0)
+    check("low 默认 1024", thinking_budget(LLMConfig(thinking="low", max_tokens=8000)) == 1024)
+    check("medium 默认 4096",
+          thinking_budget(LLMConfig(thinking="medium", max_tokens=8000)) == 4096)
+    check("high 默认 12000",
+          thinking_budget(LLMConfig(thinking="high", max_tokens=32000)) == 12000)
+    check("预算被 max_tokens-256 压住",
+          thinking_budget(LLMConfig(thinking="high", max_tokens=1000)) == 744,
+          str(thinking_budget(LLMConfig(thinking="high", max_tokens=1000))))
+    check("手填预算优先于档位默认",
+          thinking_budget(LLMConfig(thinking="low", thinking_budget=777, max_tokens=8000)) == 777)
+
+    # (e) enable_thinking 写法（通义 / 百炼）
+    p = build_payload(msgs, LLMConfig(thinking="medium", thinking_style="enable_thinking",
+                                     max_tokens=8000))
+    check("enable_thinking=True + 预算 4096",
+          p.get("enable_thinking") is True and p.get("thinking_budget") == 4096, str(p))
+    p = build_payload(msgs, LLMConfig(thinking="off", thinking_style="enable_thinking"))
+    check("enable_thinking=False 才是真关",
+          p.get("enable_thinking") is False and "thinking_budget" not in p, str(p))
+
+    # (f) thinking 对象写法（GLM / Claude / OpenRouter）
+    p = build_payload(msgs, LLMConfig(thinking="high", thinking_style="thinking_object",
+                                     max_tokens=20000))
+    check("thinking 对象带 budget_tokens",
+          p.get("thinking") == {"type": "enabled", "budget_tokens": 12000}, str(p))
+    p = build_payload(msgs, LLMConfig(thinking="off", thinking_style="thinking_object"))
+    check("thinking 对象可显式关闭", p.get("thinking") == {"type": "disabled"}, str(p))
+
+    # (g) reasoning_effort 写法（OpenAI / o 系列）
+    p = build_payload(msgs, LLMConfig(thinking="high", thinking_style="reasoning_effort"))
+    check("reasoning_effort=high", p.get("reasoning_effort") == "high", str(p))
+    p = build_payload(msgs, LLMConfig(thinking="off", thinking_style="reasoning_effort"))
+    check("OpenAI 系没有“关闭”，off 时不发参数", "reasoning_effort" not in p, str(p))
+    p = build_payload(msgs, LLMConfig(thinking="medium", thinking_style="none"))
+    check("style=none 一律不发思考参数",
+          not ({"reasoning_effort", "enable_thinking", "thinking"} & set(p)), str(p))
+
+    # (h) extra_body 兜底：能覆盖同名项，也能塞任意私有参数
+    p = build_payload(msgs, LLMConfig(extra_body='{"temperature": 0.11, "top_k": 5}'))
+    check("extra_body 覆盖同名项", p.get("temperature") == 0.11 and p.get("top_k") == 5, str(p))
+    p = build_payload(msgs, LLMConfig(thinking="off",
+                                     extra_body='{"thinking": {"type": "enabled"}}'))
+    check("extra_body 能盖掉思考参数", p.get("thinking") == {"type": "enabled"}, str(p))
+    check("空 extra_body 不报错", parse_extra_body("   ") == {})
+    for bad, why in (("{oops", "JSON"), ("[1,2]", "对象")):
+        try:
+            parse_extra_body(bad)
+            msg = "没有报错"
+        except RuntimeError as exc:
+            msg = str(exc)
+        check(f"非法 extra_body 报错（{bad} → 提示含「{why}」）", why in msg, msg)
+
+    # (i) seed / stop / 惩罚
+    p = build_payload(msgs, LLMConfig(seed=42, stop=["。", " "], presence_penalty=0.5,
+                                     frequency_penalty=-0.3))
+    check("seed 下发", p.get("seed") == 42, str(p))
+    check("stop 丢掉空白项", p.get("stop") == ["。"], str(p))
+    check("惩罚项非 0 才发",
+          p.get("presence_penalty") == 0.5 and p.get("frequency_penalty") == -0.3, str(p))
+
+    # (j) 预览：网页端「实际请求参数」
+    prev = payload_preview(LLMConfig(thinking="low", thinking_style="enable_thinking",
+                                     max_tokens=4000))
+    check("预览不含 messages", "messages" not in prev and prev.get("enable_thinking") is True, str(prev))
+    check("预览不泄露 Key", "api_key" not in prev and "Authorization" not in prev, str(prev))
+    bad_prev = payload_preview(LLMConfig(extra_body="{oops"))
+    check("预览遇到非法 JSON 也不炸，返回 error", "error" in bad_prev, str(bad_prev))
+
+    # (k) 响应解析：思考模型「只想不说」要给出能懂的原因
+    check("取纯文本", extract_reply({"choices": [{"message": {"content": "你好"}}]}) == "你好")
+    check("分段 content 拼接",
+          extract_reply({"choices": [{"message": {"content": [{"text": "ab"}, {"text": "cd"}]}}]}) == "abcd")
+    for data, kw in (
+        ({"choices": [{"message": {"content": "", "reasoning_content": "想了很久"}}]}, "思考内容"),
+        ({"choices": [{"message": {"content": ""}, "finish_reason": "length"}]}, "截断"),
+        ({"error": "invalid api key"}, "choices"),
+    ):
+        try:
+            extract_reply(data)
+            msg = "没有报错"
+        except RuntimeError as exc:
+            msg = str(exc)
+        check(f"错误提示含「{kw}」", kw in msg, msg)
+
+    # (l) 表单 / 状态
+    for key in ("llm.top_p", "llm.presence_penalty", "llm.frequency_penalty", "llm.stop",
+                "llm.seed", "llm.thinking", "llm.thinking_style", "llm.thinking_budget",
+                "llm.extra_body"):
+        check(f"表单含 {key}", key in KEY_INDEX)
+    th = KEY_INDEX["llm.thinking"]
+    check("思考模式是下拉框且含 5 档",
+          th["type"] == "enum" and set(th["enum"] or []) == {"auto", "off", "low", "medium", "high"},
+          str(th))
+    check("extra_body 是多行输入", KEY_INDEX["llm.extra_body"]["multiline"] is True)
+    check("extra_body 不当成密码框", KEY_INDEX["llm.extra_body"]["secret"] is False)
+    check("思考预算不被 token 误伤", _mask_value("llm.thinking_budget", 4096) == "4096")
+
+
+# ---------------------------------------------------------------- 11. 分流
 
 
 async def test_handle_at_routing() -> None:
-    print("\n[10] handle_at 分流：大模型优先，兜底自我介绍")
+    print("\n[11] handle_at 分流：大模型优先，兜底自我介绍")
     import music_collector as mc
 
     tmp = Path(tempfile.mkdtemp())
@@ -383,6 +533,7 @@ async def main() -> None:
     await test_chat_truncation()
     await test_chat_empty_and_clear()
     test_config_and_schema()
+    test_sampling_and_thinking()
     await test_handle_at_routing()
     print("\n====================================================")
     print(f"通过 {PASSED} 项，失败 {FAILED} 项")

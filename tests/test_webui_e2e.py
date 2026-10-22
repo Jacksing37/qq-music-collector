@@ -86,6 +86,37 @@ def test_endpoints():
         b2 = client.get("/api/music-admin/bot", headers=H).json()
         assert b2["values"]["llm.model"] == "smoke-model" and b2["status"]["enabled"] is True
 
+        # 采样 / 思考参数：网页能写、能回读，状态里能看到「实际发出去的参数」
+        p4 = client.patch("/api/music-admin/config", headers=H, json={"values": {
+            "llm.thinking": "high",
+            "llm.thinking_style": "enable_thinking",
+            "llm.thinking_budget": 2048,
+            "llm.top_p": 0.8,
+            "llm.extra_body": '{"top_k": 20}',
+        }})
+        assert p4.status_code == 200 and p4.json()["ok"] is True, p4.text
+        b3 = client.get("/api/music-admin/bot", headers=H).json()
+        assert b3["values"]["llm.thinking"] == "high"
+        assert b3["values"]["llm.thinking_budget"] == 2048
+        assert abs(b3["values"]["llm.top_p"] - 0.8) < 1e-6
+        th = b3["status"]["thinking"]
+        assert th["mode"] == "high" and th["style"] == "enable_thinking", th
+        assert th["budget"] > 0, th
+        pl = b3["status"]["payload"]
+        assert pl["enable_thinking"] is True and pl["top_k"] == 20, pl
+        assert "messages" not in pl and "api_key" not in pl, pl
+
+        # 非法 extra_body 在保存时就被拦住（而不是等群里 @ 才发现）
+        bad = client.patch("/api/music-admin/config", headers=H,
+                           json={"values": {"llm.extra_body": "{oops"}})
+        assert bad.status_code == 400 and "llm.extra_body" in bad.json()["errors"], bad.text
+
+        # 还原，别影响后面的用例
+        client.patch("/api/music-admin/config", headers=H, json={"values": {
+            "llm.thinking": "auto", "llm.thinking_style": "auto", "llm.thinking_budget": 0,
+            "llm.top_p": 1.0, "llm.extra_body": "", "llm.enabled": False,
+        }})
+
         # 清空上下文（内存态，随便调）
         hh = client.post("/api/music-admin/bot/history", headers=H, json={})
         assert hh.status_code == 200 and hh.json()["ok"] is True

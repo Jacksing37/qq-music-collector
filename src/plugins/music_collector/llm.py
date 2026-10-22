@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections import deque
@@ -30,6 +31,15 @@ logger = logging.getLogger("music_collector.llm")
 
 #: 单条历史消息的字符上限（防止某条超长消息长期占着上下文窗口）
 _HISTORY_CHAR_LIMIT = 600
+
+#: 思考档位 -> 默认 token 预算。``low`` 取 1024 是为了兼容 Anthropic 风格的
+#: 最小预算限制（<1024 会被拒）；``high`` 不给太大，免得一次回复烧掉太多钱。
+_THINK_BUDGET = {"low": 1024, "medium": 4096, "high": 12000}
+
+#: 这些模型对 temperature / top_p / penalty **要么拒绝要么忽略**，发出去只会换来
+#: 400 或者「参数不生效的困惑」，所以按模型名直接省掉。
+_REASONING_PREFIXES = ("o1", "o3", "o4", "gpt-5")
+_REASONING_MARKS = ("reasoner", "-r1", "qwq", "thinking")
 
 
 def normalize_endpoint(base_url: str) -> str:
@@ -57,6 +67,143 @@ def normalize_endpoint(base_url: str) -> str:
     return url + "/chat/completions"
 
 
+def is_reasoning_model(model: str) -> bool:
+    """是不是「自带思考、不吃采样参数」的模型（o1/o3/gpt-5/reasoner/QwQ…）。
+
+    这类模型传 ``temperature`` 往往直接 400，所以发请求时自动省掉采样参数；
+    用户在网页上填的温度对它们不生效，界面上会一并标出来。
+    """
+    name = (model or "").strip().lower()
+    if not name:
+        return False
+    return name.startswith(_REASONING_PREFIXES) or any(m in name for m in _REASONING_MARKS)
+
+
+def guess_thinking_style(cfg: LLMConfig) -> str:
+    """按 ``base_url`` 的域名和模型名猜这家服务用哪种思考参数写法。
+
+    猜不准也没关系：网页端可以把 ``thinking_style`` 手动固定成某一种。
+    猜不出（多数情况是模型本身自带思考、不需要额外参数）就返回 ``none``。
+    """
+    host = urlsplit(cfg.base_url or "").netloc.lower()
+    model = (cfg.model or "").strip().lower()
+
+    # 通义 / 百炼：enable_thinking + thinking_budget
+    if "dashscope" in host or "aliyuncs" in host or model.startswith(("qwen", "qwq")):
+        return "enable_thinking"
+    # Claude 直连或中转：thinking: {type, budget_tokens}
+    if "anthropic" in host or "claude" in model:
+        return "thinking_object"
+    # 智谱 GLM / 硅基流动 / OpenRouter：也用 thinking 对象
+    if any(h in host for h in ("bigmodel", "zhipu", "siliconflow", "openrouter")):
+        return "thinking_object"
+    # OpenAI 官方与 Azure：reasoning_effort
+    if "openai.com" in host or "openai.azure.com" in host:
+        return "reasoning_effort"
+    if model.startswith(_REASONING_PREFIXES):
+        return "reasoning_effort"
+    # DeepSeek / Moonshot 等：靠模型名区分思考，没有额外参数可发
+    return "none"
+
+
+def resolve_thinking_style(cfg: LLMConfig) -> str:
+    """最终生效的思考参数写法：``auto`` 时走推断，``none`` 时明确不发。"""
+    style = (cfg.thinking_style or "auto").strip()
+    if style == "auto":
+        return guess_thinking_style(cfg)
+    return style
+
+
+def thinking_budget(cfg: LLMConfig) -> int:
+    """实际会发出去的思考预算（token）。
+
+    两条约束：① ``0`` = 按档位取默认；② 预算不能吃掉全部 ``max_tokens``，
+    否则模型思考完就没配额输出正文（表现为「返回空内容」），所以上限压到
+    ``max_tokens`` 减 256。想真正高强度思考，得同时把最大回复 token 调大。
+    """
+    if cfg.thinking in ("auto", "off"):
+        return 0
+    budget = int(cfg.thinking_budget) or _THINK_BUDGET.get(cfg.thinking, 0)
+    if budget <= 0:
+        return 0
+    ceiling = max(256, int(cfg.max_tokens) - 256)
+    return min(budget, ceiling)
+
+
+def thinking_params(cfg: LLMConfig) -> dict:
+    """按档位与写法拼出思考相关参数；返回空 dict 表示这次不加任何思考参数。"""
+    mode = (cfg.thinking or "auto").strip()
+    style = resolve_thinking_style(cfg)
+    if mode == "auto" or style == "none":
+        return {}
+    if style == "reasoning_effort":
+        # OpenAI 只有 minimal/low/medium/high，没有「关」，所以 off 时不发参数
+        return {} if mode == "off" else {"reasoning_effort": mode}
+    if style == "enable_thinking":
+        if mode == "off":
+            return {"enable_thinking": False}
+        params: dict = {"enable_thinking": True}
+        budget = thinking_budget(cfg)
+        if budget:
+            params["thinking_budget"] = budget
+        return params
+    # thinking_object（Claude / GLM / 部分中转）
+    if mode == "off":
+        return {"thinking": {"type": "disabled"}}
+    return {"thinking": {"type": "enabled", "budget_tokens": thinking_budget(cfg)}}
+
+
+def parse_extra_body(raw: str) -> dict:
+    """把 ``extra_body`` 那段文本解析成 dict；非法 JSON 直接报可读错误。"""
+    text = (raw or "").strip()
+    if not text:
+        return {}
+    try:
+        data = json.loads(text)
+    except Exception as exc:  # noqa: BLE001 — 报给用户看，不用堆栈
+        raise RuntimeError(f"extra_body 不是合法 JSON：{exc}") from None
+    if not isinstance(data, dict):
+        raise RuntimeError('extra_body 必须是一个 JSON 对象，例如 {"top_k": 5}')
+    return data
+
+
+def build_payload(messages: list[dict], cfg: LLMConfig) -> dict:
+    """拼出真正发给模型的请求体（抽出来是为了网页端能预览、测试能断言）。"""
+    payload: dict = {
+        "model": (cfg.model or "").strip(),
+        "messages": messages,
+        "stream": False,
+        "max_tokens": int(cfg.max_tokens),
+    }
+    # 推理模型不认采样参数，发了可能直接 400
+    if not is_reasoning_model(cfg.model):
+        payload["temperature"] = float(cfg.temperature)
+        payload["top_p"] = float(cfg.top_p)
+        if cfg.presence_penalty:
+            payload["presence_penalty"] = float(cfg.presence_penalty)
+        if cfg.frequency_penalty:
+            payload["frequency_penalty"] = float(cfg.frequency_penalty)
+    stops = [s for s in (cfg.stop or []) if str(s).strip()]
+    if stops:
+        payload["stop"] = stops
+    if int(cfg.seed) >= 0:
+        payload["seed"] = int(cfg.seed)
+    payload.update(thinking_params(cfg))
+    # 高级兜底放最后：用户写的键可以覆盖上面任何一项（包括思考参数）
+    payload.update(parse_extra_body(cfg.extra_body))
+    return payload
+
+
+def payload_preview(cfg: LLMConfig) -> dict:
+    """给网页端的状态预览：实际会发出去的参数（不含 Key，messages 只留占位）。"""
+    try:
+        payload = build_payload([{"role": "user", "content": "…"}], cfg)
+    except Exception as exc:  # noqa: BLE001 — 预览失败不该让整页 500
+        return {"error": str(exc)}
+    payload.pop("messages", None)
+    return payload
+
+
 def enabled_for(cfg: LLMConfig, group_id: int) -> bool:
     """该群是否该用大模型回复：开关 + 必填项 + 群白名单（空=所有群）。"""
     if not cfg.enabled:
@@ -65,6 +212,34 @@ def enabled_for(cfg: LLMConfig, group_id: int) -> bool:
         return False
     gid = int(group_id)
     return not cfg.groups or gid in cfg.groups
+
+
+def extract_reply(data: dict) -> str:
+    """从响应体里取正文。取不到就抛带原因的错误（抽出来方便单测）。"""
+    choices = data.get("choices") or []
+    if not choices:
+        # 有些兼容层把错误放在 200 的 body 里
+        err = data.get("error") or data.get("message") or data.get("detail")
+        raise RuntimeError(f"没有 choices: {str(err)[:200] or data}")
+    choice = choices[0] or {}
+    message = choice.get("message") or {}
+    content = message.get("content")
+    if isinstance(content, list):  # 少数实现返回分段数组
+        content = "".join(
+            str(part.get("text", "")) for part in content if isinstance(part, dict)
+        )
+    text = (content or "").strip()
+    if text:
+        return text
+    # 推理模型把“想”和“说”分开：只拿到思考内容说明额度被思考吃光了
+    if message.get("reasoning_content") or message.get("reasoning"):
+        raise RuntimeError(
+            "模型只产出了思考内容、没有正式回答（多半是最大回复 token 太小，"
+            "把「最大回复 token」调大，或把思考档位调低）"
+        )
+    if (choice.get("finish_reason") or "") == "length":
+        raise RuntimeError("回复被 max_tokens 截断（没有任何正文），请调大最大回复 token")
+    raise RuntimeError("模型返回了空内容")
 
 
 class LLMBot:
@@ -125,13 +300,7 @@ class LLMBot:
         url = normalize_endpoint(cfg.base_url)
         if not url:
             raise RuntimeError("未填写接口地址（base_url）")
-        payload = {
-            "model": cfg.model.strip(),
-            "messages": messages,
-            "temperature": float(cfg.temperature),
-            "max_tokens": int(cfg.max_tokens),
-            "stream": False,
-        }
+        payload = build_payload(messages, cfg)
         headers = {
             "Authorization": f"Bearer {cfg.api_key.strip()}",
             "Content-Type": "application/json",
@@ -152,21 +321,7 @@ class LLMBot:
             data = resp.json()
         except Exception:
             raise RuntimeError("返回的不是合法 JSON") from None
-        choices = data.get("choices") or []
-        if not choices:
-            # 有些兼容层把错误放在 200 的 body 里
-            err = data.get("error") or data.get("message") or data.get("detail")
-            raise RuntimeError(f"没有 choices: {str(err)[:200] or data}")
-        message = choices[0].get("message") or {}
-        content = message.get("content")
-        if isinstance(content, list):  # 少数实现返回分段数组
-            content = "".join(
-                str(part.get("text", "")) for part in content if isinstance(part, dict)
-            )
-        text = (content or "").strip()
-        if not text:
-            raise RuntimeError("模型返回了空内容")
-        return text
+        return extract_reply(data)
 
     # ------------------------------------------------------------ 对外
 
@@ -243,8 +398,14 @@ class LLMBot:
             messages.append({"role": "system", "content": cfg.system_prompt.strip()})
         messages.append({"role": "user", "content": prompt})
         started = time.monotonic()
-        # 测试时临时收窄 max_tokens，省点钱
-        probe = cfg.model_copy(update={"max_tokens": min(int(cfg.max_tokens), 128), "temperature": 0.3})
+        # 测试时收窄 max_tokens 省钱，但**不能太小**：开了思考的模型会把额度全用在
+        # 思考上，正文为空 → 明明接口是好的却报错。给 1024 留出回答空间。
+        probe = cfg.model_copy(
+            update={
+                "max_tokens": max(1024, min(int(cfg.max_tokens), 2048)),
+                "temperature": 0.3,
+            }
+        )
         try:
             reply = await self._post_chat(messages, probe)
         except Exception as exc:  # noqa: BLE001

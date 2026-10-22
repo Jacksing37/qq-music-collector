@@ -298,8 +298,18 @@ llm:
   system_prompt: |-
     你是 QQ 群里的音乐收集助手，性格随和、说话简洁，用中文回答。
     群友分享歌曲由另一套功能处理，你只负责聊天答疑；不确定的事不要编。
-  temperature: 0.7            # 0 最稳、2 最飘
-  max_tokens: 512             # 单次生成上限
+  temperature: 0.7            # 0 最稳、2 最飘（推理模型会自动跳过这个参数）
+  top_p: 1.0                  # 核采样，1.0 = 不启用；一般只调温度或只调 top_p
+  presence_penalty: 0.0       # 话题新鲜度 -2~2，0 = 不干预
+  frequency_penalty: 0.0      # 词频惩罚 -2~2，0 = 不干预
+  max_tokens: 512             # 单次生成上限（思考 token 也算在里面，开思考要调大）
+  stop: []                    # 停止词，逗号分隔；一般留空
+  seed: -1                    # -1 = 不发送（每次随机）；填固定值可复现回复
+  # ---- 思考模式 ----
+  thinking: auto              # auto=不干预 / off=尽量关 / low / medium / high
+  thinking_style: auto        # auto / reasoning_effort / enable_thinking / thinking_object / none
+  thinking_budget: 0          # 0 = 按档位默认（低 1024 / 中 4096 / 高 12000）
+  extra_body: ''              # 原样合并进请求体的 JSON，如 {"top_k": 20}，覆盖上面同名项
   timeout: 30.0               # 请求超时秒数
   history_rounds: 3           # 携带最近几轮对话（1 轮=1问+1答），0=不带；只在内存里
   cooldown: 3                 # 同一用户同群的冷却秒数，0=不限

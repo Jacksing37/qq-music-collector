@@ -459,8 +459,30 @@ class LLMConfig(BaseModel):
     )
     #: 采样温度，0 最稳、2 最飘
     temperature: float = Field(0.7, ge=0, le=2)
-    #: 单次回复的最大 token 数
+    #: 核采样：只从累计概率前 p 的词里挑。1.0 = 不启用（全放开）
+    top_p: float = Field(1.0, ge=0.0, le=1.0)
+    #: 话题新鲜度惩罚：>0 更愿意换话题，<0 更贴题；范围 -2~2
+    presence_penalty: float = Field(0.0, ge=-2.0, le=2.0)
+    #: 词频惩罚：>0 少重复用词，<0 允许复读；范围 -2~2
+    frequency_penalty: float = Field(0.0, ge=-2.0, le=2.0)
+    #: 单次回复的最大 token 数（**思考 token 也算在里面**，开了思考要调大）
     max_tokens: int = Field(512, ge=1, le=32000)
+    #: 停止词：生成到这些词就立刻收尾（群聊一般用不到）
+    stop: list[str] = Field(default_factory=list)
+    #: 随机种子，用于复现同一回复；-1 = 不发送（每次随机）
+    seed: int = -1
+
+    # ---- 思考模式（推理模型的“想多久”）----
+    #: 思考档位：auto=不干预（用模型默认） off=尽量关掉 low/medium/high=开思考并给强度
+    thinking: Literal["auto", "off", "low", "medium", "high"] = "auto"
+    #: 思考参数的写法（各家 API 不统一）：auto=按接口地址与模型名自动判断
+    thinking_style: Literal[
+        "auto", "reasoning_effort", "enable_thinking", "thinking_object", "none"
+    ] = "auto"
+    #: 思考 token 预算，0 = 按档位取默认（low 512 / medium 2048 / high 8192）
+    thinking_budget: int = Field(0, ge=0, le=64000)
+    #: 原样追加到请求体的 JSON（高级兜底：任意厂商私有参数都塞这里）
+    extra_body: str = ""
     #: 请求超时（秒）
     timeout: float = Field(30.0, ge=1, le=300)
     #: 携带最近几轮对话作为上下文；0 = 不带（每次都是全新对话）
