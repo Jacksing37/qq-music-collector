@@ -1343,7 +1343,8 @@ async def _api_bot_test(request: Request):
         prompt = str(body.get("prompt") or "").strip()
     cfg = effective_config(None).llm
     ok, message = await llm_bot.test(cfg, prompt or "用一句话介绍你自己")
-    logger.info(f"[llm] 网页端测试连接: {'成功' if ok else '失败'} — {message[:120]}")
+    # 日志由 LLMBot.test 自己记（成功 INFO / 失败 WARNING，含 model 与耗时），
+    # 这里不再重复记一条，否则每次测试连接都会出两行。
     return JSONResponse({"ok": ok, "message": message})
 
 
