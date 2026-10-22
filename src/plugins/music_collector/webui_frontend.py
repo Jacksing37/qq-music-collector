@@ -303,6 +303,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
     <button class="nav" data-page="collect">🎵 收集管理</button>
     <button class="nav" data-page="master">📚 总库</button>
     <button class="nav" data-page="config">⚙ 配置</button>
+    <button class="nav" data-page="bot">🤖 机器人</button>
     <button class="nav" data-page="aliases">✏ 昵称映射</button>
     <button class="nav" data-page="admin">🛡 管理员</button>
     <button class="nav" data-page="logs">📜 运行日志</button>
@@ -399,6 +400,29 @@ button:disabled{opacity:.5;cursor:not-allowed}
       </div>
       <nav id="cfgNav" class="cfg-nav hidden" aria-label="配置分组跳转"></nav>
       <div id="configForm"></div>
+    </section>
+
+    <!-- 机器人（大模型回复） -->
+    <section id="page-bot" class="page hidden">
+      <div class="card">
+        <h2><span class="dot"></span>机器人设置 · 大模型回复</h2>
+        <p class="muted">群里 <b>@机器人 说一句话</b>（既不是音乐分享、也不是 <code>/music</code> 命令）时，用下面配置的大模型接口生成回复。未开启或调用失败时，仍然回原来的内置自我介绍。</p>
+        <p class="muted">⚠️ 这一页的设置<b>只能在网页端修改</b>：群内没有任何命令可以读写大模型参数（包括 API Key 与模型名）。</p>
+        <div id="botStatus" class="muted">加载中…</div>
+        <div class="row end" style="margin-top:12px">
+          <button id="botTest" title="按当前已保存的配置发一条最小请求，验证地址 / Key / 模型是否可用">🧪 测试连接</button>
+          <button id="botClearHist" title="清空内存里缓存的对话上下文（重启也会清空）">🧹 清空上下文</button>
+        </div>
+      </div>
+      <div id="botForm"></div>
+      <div class="card">
+        <div class="row end">
+          <span class="count" id="botDirtyCount"></span>
+          <span class="msg" id="botMsg"></span>
+          <button id="botReset">重置改动</button>
+          <button id="botSave" class="btn-primary">保存</button>
+        </div>
+      </div>
     </section>
 
     <!-- 昵称映射 -->
@@ -585,6 +609,7 @@ function switchPage(name){
   if(name==="collect") loadCollect();
   if(name==="master") loadMaster();
   if(name==="config") loadConfig();
+  if(name==="bot") loadBot();
   if(name==="aliases") loadAliases();
   if(name==="admin") loadAdmin();
   if(name==="logs"){ loadLogs(); startLogTimer(); }
@@ -1046,28 +1071,30 @@ function syncStickyOffsets(){
 }
 window.addEventListener("resize", ()=>{ syncStickyOffsets(); if($("#cfgGroupSel")) buildGroupSelOptions(); });
 
-function fieldControl(f, value, disabled){
+function fieldControl(f, value, disabled, setter){
   const wrap=document.createElement("div"); wrap.className="fctrl";
+  /* setter 让同一条渲染逻辑能被「配置」页和「机器人」页各自复用（两页各有自己的待保存表） */
+  const put = (typeof setter==="function") ? setter : markDirty;
   if(disabled) wrap.classList.add("disabled");
   if(f.type==="bool"){
     const id="f_"+f.key.replace(/\./g,"_"); const lbl=document.createElement("label"); lbl.className="chk";
     const cb=document.createElement("input"); cb.type="checkbox"; cb.id=id; cb.checked=!!value;
-    if(!disabled) cb.onchange=()=>markDirty(f.key, cb.checked);
+    if(!disabled) cb.onchange=()=>put(f.key, cb.checked);
     const sp=document.createElement("span"); sp.textContent=f.label; lbl.appendChild(cb); lbl.appendChild(sp); wrap.appendChild(lbl);
   } else if(f.type==="enum"){
     const sel=document.createElement("select");
     (f.enum||[]).forEach(o=>{const op=document.createElement("option");op.value=o;op.textContent=o;sel.appendChild(op);});
-    sel.value=value??""; if(!disabled) sel.onchange=()=>markDirty(f.key,sel.value); wrap.appendChild(sel);
+    sel.value=value??""; if(!disabled) sel.onchange=()=>put(f.key,sel.value); wrap.appendChild(sel);
   } else if(f.type==="int"||f.type==="float"){
     const inp=document.createElement("input"); inp.type="number"; inp.value=value??"";
-    inp.step = f.type==="int"?"1":"any"; if(!disabled) inp.oninput=()=>markDirty(f.key,inp.value); wrap.appendChild(inp);
+    inp.step = f.type==="int"?"1":"any"; if(!disabled) inp.oninput=()=>put(f.key,inp.value); wrap.appendChild(inp);
   } else if(f.type==="intlist"||f.type==="strlist"){
     const inp=document.createElement("input"); inp.type="text";
     inp.value=Array.isArray(value)?value.join(", "):(value??""); inp.placeholder="逗号分隔";
-    if(!disabled) inp.oninput=()=>markDirty(f.key,inp.value); wrap.appendChild(inp);
+    if(!disabled) inp.oninput=()=>put(f.key,inp.value); wrap.appendChild(inp);
   } else {
-    if(f.multiline){ const ta=document.createElement("textarea"); ta.value=value??""; if(!disabled) ta.oninput=()=>markDirty(f.key,ta.value); wrap.appendChild(ta); }
-    else { const inp=document.createElement("input"); inp.type=f.secret?"password":"text"; inp.value=value??""; if(!disabled) inp.oninput=()=>markDirty(f.key,inp.value); wrap.appendChild(inp); }
+    if(f.multiline){ const ta=document.createElement("textarea"); ta.value=value??""; if(!disabled) ta.oninput=()=>put(f.key,ta.value); wrap.appendChild(ta); }
+    else { const inp=document.createElement("input"); inp.type=f.secret?"password":"text"; inp.value=value??""; if(!disabled) inp.oninput=()=>put(f.key,inp.value); wrap.appendChild(inp); }
   }
   if(disabled) wrap.querySelectorAll("input,select,textarea").forEach(x=>x.disabled=true);
   return wrap;
@@ -1293,6 +1320,101 @@ $("#cfgGroupSel").onchange=async (e)=>{
   CFG_GID = v==="" ? null : parseInt(v,10);
   await loadConfig();
 };
+
+/* ---- 机器人（大模型回复） ---- */
+let BOT_ORIG={}, BOT_DIRTY={}, BOT_SCHEMA=[], BOT_STATUS={};
+
+function botMarkDirty(key,val){
+  const orig=BOT_ORIG[key]; let same=(orig===val);
+  if(!same && typeof orig==="boolean") same=(String(orig)===String(val));
+  if(same){ delete BOT_DIRTY[key]; } else { BOT_DIRTY[key]=val; }
+  refreshBotDirty();
+}
+function refreshBotDirty(){
+  const n=Object.keys(BOT_DIRTY).length;
+  const cnt=$("#botDirtyCount"); if(cnt) cnt.textContent = n?`● ${n} 项待保存`:"";
+  const btn=$("#botSave"); if(btn) btn.disabled = n===0;
+  document.querySelectorAll("#botForm .field").forEach(fr=>{
+    const ctrl=fr.querySelector(".fctrl"); if(ctrl) ctrl.classList.toggle("dirty", !!BOT_DIRTY[fr.dataset.key]);
+  });
+}
+/* 这一页只有 llm 一段，字段渲染直接复用 fieldControl，只是把「记到哪张待保存表」换掉，
+   避免和配置页共用 DIRTY 互相污染（配置页的「保存」不该带上大模型改动） */
+function renderBotForm(schema, values){
+  BOT_ORIG=Object.assign({},values||{}); BOT_DIRTY={};
+  const form=$("#botForm"); if(!form) return; form.innerHTML="";
+  (schema||[]).forEach(sec=>{
+    const card=document.createElement("section"); card.className="card cfg-sec";
+    const h=document.createElement("h2"); h.innerHTML=`<span class="dot"></span>${esc(sec.title)}`; card.appendChild(h);
+    (sec.fields||[]).forEach(f=>{
+      if(f.type==="map") return;
+      const fr=document.createElement("div"); fr.className="field"; fr.dataset.key=f.key;
+      const lab=document.createElement("div"); lab.className="flabel";
+      lab.innerHTML=`${f.label}${f.hint?`<span class="hint">${f.hint}</span>`:""}`;
+      const row=document.createElement("div"); row.className="frow";
+      row.appendChild(fieldControl(f, (values||{})[f.key], false, botMarkDirty));
+      fr.appendChild(lab); fr.appendChild(row); card.appendChild(fr);
+    });
+    form.appendChild(card);
+  });
+  refreshBotDirty();
+}
+function renderBotStatus(st){
+  const box=$("#botStatus"); if(!box) return;
+  BOT_STATUS = st||{};
+  if(!st){ box.textContent="状态未知"; return; }
+  const parts=[];
+  if(!st.enabled) parts.push(`<span class="badge">未启用</span>（@ 机器人仍然回内置自我介绍）`);
+  else if(!st.ready) parts.push(`<span class="badge bad">已启用但没填全</span> 接口地址 / API Key / 模型名 至少缺一项，@ 仍走自我介绍`);
+  else parts.push(`<span class="badge ok">已启用</span>`);
+  if(st.ready) parts.push(`模型：<b>${esc(st.model||"")}</b>　接口：<code>${esc(st.endpoint||"")}</code>`);
+  parts.push(`生效群：${esc((st.groups||[]).length ? st.groups.join("、") : "所有群")}`);
+  const hs=st.history||{}, keys=Object.keys(hs);
+  parts.push(keys.length ? `上下文：${keys.map(k=>`群${k} ${hs[k]} 条`).join("、")}` : "上下文：无（只在内存里，重启即清空）");
+  if(st.last_error) parts.push(`<span style="color:var(--bad)">最近一次失败：${esc(st.last_error)}</span>`);
+  box.innerHTML = parts.join("<br>");
+}
+function botMsg(t,kind=""){ const m=$("#botMsg"); if(m){ m.textContent=t; m.className="msg"+(kind?(" "+kind):""); } }
+async function loadBot(){
+  try{
+    const j=await (await api("/api/music-admin/bot")).json();
+    BOT_SCHEMA = j.schema||[];
+    renderBotForm(BOT_SCHEMA, j.values||{});
+    renderBotStatus(j.status);
+  }catch(e){ if(e.message!=="unauthorized") toast("机器人设置加载失败: "+e.message,"bad"); }
+}
+async function saveBot(){
+  const n=Object.keys(BOT_DIRTY).length;
+  if(!n){ botMsg("没有改动"); return; }
+  botMsg("保存中…");
+  try{
+    const j=await (await api("/api/music-admin/config",{method:"PATCH",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({values:BOT_DIRTY})})).json();
+    if(!j.ok){ const msgs=Object.entries(j.errors||{}).map(([k,v])=>`${k}: ${v}`).join("；"); botMsg("保存失败 — "+msgs,"bad"); return; }
+    botMsg("已保存 ✓","ok"); toast("机器人设置已保存","ok");
+    await loadBot();
+  }catch(e){ botMsg("保存失败: "+e.message,"bad"); }
+}
+async function testBot(){
+  botMsg("正在请求模型…");
+  try{
+    const j=await (await api("/api/music-admin/bot/test",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})})).json();
+    if(j.ok){ botMsg("连接成功："+j.message,"ok"); toast("测试成功","ok"); }
+    else { botMsg("连接失败："+j.message,"bad"); toast("测试失败","bad"); }
+    await loadBot();
+  }catch(e){ botMsg("测试失败: "+e.message,"bad"); }
+}
+async function clearBotHist(){
+  try{
+    const j=await (await api("/api/music-admin/bot/history",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})})).json();
+    toast(j.message||"已清空", j.ok?"ok":"bad");
+    await loadBot();
+  }catch(e){ toast("清空失败: "+e.message,"bad"); }
+}
+$("#botSave").onclick=saveBot;
+$("#botTest").onclick=testBot;
+$("#botClearHist").onclick=clearBotHist;
+$("#botReset").onclick=()=>{ BOT_DIRTY={}; renderBotForm(BOT_SCHEMA, BOT_ORIG); botMsg("已重置本地改动"); };
 
 /* ---- 昵称映射 ---- */
 function dictToLines(m){ return Object.keys(m||{}).map(k=>k+"="+m[k]).join("\n"); }

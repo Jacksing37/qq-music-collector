@@ -60,6 +60,36 @@ def test_endpoints():
         assert ac.status_code == 200
         assert "logged_in" in ac.json()
 
+        # ---- 机器人页（大模型回复）：独立一页，配置页不再出现 llm 段 ----
+        assert all(sec["key"] != "llm" for sec in c.json()["schema"])
+        b = client.get("/api/music-admin/bot", headers=H)
+        assert b.status_code == 200
+        bj = b.json()
+        assert [sec["key"] for sec in bj["schema"]] == ["llm"]
+        assert any(k.startswith("llm.") for k in bj["values"])
+        assert "ready" in bj["status"] and "endpoint" in bj["status"]
+        # 未带 token -> 401
+        assert client.get("/api/music-admin/bot").status_code == 401
+
+        # 没填 Key 时「测试连接」应给出可读失败（而不是 500、也不会真发请求）。
+        # 先把 api_key 清空，保证这条断言不依赖上一个测试留下的配置、也不会真联网
+        client.patch("/api/music-admin/config", headers=H,
+                     json={"values": {"llm.api_key": "", "llm.enabled": False}})
+        t = client.post("/api/music-admin/bot/test", headers=H, json={})
+        assert t.status_code == 200 and t.json()["ok"] is False
+        assert "没填全" in t.json()["message"]
+
+        # 保存 llm 配置（走同一个 PATCH 接口）
+        p3 = client.patch("/api/music-admin/config", headers=H,
+                          json={"values": {"llm.enabled": True, "llm.model": "smoke-model"}})
+        assert p3.status_code == 200 and p3.json()["ok"] is True
+        b2 = client.get("/api/music-admin/bot", headers=H).json()
+        assert b2["values"]["llm.model"] == "smoke-model" and b2["status"]["enabled"] is True
+
+        # 清空上下文（内存态，随便调）
+        hh = client.post("/api/music-admin/bot/history", headers=H, json={})
+        assert hh.status_code == 200 and hh.json()["ok"] is True
+
         print("webui e2e OK")
 
 

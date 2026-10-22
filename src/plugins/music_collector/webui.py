@@ -40,6 +40,7 @@ from .config import (
     reset_config_value,
 )
 from . import logbuffer
+from .llm import llm_bot, normalize_endpoint
 from .models import PLATFORM_NAMES
 from .store import MASTER_KEY
 from .naming import resolve_alias
@@ -60,6 +61,7 @@ SECTION_TITLES = {
     "reply": "收录回复模板",
     "netease": "网易云登录",
     "logs": "运行日志",
+    "llm": "机器人设置",
 }
 
 #: 配置页分组的展示顺序。网易云登录紧跟「通用设置」，登录 / 重登 / 粘贴 cookie
@@ -246,6 +248,88 @@ FIELD_META["netease.relogin_cooldown"] = (
 )
 
 
+# -------------------------------------------------------------------- 机器人（大模型）字段元信息
+#
+# 这一段独立成「机器人」页，**只在网页端修改**：群内没有任何命令能写 llm.*，
+# 且 llm.* 被 config.GLOBAL_ONLY_PREFIXES 排除在「按群覆盖」之外。
+
+FIELD_META["llm.enabled"] = (
+    "启用大模型回复",
+    "开启后，群里 @机器人 说一句话（不是音乐分享、也不是 /music 命令）就由大模型回答；关闭则仍然回内置自我介绍",
+    False,
+)
+FIELD_META["llm.groups"] = (
+    "生效群号",
+    "只在这些群启用；留空 = 所有群。多个用逗号分隔",
+    False,
+)
+FIELD_META["llm.base_url"] = (
+    "接口地址",
+    "OpenAI 兼容的 base url，填到 /v1 为止即可，如 https://api.deepseek.com/v1 。程序会自动补 /chat/completions",
+    False,
+)
+FIELD_META["llm.api_key"] = (
+    "API Key",
+    "保存在 data/config.yaml（日志里打码）。支持 DeepSeek / 通义 / 智谱 / Moonshot / Ollama / one-api 等 OpenAI 兼容服务",
+    False,
+)
+FIELD_META["llm.model"] = (
+    "模型名",
+    "如 deepseek-chat / gpt-4o-mini / qwen-plus / llama3.1（要与所填接口支持的模型一致）",
+    False,
+)
+FIELD_META["llm.system_prompt"] = (
+    "系统提示词",
+    "机器人的人设与说话风格。想让回复更像群友闲聊就写得口语一点；用 \\n 换行",
+    True,
+)
+FIELD_META["llm.temperature"] = (
+    "温度",
+    "0 最稳、2 最飘。闲聊建议 0.7~0.9",
+    False,
+)
+FIELD_META["llm.max_tokens"] = (
+    "最大回复 token",
+    "单次生成的上限。太大容易一次刷满屏，群聊一般 256~800 足够",
+    False,
+)
+FIELD_META["llm.timeout"] = (
+    "超时(秒)",
+    "单次请求最长等待时间，超时就失败（并按下方「失败退回自我介绍」处理）",
+    False,
+)
+FIELD_META["llm.history_rounds"] = (
+    "上下文轮数",
+    "携带最近几轮对话（1 轮 = 1 问 + 1 答）；0 = 每次都是全新对话。上下文只在内存里，重启即清空",
+    False,
+)
+FIELD_META["llm.cooldown"] = (
+    "冷却(秒)",
+    "同一用户在同一群的两次回复最小间隔，防止刷屏；0 = 不限",
+    False,
+)
+FIELD_META["llm.max_input_chars"] = (
+    "提问字数上限",
+    "单条提问最多取多少字送模型，超出截断；0 = 不限",
+    False,
+)
+FIELD_META["llm.max_reply_chars"] = (
+    "回复字数上限",
+    "回复最多发多少字，超出截断并加省略号；0 = 不限（超长会自动分条发送）",
+    False,
+)
+FIELD_META["llm.at_sender"] = (
+    "回复时 @ 提问者",
+    "关闭后直接发文字",
+    False,
+)
+FIELD_META["llm.fallback_intro"] = (
+    "失败退回自我介绍",
+    "接口报错 / 超时 / 没配好时，退回内置自我介绍（关掉则静默，群里看不到任何回应）",
+    False,
+)
+
+
 # -------------------------------------------------------------------- schema
 
 def _is_basemodel(tp: object) -> bool:
@@ -304,8 +388,8 @@ def _field_desc(parent: str, fname: str, finfo, dotted_parent: str) -> dict:
         "label": label,
         "hint": hint,
         "multiline": multiline,
-        # 密码 / cookie 类字段在表单里用 password 输入框，避免旁窥
-        "secret": ("password" in fname) or ("cookie" in fname),
+        # 密码 / cookie / api_key 类字段在表单里用 password 输入框，避免旁窥
+        "secret": any(w in fname for w in ("password", "cookie", "api_key", "secret")),
         # 进程级唯一的项（日志 / 缓存 / 网易云账号 / 字体 / 生效群号…）不能按群覆盖，
         # 前端在「按群」视图里要把它们灰掉，并注明「始终取全局值」
         "global_only": not is_group_scopable(dotted),
@@ -361,6 +445,12 @@ def build_schema() -> list[dict]:
 
 SCHEMA = build_schema()
 KEY_INDEX: dict[str, dict] = {f["key"]: f for s in SCHEMA for f in s["fields"]}
+
+#: ``llm`` 段单独挂在「机器人」页，**不再出现在配置页**——避免同一个开关在两处
+#: 都能改、改完互相覆盖。KEY_INDEX 仍然包含它，所以 PATCH 接口照常能写。
+BOT_SECTION = "llm"
+BOT_SCHEMA = [s for s in SCHEMA if s["key"] == BOT_SECTION]
+CONFIG_SCHEMA = [s for s in SCHEMA if s["key"] != BOT_SECTION]
 
 
 # -------------------------------------------------------------------- 值转换
@@ -600,7 +690,7 @@ async def _api_config(request: Request):
     gid = _group_id_param(request)
     return JSONResponse({
         "values": current_values(gid),
-        "schema": SCHEMA,
+        "schema": CONFIG_SCHEMA,
         "group_id": gid,
         #: 该群被单独覆盖过的键（前端据此高亮 + 提供「恢复继承」）
         "overridden": group_overrides.overridden_keys(gid) if gid is not None else [],
@@ -1127,6 +1217,76 @@ async def _api_logs(request: Request):
     })
 
 
+# -------------------------------------------------------------------- 机器人（大模型）
+
+async def _api_bot(request: Request):
+    """「机器人」页数据：llm 段的字段 + 当前值 + 运行状态。
+
+    只走全局层——``llm`` 段本来就是进程级配置（见 config.GLOBAL_ONLY_PREFIXES），
+    不存在「某个群单独一套模型」这种组合。
+    """
+    if not _token_ok(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    cfg = effective_config(None).llm
+    values = {
+        k: v for k, v in current_values(None).items() if k.startswith(f"{BOT_SECTION}.")
+    }
+    return JSONResponse({
+        "schema": BOT_SCHEMA,
+        "values": values,
+        "groups": await service.known_groups(),
+        "status": {
+            "enabled": cfg.enabled,
+            # 「填全了没」：三项必填，缺一项就算没配置好（此时 @ 也不会走大模型）
+            "ready": bool(
+                cfg.base_url.strip() and cfg.api_key.strip() and cfg.model.strip()
+            ),
+            "model": cfg.model,
+            "endpoint": normalize_endpoint(cfg.base_url),
+            "groups": cfg.groups,
+            # 上下文只在内存里：重启清零，这里顺带把「哪个群还留着几轮」摆出来
+            "history": {str(g): n for g, n in llm_bot.history_sizes().items()},
+            "last_error": llm_bot.last_error,
+        },
+    })
+
+
+async def _api_bot_test(request: Request):
+    """「测试连接」：按当前配置发一条最小请求，返回结果与耗时。"""
+    if not _token_ok(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    prompt = ""
+    if isinstance(body, dict):
+        prompt = str(body.get("prompt") or "").strip()
+    cfg = effective_config(None).llm
+    ok, message = await llm_bot.test(cfg, prompt or "用一句话介绍你自己")
+    logger.info(f"[llm] 网页端测试连接: {'成功' if ok else '失败'} — {message[:120]}")
+    return JSONResponse({"ok": ok, "message": message})
+
+
+async def _api_bot_history(request: Request):
+    """清空对话上下文。body 带 ``group_id`` 只清该群，不带则清全部。"""
+    if not _token_ok(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    gid = None
+    if isinstance(body, dict) and body.get("group_id") not in (None, "", "global"):
+        try:
+            gid = int(body["group_id"])
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "message": "group_id 非法"}, status_code=400)
+    n = llm_bot.clear_history(gid)
+    where = f"群 {gid}" if gid is not None else "全部群"
+    return JSONResponse({"ok": True, "message": f"已清空{where}的对话上下文（{n} 个群）"})
+
+
 def register_webui() -> None:
     """在 NoneBot 的 FastAPI 应用上挂载管理界面。于插件启动钩子里调用。"""
     global _TOKEN
@@ -1152,6 +1312,9 @@ def register_webui() -> None:
     app.add_api_route("/music-admin/aliases", _aliases_page, methods=["GET"])
     app.add_api_route("/api/music-admin/schema", _api_schema, methods=["GET"])
     app.add_api_route("/api/music-admin/config", _api_config, methods=["GET"])
+    app.add_api_route("/api/music-admin/bot", _api_bot, methods=["GET"])
+    app.add_api_route("/api/music-admin/bot/test", _api_bot_test, methods=["POST"])
+    app.add_api_route("/api/music-admin/bot/history", _api_bot_history, methods=["POST"])
     app.add_api_route("/api/music-admin/config", _api_patch, methods=["PATCH"])
     app.add_api_route("/api/music-admin/groups", _api_groups, methods=["GET"])
     app.add_api_route("/api/music-admin/status", _api_status, methods=["GET"])

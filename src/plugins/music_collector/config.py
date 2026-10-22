@@ -431,6 +431,52 @@ class RenderConfig(BaseModel):
     theme: Literal["light", "dark"] = "dark"
 
 
+class LLMConfig(BaseModel):
+    """被 @ 时用大模型生成回复（OpenAI 兼容接口）。
+
+    触发条件：群里 **@机器人** 且这条消息既不是 ``/music`` 命令、也不是音乐分享。
+    命中后优先用大模型回答；失败时按 ``fallback_intro`` 决定是否退回内置自我介绍。
+
+    ⚠️ 这一整段**只能在网页端「机器人」页修改**，群内没有任何命令可以写它
+    （``GLOBAL_ONLY_PREFIXES`` 里也把它排除在「按群覆盖」之外，避免出现一份
+    永远不会生效的副本）。
+    """
+
+    #: 总开关。关闭时 @ 机器人仍然走内置自我介绍
+    enabled: bool = False
+    #: 在哪些群启用，留空 = 所有群（与「生效群号」的语义一致）
+    groups: list[int] = Field(default_factory=list)
+    #: OpenAI 兼容接口地址，填到 /v1 为止即可，如 https://api.deepseek.com/v1
+    base_url: str = "https://api.openai.com/v1"
+    #: API Key（保存在 data/config.yaml；日志里会打码）
+    api_key: str = ""
+    #: 模型名，如 gpt-4o-mini / deepseek-chat / qwen-plus
+    model: str = "gpt-4o-mini"
+    #: 系统提示词（机器人的人设 / 说话风格）
+    system_prompt: str = (
+        "你是 QQ 群里的音乐收集助手，性格随和、说话简洁，用中文回答。"
+        "群友分享歌曲由另一套功能处理，你只负责聊天答疑；不确定的事不要编。"
+    )
+    #: 采样温度，0 最稳、2 最飘
+    temperature: float = Field(0.7, ge=0, le=2)
+    #: 单次回复的最大 token 数
+    max_tokens: int = Field(512, ge=1, le=32000)
+    #: 请求超时（秒）
+    timeout: float = Field(30.0, ge=1, le=300)
+    #: 携带最近几轮对话作为上下文；0 = 不带（每次都是全新对话）
+    history_rounds: int = Field(3, ge=0, le=20)
+    #: 同一用户在同一群的冷却秒数，防止刷屏；0 = 不限
+    cooldown: int = Field(3, ge=0, le=600)
+    #: 单条提问最多取多少字（超出截断后送模型）；0 = 不限制
+    max_input_chars: int = Field(500, ge=0, le=8000)
+    #: 回复最多发多少字（超出截断并加省略号）；0 = 不限制
+    max_reply_chars: int = Field(800, ge=0, le=4000)
+    #: 回复时是否 @ 提问者
+    at_sender: bool = True
+    #: 大模型调用失败时，退回内置自我介绍（避免「@了没反应」）
+    fallback_intro: bool = True
+
+
 class AppConfig(BaseModel):
     #: 总开关
     enabled: bool = True
@@ -458,15 +504,23 @@ class AppConfig(BaseModel):
     reply: ReplyConfig = Field(default_factory=ReplyConfig)
     master: MasterConfig = Field(default_factory=MasterConfig)
     logs: LogsConfig = Field(default_factory=LogsConfig)
+    llm: LLMConfig = Field(default_factory=LLMConfig)
 
 
-#: 键名里含这些词的配置项属于敏感信息，写日志时打码，别把密码 / cookie 记进日志页
-_SECRET_KEYWORDS = ("password", "cookie", "token", "secret", "access_key")
+#: 键名里含这些词的配置项属于敏感信息，写日志时打码，别把密码 / cookie / 密钥记进日志页
+_SECRET_KEYWORDS = ("password", "cookie", "token", "secret", "access_key", "api_key")
+
+#: 例外：这些键虽然字面上带敏感词，其实是普通数值（``llm.max_tokens`` 会被
+#: "token" 误伤成 ******，日志里就看不出改成了多少）
+_NOT_SECRET_KEYS = frozenset({"max_tokens", "min_tokens", "reply_tokens"})
 
 
 def _mask_value(key: str, value: object) -> str:
     """把配置值渲染成适合写进日志的一行：敏感项打码、长文本截断、换行转义。"""
     low = key.lower()
+    leaf = low.rsplit(".", 1)[-1]
+    if leaf in _NOT_SECRET_KEYS:
+        return str(value)
     if any(word in low for word in _SECRET_KEYWORDS):
         return "******" if value else "(空)"
     if isinstance(value, bool):
@@ -636,7 +690,11 @@ GLOBAL_ONLY_KEYS: frozenset[str] = frozenset({
 })
 
 #: 整段都不允许按群覆盖的配置段
-GLOBAL_ONLY_PREFIXES: tuple[str, ...] = ("logs.", "cache.", "netease.")
+#: - ``logs.`` / ``cache.`` / ``netease.``：进程级唯一
+#: - ``llm.``：这一段的「哪些群启用」由 ``llm.groups`` 自己决定，且按要求只能
+#:   在网页端改；如果允许按群覆盖，会出现「按群改了 base_url 但 groups 没包含自己」
+#:   这种谁也说不清的组合，所以整段锁在全局层
+GLOBAL_ONLY_PREFIXES: tuple[str, ...] = ("logs.", "cache.", "netease.", "llm.")
 
 
 def is_group_scopable(dotted_key: str) -> bool:

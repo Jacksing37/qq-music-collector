@@ -29,9 +29,12 @@ from .bot_utils import (  # noqa: E402
     message_preview,
     safe_send_group,
     send_music_card,
+    split_text,
     trace_messages_enabled,
     trace_out,
 )
+from .llm import enabled_for as llm_enabled_for  # noqa: E402
+from .llm import llm_bot  # noqa: E402
 from .models import PLATFORM_NAMES, Song  # noqa: E402
 from .naming import build_context, render_template, resolve_alias  # noqa: E402
 from .scheduler import reload_jobs  # noqa: E402
@@ -161,8 +164,59 @@ async def _build_intro(event: GroupMessageEvent) -> str:
 at_listener = on_message(rule=Rule(_at_bot), priority=5, block=False)
 
 
-@at_listener.handle()
-async def handle_at(bot: Bot, event: GroupMessageEvent) -> None:
+async def _try_llm_reply(bot: Bot, event: GroupMessageEvent) -> bool:
+    """用大模型回答「@机器人 + 一句话」。
+
+    返回 ``True`` 表示这条消息已经处理完（含「冷却中故意静默」），上层不要再发
+    自我介绍；返回 ``False`` 表示该走内置自我介绍。
+
+    门槛与自我介绍保持同一套（不抢命令、不抢音乐分享），另外多一道
+    ``llm.enabled`` + ``llm.groups`` 的群白名单。
+    """
+    app_cfg = service.cfg(event.group_id)
+    llm_cfg = app_cfg.llm
+    if not llm_enabled_for(llm_cfg, event.group_id):
+        return False
+    # 插件总开关关掉时一律不吭声（与群内其它响应器保持一致）
+    if not app_cfg.enabled:
+        return False
+    if app_cfg.groups and event.group_id not in app_cfg.groups:
+        return False
+    if _is_command_message(event):
+        return False
+    if await _looks_like_music(event):
+        return False
+
+    text = event.message.extract_plain_text().strip()
+    if not text:
+        # 只 @ 了机器人、没带文字（表情包 / 图片）→ 交给自我介绍
+        return False
+
+    nick = event.sender.card or event.sender.nickname or str(event.user_id)
+    reply, reason = await llm_bot.chat(
+        event.group_id, event.user_id, nick, text, llm_cfg
+    )
+    if reply:
+        parts = split_text(reply)
+        first = Message()
+        if llm_cfg.at_sender:
+            first += MessageSegment.at(event.user_id)
+        first += MessageSegment.text(" " + parts[0])
+        await safe_send_group(bot, event.group_id, first)
+        for extra in parts[1:]:
+            await safe_send_group(bot, event.group_id, Message(MessageSegment.text(extra)))
+        return True
+    if reason == "cooldown":
+        # 冷却中保持安静，别再用自我介绍补一条（否则「限流」变「刷屏」）
+        return True
+    if reason == "empty":
+        return False
+    # 调用失败：按配置退回自我介绍，或干脆静默
+    return not llm_cfg.fallback_intro
+
+
+async def _reply_intro(bot: Bot, event: GroupMessageEvent) -> None:
+    """内置自我介绍（@ 但没有触发大模型回复时的兜底）。"""
     cfg = service.cfg(event.group_id).intro
     if not cfg.enabled:
         return
@@ -194,6 +248,14 @@ async def handle_at(bot: Bot, event: GroupMessageEvent) -> None:
         message += MessageSegment.at(event.user_id)
     message += MessageSegment.text(text)
     await safe_send_group(bot, event.group_id, message)
+
+
+@at_listener.handle()
+async def handle_at(bot: Bot, event: GroupMessageEvent) -> None:
+    # 大模型优先；它没接（未启用 / 失败且允许兜底）才发自我介绍
+    if await _try_llm_reply(bot, event):
+        return
+    await _reply_intro(bot, event)
 
 
 def _format_accept(song: Song, index: int, unmatched_notice: str = "") -> str:
