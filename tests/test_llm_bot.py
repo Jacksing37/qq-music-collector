@@ -550,6 +550,28 @@ async def test_context_budget() -> None:
     check("history_chars 默认 3000", LLMConfig().history_chars == 3000)
     check("表单含 llm.history_chars", "llm.history_chars" in KEY_INDEX)
 
+    # (h) 轮数上限放宽到 200（原来 20 就封顶），200 之外仍拒绝；真正的闸门是字数
+    check("history_rounds 允许 200", LLMConfig(history_rounds=200).history_rounds == 200)
+    for bad in (201, 1000):
+        try:
+            LLMConfig(history_rounds=bad)
+            check(f"history_rounds={bad} 被拒绝", False, "没报错")
+        except Exception:
+            check(f"history_rounds={bad} 被拒绝", True)
+    check("history_rounds=0 仍表示不带上下文", LLMConfig(history_rounds=0).history_rounds == 0)
+    # 200 轮 × 2 条 × 单条 600 字 ≈ 24 万字，字数预算会先截到预算内 → 请求不会因此变大
+    bot5 = LLMBot()
+    gid5 = 8206
+    d5 = bot5._history.setdefault(gid5, deque())
+    for _ in range(100):
+        d5.append({"role": "user", "content": "问" * 600})
+        d5.append({"role": "assistant", "content": "答" * 600})
+    wide = LLMConfig(history_rounds=200, history_chars=3000)
+    kept5 = bot5._history_within(gid5, wide.history_chars)
+    check("200 轮也受字数预算约束", sum(len(m["content"]) for m in kept5) <= 3000,
+          str(sum(len(m["content"]) for m in kept5)))
+    check("预算内只剩 2~3 对", 2 <= len(kept5) <= 6, str(len(kept5)))
+
 
 # ---------------------------------------------------------------- 12. 排查日志
 
