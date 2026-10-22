@@ -244,14 +244,26 @@ def payload_preview(cfg: LLMConfig) -> dict:
     return payload
 
 
+def disabled_reason(cfg: LLMConfig, group_id: int) -> str:
+    """这个群为什么不走大模型；返回空串表示可以走。
+
+    抽成一个函数是为了让日志能说清**原因**：群里「@ 了没反应」时，只知道
+    ``enabled_for`` 返回 False 是没法排查的——未启用、没填全、群不在白名单，
+    三种情况处理方式完全不同。
+    """
+    if not cfg.enabled:
+        return "大模型功能未启用"
+    if not (cfg.base_url.strip() and cfg.api_key.strip() and cfg.model.strip()):
+        return "接口地址 / API Key / 模型名 没填全"
+    gid = int(group_id)
+    if cfg.groups and gid not in cfg.groups:
+        return f"群 {gid} 不在生效列表（当前 {len(cfg.groups)} 个群）"
+    return ""
+
+
 def enabled_for(cfg: LLMConfig, group_id: int) -> bool:
     """该群是否该用大模型回复：开关 + 必填项 + 群白名单（空=所有群）。"""
-    if not cfg.enabled:
-        return False
-    if not (cfg.base_url.strip() and cfg.api_key.strip() and cfg.model.strip()):
-        return False
-    gid = int(group_id)
-    return not cfg.groups or gid in cfg.groups
+    return not disabled_reason(cfg, group_id)
 
 
 def extract_reply(data: dict) -> str:
@@ -413,11 +425,17 @@ class LLMBot:
         if cfg.max_input_chars > 0 and len(question) > cfg.max_input_chars:
             question = question[: cfg.max_input_chars].rstrip() + "…"
 
-        if self.cooldown_left(group_id, user_id, cfg.cooldown) > 0:
-            return None, "cooldown"
-
         # 昵称进 prompt 有助于模型称呼提问者；顺带做一次长度保护
         speaker = (nick or str(user_id)).strip()[:_HISTORY_CHAR_LIMIT]
+
+        left = self.cooldown_left(group_id, user_id, cfg.cooldown)
+        if left > 0:
+            # 群里表现为「完全没反应」，必须留痕：否则分不清是限流还是压根没触发
+            logger.info(
+                f"[llm] 群{group_id} {speaker}({user_id}) 冷却中"
+                f"（还剩 {left:.0f}s / 共 {cfg.cooldown}s）→ 静默跳过"
+            )
+            return None, "cooldown"
 
         async with self._lock(group_id):
             system = system_text(cfg)
@@ -501,9 +519,14 @@ class LLMBot:
             reply = await self._post_chat(messages, probe)
         except Exception as exc:  # noqa: BLE001
             self.last_error = str(exc)
+            # 网页上闪一下的结果会被关掉，日志里留一份才能事后回溯
+            logger.warning(f"[llm] 测试连接失败（model={cfg.model}）: {exc}")
             return False, str(exc)
         self.last_error = ""
         elapsed = (time.monotonic() - started) * 1000
+        logger.info(
+            f"[llm] 测试连接成功（model={cfg.model}，{elapsed:.0f} ms，回复 {len(reply)} 字）"
+        )
         return True, f"{reply}（{elapsed:.0f} ms，共 {len(reply)} 字）"
 
 

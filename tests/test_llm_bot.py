@@ -16,8 +16,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 import tempfile
+import time
 from collections import deque
 from pathlib import Path
 
@@ -43,6 +45,7 @@ from music_collector.config import (  # noqa: E402
 from music_collector.llm import (  # noqa: E402
     LLMBot,
     build_payload,
+    disabled_reason,
     enabled_for,
     extract_reply,
     guess_thinking_style,
@@ -548,11 +551,161 @@ async def test_context_budget() -> None:
     check("表单含 llm.history_chars", "llm.history_chars" in KEY_INDEX)
 
 
-# ---------------------------------------------------------------- 12. 分流
+# ---------------------------------------------------------------- 12. 排查日志
+
+
+class _Cap(logging.Handler):
+    """抓 ``music_collector.llm`` 的日志，用来断言「该留痕的地方真的留了」。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[tuple[str, str]] = []
+
+    def emit(self, record: logging.LogRecord) -> None:  # noqa: D102
+        try:
+            self.rows.append((record.levelname, record.getMessage()))
+        except Exception:  # noqa: BLE001
+            self.rows.append((record.levelname, ""))
+
+    def find(self, keyword: str, level: str | None = None) -> list[str]:
+        return [
+            m for lv, m in self.rows if keyword in m and (level is None or lv == level)
+        ]
+
+
+async def test_diagnostic_logs() -> None:
+    print("\n[12] 排查用的日志：冷却 / 门禁原因 / 测试连接")
+
+    # (a) disabled_reason 说清「为什么没走大模型」——群里 @ 了没反应就靠它定位
+    ready = LLMConfig(enabled=True, base_url="https://x/v1", api_key="k", model="m")
+    check("填全+启用 → 空原因", disabled_reason(ready, 1) == "")
+    check("未启用 → 报未启用", "未启用" in disabled_reason(LLMConfig(), 1),
+          disabled_reason(LLMConfig(), 1))
+    check("没填全 → 报缺项", "没填全" in disabled_reason(LLMConfig(enabled=True), 1),
+          disabled_reason(LLMConfig(enabled=True), 1))
+    only = ready.model_copy(update={"groups": [111]})
+    check("群不在生效列表 → 报群号", "不在生效列表" in disabled_reason(only, 222),
+          disabled_reason(only, 222))
+    check("群在生效列表 → 放行", disabled_reason(only, 111) == "")
+    check("groups 空 = 所有群", disabled_reason(only.model_copy(update={"groups": []}), 999) == "")
+    # enabled_for 必须与 disabled_reason 同源（别再各写一套判断）
+    for _cfg, _gid in ((LLMConfig(), 1), (LLMConfig(enabled=True), 1), (only, 222), (only, 111)):
+        check(f"enabled_for ↔ disabled_reason 一致（群{_gid}）",
+              enabled_for(_cfg, _gid) == (disabled_reason(_cfg, _gid) == ""))
+
+    cap = _Cap()
+    lg = logging.getLogger("music_collector.llm")
+    lg.addHandler(cap)
+    old_level = lg.level
+    lg.setLevel(logging.DEBUG)  # 冷却/测试连接是 INFO，门禁是 DEBUG，统一降级抓全
+    try:
+        # (b) 冷却：原来完全静默 → 现在留一条 INFO（带剩余秒数）
+        bot = LLMBot()
+
+        async def no_call(messages, cfg):  # noqa: ANN001
+            raise AssertionError("冷却期不该真的发请求")
+
+        bot._post_chat = no_call  # type: ignore[method-assign]
+        bot._last_reply[(8301, 7)] = time.monotonic()
+        reply, reason = await bot.chat(8301, 7, "张三", "在吗", ready.model_copy(update={"cooldown": 60}))
+        check("冷却返回 cooldown", reply is None and reason == "cooldown")
+        cool = cap.find("冷却中", "INFO")
+        check("冷却留了 INFO", len(cool) == 1, str(cap.rows[-4:]))
+        check("冷却日志有昵称/剩余秒数/总时长",
+              cool and "张三" in cool[0] and "还剩" in cool[0] and "共 60s" in cool[0], cool[:1])
+
+        # (c) 成功一条 INFO（含字数与模型名）、失败一条 WARNING（含原因）
+        bot2 = LLMBot()
+
+        async def ok(messages, cfg):  # noqa: ANN001
+            return "好的呀"
+
+        bot2._post_chat = ok  # type: ignore[method-assign]
+        await bot2.chat(8302, 8, "李四", "在吗", ready)
+        check("成功记 INFO（提问/回复字数 + model）",
+              any("提问 2 字" in m and "回复 3 字" in m and "model=m" in m
+                  for m in cap.find("提问", "INFO")), str(cap.rows[-4:]))
+
+        bot3 = LLMBot()
+
+        async def bad(messages, cfg):  # noqa: ANN001
+            raise RuntimeError("HTTP 401: bad key")
+
+        bot3._post_chat = bad  # type: ignore[method-assign]
+        await bot3.chat(8303, 9, "王五", "在吗", ready)
+        check("失败记 WARNING 并带原文",
+              any("bad key" in m for m in cap.find("生成失败", "WARNING")), str(cap.rows[-4:]))
+
+        # (d) 网页「测试连接」：成功/失败都要进日志（原来只在页面上闪一下）
+        bot4 = LLMBot()
+        bot4._post_chat = ok  # type: ignore[method-assign]
+        good, detail = await bot4.test(ready, "你好")
+        check("测试连接成功", good is True and "好的呀" in detail, detail)
+        check("测试连接成功记 INFO", len(cap.find("测试连接成功", "INFO")) == 1,
+              str(cap.rows[-4:]))
+        check("测试连接日志含耗时", "ms" in (cap.find("测试连接成功", "INFO") or [""])[0],
+              str(cap.find("测试连接成功")))
+
+        bot5 = LLMBot()
+
+        async def bad2(messages, cfg):  # noqa: ANN001
+            raise RuntimeError("HTTP 500: boom")
+
+        bot5._post_chat = bad2  # type: ignore[method-assign]
+        bad_ok, why = await bot5.test(ready, "你好")
+        check("测试连接失败返回原因", bad_ok is False and "boom" in why, why)
+        check("测试连接失败记 WARNING", len(cap.find("测试连接失败", "WARNING")) == 1,
+              str(cap.rows[-4:]))
+    finally:
+        lg.removeHandler(cap)
+        lg.setLevel(old_level)
+
+    # (e) 门禁留痕：开了却走不通记 INFO（默认配置就能看到），没启用/正常分流只记 DEBUG
+    import music_collector as mc
+    from loguru import logger as _lgr
+
+    rows: list[tuple[str, str]] = []
+    sid = _lgr.add(
+        lambda m: rows.append((m.record["level"].name, m.record["message"])),
+        level="DEBUG",
+        format="{message}",
+    )
+    try:
+        check("_llm_skip 返回 False", mc._llm_skip(make_event("在吗"), "测试原因") is False)
+
+        reset_llm()
+        config_manager.config.llm.groups = [123456]  # GID 不在里面
+        rows.clear()
+        went = await mc._try_llm_reply(StubBot(), make_event("在吗", user_id=1))
+        check("群不在白名单 → 不处理", went is False)
+        check("群不在白名单 → 记 INFO（默认可见）",
+              any(lv == "INFO" and "不在生效列表" in msg for lv, msg in rows), str(rows[-3:]))
+
+        reset_llm(enabled=False)
+        rows.clear()
+        went2 = await mc._try_llm_reply(StubBot(), make_event("在吗", user_id=1))
+        check("未启用 → 不处理", went2 is False)
+        check("未启用 → 只记 DEBUG（不刷屏）",
+              any(lv == "DEBUG" and "未启用" in msg for lv, msg in rows)
+              and not any(lv == "INFO" for lv, _ in rows), str(rows[-3:]))
+
+        reset_llm()
+        rows.clear()
+        went3 = await mc._try_llm_reply(StubBot(), make_event("/music help", user_id=1))
+        check("命令 → 不处理且只记 DEBUG",
+              went3 is False
+              and any(lv == "DEBUG" and "命令消息" in msg for lv, msg in rows)
+              and not any(lv == "INFO" for lv, _ in rows), str(rows[-3:]))
+    finally:
+        _lgr.remove(sid)
+        reset_llm()
+
+
+# ---------------------------------------------------------------- 13. 分流
 
 
 async def test_handle_at_routing() -> None:
-    print("\n[12] handle_at 分流：大模型优先，兜底自我介绍")
+    print("\n[13] handle_at 分流：大模型优先，兜底自我介绍")
     import music_collector as mc
 
     tmp = Path(tempfile.mkdtemp())
@@ -641,6 +794,7 @@ async def main() -> None:
     test_config_and_schema()
     test_sampling_and_thinking()
     await test_context_budget()
+    await test_diagnostic_logs()
     await test_handle_at_routing()
     print("\n====================================================")
     print(f"通过 {PASSED} 项，失败 {FAILED} 项")

@@ -33,7 +33,7 @@ from .bot_utils import (  # noqa: E402
     trace_messages_enabled,
     trace_out,
 )
-from .llm import enabled_for as llm_enabled_for  # noqa: E402
+from .llm import disabled_reason as llm_disabled_reason  # noqa: E402
 from .llm import llm_bot  # noqa: E402
 from .models import PLATFORM_NAMES, Song  # noqa: E402
 from .naming import build_context, render_template, resolve_alias  # noqa: E402
@@ -164,6 +164,22 @@ async def _build_intro(event: GroupMessageEvent) -> str:
 at_listener = on_message(rule=Rule(_at_bot), priority=5, block=False)
 
 
+def _llm_skip(event: GroupMessageEvent, reason: str, level: str = "debug") -> bool:
+    """没走大模型时留一条痕，然后返回 False（交给自我介绍兜底）。
+
+    等级分两档，靠 ``level`` 指定：
+
+    - **INFO**：开了大模型却没生效（缺项、群不在白名单）——「明明开了怎么不回」
+      是最难查的一种，默认配置等级（INFO）就能看到。
+    - **DEBUG**：本来就不该走（没启用、命令、音乐分享、只 @ 没说话）——都是正常
+      流量，用 INFO 会把日志页刷满；真要看时把「配置 → 运行日志 → 日志记录等级」
+      临时调成 DEBUG。
+    """
+    log = logger.info if str(level).lower() == "info" else logger.debug
+    log(f"[llm] 群{event.group_id} 未走大模型：{reason}")
+    return False
+
+
 async def _try_llm_reply(bot: Bot, event: GroupMessageEvent) -> bool:
     """用大模型回答「@机器人 + 一句话」。
 
@@ -175,22 +191,24 @@ async def _try_llm_reply(bot: Bot, event: GroupMessageEvent) -> bool:
     """
     app_cfg = service.cfg(event.group_id)
     llm_cfg = app_cfg.llm
-    if not llm_enabled_for(llm_cfg, event.group_id):
-        return False
+    why = llm_disabled_reason(llm_cfg, event.group_id)
+    if why:
+        # 没启用是常态（回自我介绍，符合预期）；开了却走不通才是要排查的
+        return _llm_skip(event, why, "debug" if not llm_cfg.enabled else "info")
     # 插件总开关关掉时一律不吭声（与群内其它响应器保持一致）
     if not app_cfg.enabled:
-        return False
+        return _llm_skip(event, "插件总开关关闭", "info")
     if app_cfg.groups and event.group_id not in app_cfg.groups:
-        return False
+        return _llm_skip(event, "本群不在插件生效列表", "info")
     if _is_command_message(event):
-        return False
+        return _llm_skip(event, "是命令消息，交给 /music 处理")
     if await _looks_like_music(event):
-        return False
+        return _llm_skip(event, "是音乐分享，交给收集流程")
 
     text = event.message.extract_plain_text().strip()
     if not text:
         # 只 @ 了机器人、没带文字（表情包 / 图片）→ 交给自我介绍
-        return False
+        return _llm_skip(event, "没有文字（只有 @ 或表情/图片）")
 
     nick = event.sender.card or event.sender.nickname or str(event.user_id)
     reply, reason = await llm_bot.chat(
@@ -207,12 +225,16 @@ async def _try_llm_reply(bot: Bot, event: GroupMessageEvent) -> bool:
             await safe_send_group(bot, event.group_id, Message(MessageSegment.text(extra)))
         return True
     if reason == "cooldown":
-        # 冷却中保持安静，别再用自我介绍补一条（否则「限流」变「刷屏」）
+        # 冷却中保持安静，别再用自我介绍补一条（否则「限流」变「刷屏」）。
+        # 冷却本身已在 llm.chat 里记了 INFO，这里不再重复。
         return True
     if reason == "empty":
         return False
     # 调用失败：按配置退回自我介绍，或干脆静默
-    return not llm_cfg.fallback_intro
+    if not llm_cfg.fallback_intro:
+        logger.debug(f"[llm] 群{event.group_id} 调用失败且未开兜底 → 保持静默")
+        return True
+    return False
 
 
 async def _reply_intro(bot: Bot, event: GroupMessageEvent) -> None:
