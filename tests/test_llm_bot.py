@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import tempfile
+from collections import deque
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,11 +46,13 @@ from music_collector.llm import (  # noqa: E402
     enabled_for,
     extract_reply,
     guess_thinking_style,
+    is_context_overflow,
     is_reasoning_model,
     normalize_endpoint,
     parse_extra_body,
     payload_preview,
     resolve_thinking_style,
+    system_text,
     thinking_budget,
 )
 from music_collector.service import service  # noqa: E402
@@ -442,11 +445,114 @@ def test_sampling_and_thinking() -> None:
     check("思考预算不被 token 误伤", _mask_value("llm.thinking_budget", 4096) == "4096")
 
 
-# ---------------------------------------------------------------- 11. 分流
+# ---------------------------------------------------------------- 11. 上下文预算
+
+
+async def test_context_budget() -> None:
+    print("\n[11] 上下文预算 / 超窗自愈")
+
+    # (a) 按字符预算裁剪：只保留最近的成对消息
+    bot = LLMBot()
+    gid = 8202
+    d = bot._history.setdefault(gid, deque())
+    for _ in range(5):
+        d.append({"role": "user", "content": "问" * 300})
+        d.append({"role": "assistant", "content": "答" * 300})
+    kept = bot._history_within(gid, 1200)
+    check("预算裁剪后只剩最近的 2 对", len(kept) == 4, str(len(kept)))
+    check("裁剪后不超预算", sum(len(m["content"]) for m in kept) <= 1200,
+          str(sum(len(m["content"]) for m in kept)))
+    check("留下的是最近一轮", kept[-1]["content"].startswith("答"), kept[-1]["content"][:5])
+    check("历史队列本身没被破坏", len(bot._history[gid]) == 10, str(len(bot._history[gid])))
+    check("预算 0 = 不裁剪", len(bot._history_within(gid, 0)) == 10)
+    check("至少留一对（不会裁到空）", len(bot._history_within(gid, 1)) >= 2)
+
+    stats = bot.history_stats()
+    check("统计给出条数与字符数",
+          stats[gid]["msgs"] == 10 and stats[gid]["chars"] == 3000, str(stats.get(gid)))
+
+    # (b) 超窗判定：各家措辞都要认出来，普通错误不能误判
+    for msg in (
+        "HTTP 400: This model's maximum context length is 8192 tokens",
+        'HTTP 400: {"error": "context_length_exceeded"}',
+        "input length is too long",
+        "上下文长度超过模型限制",
+    ):
+        check(f"识别超窗：{msg[:28]}…", is_context_overflow(msg) is True, msg)
+    check("401 不误判成超窗", is_context_overflow("HTTP 401: invalid api key") is False)
+
+    # (c) 超窗 → 丢历史重试一次
+    bot2 = LLMBot()
+    gid2 = 8203
+    d2 = bot2._history.setdefault(gid2, deque())
+    d2.append({"role": "user", "content": "上一轮问题"})
+    d2.append({"role": "assistant", "content": "上一轮回答"})
+    seen: list[list[str]] = []
+
+    async def fake_post(messages, cfg):  # noqa: ANN001
+        seen.append([m["role"] for m in messages])
+        if len(seen) == 1:
+            raise RuntimeError("HTTP 400: maximum context length exceeded")
+        return "重试后的回答"
+
+    bot2._post_chat = fake_post  # type: ignore[method-assign]
+    reply, reason = await bot2.chat(gid2, 1, "张三", "在吗", LLMConfig(cooldown=0))
+    check("超窗后自动重试成功", reply == "重试后的回答" and reason == "", f"{reply} / {reason}")
+    check("重试请求不再带历史", seen[-1] == ["system", "user"], str(seen))
+    left = list(bot2._history.get(gid2, []))
+    check("旧历史被丢弃、只留本次问答",
+          len(left) == 2 and "在吗" in left[0]["content"], str(left))
+
+    # (d) 本来就没带历史 → 不重试（重试也超，纯浪费一次请求）
+    bot3 = LLMBot()
+    calls = {"n": 0}
+
+    async def always_overflow(messages, cfg):  # noqa: ANN001
+        calls["n"] += 1
+        raise RuntimeError("maximum context length exceeded")
+
+    bot3._post_chat = always_overflow  # type: ignore[method-assign]
+    reply, reason = await bot3.chat(8204, 1, "张三", "在吗",
+                                    LLMConfig(history_rounds=0))
+    check("没有历史时不重试", reply is None and calls["n"] == 1 and "error" in reason,
+          f"{reply} / {reason} / 调用 {calls['n']} 次")
+
+    # (e) 真正发出去的请求受预算约束
+    bot4 = LLMBot()
+    gid4 = 8205
+    d4 = bot4._history.setdefault(gid4, deque())
+    for _ in range(5):
+        d4.append({"role": "user", "content": "问" * 600})
+        d4.append({"role": "assistant", "content": "答" * 600})
+    got: dict = {}
+
+    async def record(messages, cfg):  # noqa: ANN001
+        got["roles"] = [m["role"] for m in messages]
+        got["chars"] = sum(len(m["content"]) for m in messages)
+        return "ok"
+
+    bot4._post_chat = record  # type: ignore[method-assign]
+    await bot4.chat(gid4, 1, "张三", "在吗", LLMConfig(history_chars=1000, max_input_chars=0))
+    check("请求里只剩最近一对历史",
+          got["roles"] == ["system", "user", "assistant", "user"], str(got))
+    check("请求总字符远小于原始 6000", got["chars"] < 1500, str(got["chars"]))
+
+    # (f) 系统提示词封顶
+    long_cfg = LLMConfig(system_prompt="设" * 5000)
+    check("system_prompt 截断到 4000 字", len(system_text(long_cfg)) == 4000,
+          str(len(system_text(long_cfg))))
+    check("短提示词原样保留", system_text(LLMConfig(system_prompt="你好")) == "你好")
+
+    # (g) 配置 / 表单
+    check("history_chars 默认 3000", LLMConfig().history_chars == 3000)
+    check("表单含 llm.history_chars", "llm.history_chars" in KEY_INDEX)
+
+
+# ---------------------------------------------------------------- 12. 分流
 
 
 async def test_handle_at_routing() -> None:
-    print("\n[11] handle_at 分流：大模型优先，兜底自我介绍")
+    print("\n[12] handle_at 分流：大模型优先，兜底自我介绍")
     import music_collector as mc
 
     tmp = Path(tempfile.mkdtemp())
@@ -534,6 +640,7 @@ async def main() -> None:
     await test_chat_empty_and_clear()
     test_config_and_schema()
     test_sampling_and_thinking()
+    await test_context_budget()
     await test_handle_at_routing()
     print("\n====================================================")
     print(f"通过 {PASSED} 项，失败 {FAILED} 项")

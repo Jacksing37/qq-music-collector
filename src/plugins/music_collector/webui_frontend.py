@@ -1422,8 +1422,18 @@ function renderBotStatus(st){
     parts.push(`思考：<b>自动</b>（不干预，用模型默认）`);
   }
   if(th.reasoning_model) parts.push(`<span class="muted">该模型自带思考，温度 / top_p / 惩罚项不会随请求发送</span>`);
-  const hs=st.history||{}, keys=Object.keys(hs);
-  parts.push(keys.length ? `上下文：${keys.map(k=>`群${k} ${hs[k]} 条`).join("、")}` : "上下文：无（只在内存里，重启即清空）");
+  const hs=st.history||{}, keys=Object.keys(hs), hstat=st.history_stats||{};
+  const lim=st.history_chars_limit;
+  if(keys.length){
+    parts.push("上下文：" + keys.map(k=>{
+      const s=hstat[k]||{}; const c=s.chars||0;
+      /* 超过总字符预算会被截断，这里标出来，避免「说了两句就忘了」被当成模型抽风 */
+      const over = lim>0 && c>lim;
+      return `群${k} ${hs[k]} 条${c?` / ${c} 字`:""}${over?`<span style="color:var(--warn,#b45309)">（超预算，实际会截断）</span>`:""}`;
+    }).join("、"));
+  } else {
+    parts.push("上下文：无（只在内存里，重启即清空）");
+  }
   if(st.last_error) parts.push(`<span style="color:var(--bad)">最近一次失败：${esc(st.last_error)}</span>`);
   /* 真正发出去的请求体（不含 Key）：排查「参数到底有没有生效」用 */
   if(st.payload && Object.keys(st.payload).length){

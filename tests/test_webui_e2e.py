@@ -105,6 +105,9 @@ def test_endpoints():
         pl = b3["status"]["payload"]
         assert pl["enable_thinking"] is True and pl["top_k"] == 20, pl
         assert "messages" not in pl and "api_key" not in pl, pl
+        # 上下文占用（条数 + 字符数）与预算上限，供「快爆了没」判断
+        assert "history_stats" in b3["status"] and b3["status"]["history_chars_limit"] == 3000, \
+            b3["status"]
 
         # 非法 extra_body 在保存时就被拦住（而不是等群里 @ 才发现）
         bad = client.patch("/api/music-admin/config", headers=H,

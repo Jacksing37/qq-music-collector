@@ -361,6 +361,12 @@ FIELD_META["llm.history_rounds"] = (
     "携带最近几轮对话（1 轮 = 1 问 + 1 答）；0 = 每次都是全新对话。上下文只在内存里，重启即清空",
     False,
 )
+FIELD_META["llm.history_chars"] = (
+    "上下文总字符上限",
+    "只按轮数限制容易把上下文撑爆（20 轮 × 600 字）。超过这个总字数就从最旧的成对丢弃；"
+    "0 = 不限。模型窗口小（8k/16k）建议 2000~4000；真超窗了程序也会自动丢历史重试一次",
+    False,
+)
 FIELD_META["llm.cooldown"] = (
     "冷却(秒)",
     "同一用户在同一群的两次回复最小间隔，防止刷屏；0 = 不限",
@@ -1306,8 +1312,10 @@ async def _api_bot(request: Request):
             "model": cfg.model,
             "endpoint": normalize_endpoint(cfg.base_url),
             "groups": cfg.groups,
-            # 上下文只在内存里：重启清零，这里顺带把「哪个群还留着几轮」摆出来
+            # 上下文只在内存里：重启清零，这里顺带把「哪个群还留着几轮 / 多少字」摆出来
             "history": {str(g): n for g, n in llm_bot.history_sizes().items()},
+            "history_stats": {str(g): v for g, v in llm_bot.history_stats().items()},
+            "history_chars_limit": cfg.history_chars,
             "last_error": llm_bot.last_error,
             # 思考模式：档位 + 实际采用的写法 + 真实预算（可能被 max_tokens 压过）
             "thinking": {

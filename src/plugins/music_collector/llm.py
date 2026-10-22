@@ -32,6 +32,25 @@ logger = logging.getLogger("music_collector.llm")
 #: 单条历史消息的字符上限（防止某条超长消息长期占着上下文窗口）
 _HISTORY_CHAR_LIMIT = 600
 
+#: 系统提示词字符上限。人设写得再长也不该吃掉半个上下文窗口。
+_SYSTEM_CHAR_LIMIT = 4000
+
+#: 服务端报「超窗」时常见的措辞。命中就说明上下文真的爆炸了，
+#: 与其把错误抛给用户，不如丢掉历史重试一次。
+_CONTEXT_OVERFLOW_MARKS = (
+    "context length",
+    "context_length",
+    "maximum context",
+    "context window",
+    "too long",
+    "too many tokens",
+    "reduce the length",
+    "prompt is too long",
+    "input length",
+    "超过最大",
+    "上下文长度",
+)
+
 #: 思考档位 -> 默认 token 预算。``low`` 取 1024 是为了兼容 Anthropic 风格的
 #: 最小预算限制（<1024 会被拒）；``high`` 不给太大，免得一次回复烧掉太多钱。
 _THINK_BUDGET = {"low": 1024, "medium": 4096, "high": 12000}
@@ -65,6 +84,27 @@ def normalize_endpoint(base_url: str) -> str:
     if parsed.path in ("", "/"):
         return url + "/v1/chat/completions"
     return url + "/chat/completions"
+
+
+def is_context_overflow(message: str) -> bool:
+    """错误信息是不是「上下文超窗」。
+
+    各家措辞不同（OpenAI 的 ``maximum context length``、通义的 ``input length``、
+    中转层直接把原始报错透传），所以按关键词匹配，宁可多认几种也别漏。
+    """
+    text = (message or "").lower()
+    return any(mark in text for mark in _CONTEXT_OVERFLOW_MARKS)
+
+
+def system_text(cfg: LLMConfig) -> str:
+    """带长度保护的系统提示词（人设再长也不会挤占上下文）。"""
+    prompt = (cfg.system_prompt or "").strip()
+    if len(prompt) <= _SYSTEM_CHAR_LIMIT:
+        return prompt
+    logger.warning(
+        f"[llm] system_prompt 过长（{len(prompt)} 字），已截断到 {_SYSTEM_CHAR_LIMIT} 字"
+    )
+    return prompt[:_SYSTEM_CHAR_LIMIT]
 
 
 def is_reasoning_model(model: str) -> bool:
@@ -272,6 +312,31 @@ class LLMBot:
         """各群当前缓存了多少条上下文消息（网页端状态显示用）。"""
         return {gid: len(msgs) for gid, msgs in self._history.items() if msgs}
 
+    def history_stats(self) -> dict[int, dict[str, int]]:
+        """各群的上下文占用：条数 + 字符数（判断「快爆了没」的直观指标）。"""
+        return {
+            gid: {"msgs": len(msgs), "chars": sum(len(m.get("content", "")) for m in msgs)}
+            for gid, msgs in self._history.items()
+            if msgs
+        }
+
+    def _history_within(self, group_id: int, max_chars: int) -> list[dict]:
+        """取该群上下文，并按**字符预算**从最旧的成对丢弃。
+
+        只按轮数（``history_rounds``）限制是不够的：20 轮 × 单条 600 字 ≈ 一万多字，
+        小窗口模型（8k/16k）直接 400。这里再做一层总量裁剪，双保险。
+        裁剪只作用于本次请求的副本，不动 deque——把配置调大后旧上下文还能回来。
+        """
+        msgs = self.history(group_id)
+        if max_chars <= 0 or not msgs:
+            return msgs
+        total = sum(len(m.get("content", "")) for m in msgs)
+        while len(msgs) > 2 and total > max_chars:
+            total -= len(msgs.pop(0).get("content", ""))
+            if msgs:
+                total -= len(msgs.pop(0).get("content", ""))
+        return msgs
+
     def clear_history(self, group_id: Optional[int] = None) -> int:
         """清空上下文：传群号只清该群，不传清全部。返回清掉的群数。"""
         if group_id is None:
@@ -355,19 +420,44 @@ class LLMBot:
         speaker = (nick or str(user_id)).strip()[:_HISTORY_CHAR_LIMIT]
 
         async with self._lock(group_id):
+            system = system_text(cfg)
             messages: list[dict] = []
-            if cfg.system_prompt.strip():
-                messages.append({"role": "system", "content": cfg.system_prompt.strip()})
+            if system:
+                messages.append({"role": "system", "content": system})
+            hist: list[dict] = []
             if cfg.history_rounds > 0:
-                messages.extend(self.history(group_id))
-            messages.append({"role": "user", "content": f"{speaker}：{question}"})
+                hist = self._history_within(group_id, cfg.history_chars)
+                messages.extend(hist)
+            question_msg = {"role": "user", "content": f"{speaker}：{question}"}
+            messages.append(question_msg)
 
             try:
                 reply = await self._post_chat(messages, cfg)
             except Exception as exc:  # noqa: BLE001 — 任何失败都只记原因
-                self.last_error = str(exc)
-                logger.warning(f"[llm] 群{group_id} 生成失败: {exc}")
-                return None, f"error: {exc}"
+                # 上下文真的超窗时，别把「机器人坏了」暴露给群友：丢掉历史再试一次。
+                # 只对「带了历史」的情况重试——没有历史还超窗，说明单条提问/系统提示
+                # 就超了，重试也没用。
+                if not hist or not is_context_overflow(str(exc)):
+                    self.last_error = str(exc)
+                    logger.warning(f"[llm] 群{group_id} 生成失败: {exc}")
+                    return None, f"error: {exc}"
+                dropped = len(hist)
+                dropped_chars = sum(len(m.get("content", "")) for m in hist)
+                self.clear_history(group_id)
+                logger.warning(
+                    f"[llm] 群{group_id} 上下文超窗（丢弃 {dropped} 条 / {dropped_chars} 字）→ 不带历史重试"
+                )
+                retry: list[dict] = []
+                if system:
+                    retry.append({"role": "system", "content": system})
+                retry.append(question_msg)
+                try:
+                    reply = await self._post_chat(retry, cfg)
+                except Exception as exc2:  # noqa: BLE001
+                    self.last_error = str(exc2)
+                    logger.warning(f"[llm] 群{group_id} 丢弃上下文后仍失败: {exc2}")
+                    return None, f"error: {exc2}"
+                logger.info(f"[llm] 群{group_id} 丢弃上下文后重试成功")
 
             self.last_error = ""
             if cfg.max_reply_chars > 0 and len(reply) > cfg.max_reply_chars:
@@ -394,8 +484,9 @@ class LLMBot:
         if not (cfg.base_url.strip() and cfg.api_key.strip() and cfg.model.strip()):
             return False, "接口地址 / API Key / 模型名 还没填全"
         messages = []
-        if cfg.system_prompt.strip():
-            messages.append({"role": "system", "content": cfg.system_prompt.strip()})
+        system = system_text(cfg)
+        if system:
+            messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
         started = time.monotonic()
         # 测试时收窄 max_tokens 省钱，但**不能太小**：开了思考的模型会把额度全用在

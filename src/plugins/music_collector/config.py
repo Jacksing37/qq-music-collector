@@ -487,6 +487,9 @@ class LLMConfig(BaseModel):
     timeout: float = Field(30.0, ge=1, le=300)
     #: 携带最近几轮对话作为上下文；0 = 不带（每次都是全新对话）
     history_rounds: int = Field(3, ge=0, le=20)
+    #: 上下文**总字符**预算：只按轮数限制时，20 轮 × 600 字能把小窗口模型撑爆。
+    #: 超出就从最旧的成对丢弃；0 = 只按轮数限制（不推荐）
+    history_chars: int = Field(3000, ge=0, le=100000)
     #: 同一用户在同一群的冷却秒数，防止刷屏；0 = 不限
     cooldown: int = Field(3, ge=0, le=600)
     #: 单条提问最多取多少字（超出截断后送模型）；0 = 不限制
