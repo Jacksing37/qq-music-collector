@@ -172,6 +172,101 @@ def message_preview(message: Message | str, limit: int = 160) -> str:
     return (extra + text) or "（空消息）"
 
 
+# ---------------------------------------------------------------- 给大模型读消息
+#
+# 「@机器人 + 一句话」之外，群友也会发表情、发图、引用上一条再问。这里把一条消息
+# 拆成两部分：**给模型看的文字**（图/表情/语音都变成方括号标记）和**视觉模型能
+# 直接读取的图片链接**。没开视觉时标记也不会丢——模型至少知道「对方发了图」。
+
+#: 本身没有可读文本、只留个标记的段
+_SEG_MARKS: dict[str, str] = {
+    "face": "[表情]",
+    "record": "[语音]",
+    "video": "[视频]",
+    "forward": "[聊天记录]",
+    "dice": "[骰子]",
+    "rps": "[猜拳]",
+}
+
+
+def _image_url(data: dict) -> str:
+    """从 image 段的 data 里找可直接访问的链接；拿不到返回空串。
+
+    OneBot 实现一般给 ``url``（腾讯 CDN，带时效签名，几小时内有效）；
+    个别实现把链接放在 ``file`` 里，所以顺带看一眼。
+    """
+    for key in ("url", "file"):
+        value = str(data.get(key) or "").strip()
+        if value.startswith(("http://", "https://")):
+            return value
+    return ""
+
+
+def read_message(
+    message: Message | str, skip_at: set[str] | None = None
+) -> tuple[str, list[str]]:
+    """把一条消息拆成 ``(文字, 图片链接列表)``。
+
+    文字里图片位置保留 ``[图片]``。``llm.vision`` 打开时这些链接会随请求发出去，
+    那要求接口背后的模型支持图片输入（视觉模型）；关着就只当占位符。
+
+    ``skip_at`` 是要忽略的 @ 对象（一般是机器人自己的 QQ）——「只 @ 了机器人、
+    什么都没说」的消息不该被当成一句提问。
+    """
+    if isinstance(message, str):
+        return " ".join(message.split()), []
+    parts: list[str] = []
+    images: list[str] = []
+    for seg in message:
+        kind = seg.type
+        data = seg.data or {}
+        if kind == "text":
+            parts.append(str(data.get("text") or ""))
+        elif kind == "at":
+            qq = str(data.get("qq") or "").strip()
+            if skip_at and qq in skip_at:
+                continue
+            name = str(data.get("name") or qq or "").strip()
+            parts.append(f"@{name}" if name else "@")
+        elif kind == "image":
+            parts.append("[图片]")
+            url = _image_url(data)
+            if url and url not in images:
+                images.append(url)
+        elif kind == "mface":
+            summary = str(data.get("summary") or "").strip()
+            parts.append(f"[表情包: {summary}]" if summary else "[表情包]")
+        elif kind == "file":
+            filename = str(data.get("name") or data.get("file") or "").strip()
+            parts.append(f"[文件: {filename}]" if filename else "[文件]")
+        elif kind in _SEG_MARKS:
+            parts.append(_SEG_MARKS[kind])
+        # reply 段已在 event.reply 里处理；json/xml 卡片对闲聊没信息量，忽略
+    return " ".join("".join(parts).split()), images
+
+
+def quote_prefix(
+    message: Message | str,
+    who: str,
+    limit: int = 200,
+    skip_at: set[str] | None = None,
+) -> str:
+    """把被引用的那条消息压成一句前缀；没有可用内容时返回空串。
+
+    OneBot V11 已经把被引用消息塞进 ``event.reply``，不必再调 ``get_msg``。
+    只取文字，**不读被引用消息里的图片**——引用的大多是机器人自己的公告卡片，
+    把图也捎上容易白白撑满上下文。
+    """
+    text, _ = read_message(message, skip_at)
+    text = text.strip()
+    if not text:
+        return ""
+    if limit > 0 and len(text) > limit:
+        text = text[: limit - 1].rstrip() + "…"
+    name = (who or "").strip() or "对方"
+    return f"（引用 {name} 的消息：{text}）"
+
+
 def trace_messages_enabled() -> bool:
     """是否记录收发消息（``logs.trace_messages``）。
 

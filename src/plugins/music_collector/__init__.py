@@ -27,6 +27,8 @@ require("nonebot_plugin_apscheduler")
 
 from .bot_utils import (  # noqa: E402
     message_preview,
+    quote_prefix,
+    read_message,
     safe_send_group,
     send_music_card,
     split_text,
@@ -205,14 +207,38 @@ async def _try_llm_reply(bot: Bot, event: GroupMessageEvent) -> bool:
     if await _looks_like_music(event):
         return _llm_skip(event, "是音乐分享，交给收集流程")
 
-    text = event.message.extract_plain_text().strip()
-    if not text:
-        # 只 @ 了机器人、没带文字（表情包 / 图片）→ 交给自我介绍
-        return _llm_skip(event, "没有文字（只有 @ 或表情/图片）")
+    # 把消息段全转成模型能读的：文本原样、图/表情/语音留方括号标记，图片链接单独带出。
+    # 跳过 @机器人自己——「只 @ 了机器人、什么都没说」不该被当成一句提问。
+    self_ids = {str(event.self_id)}
+    text, images = read_message(event.message, self_ids)
+    # 引用回复：把被引用的那条压成一句前缀（OneBot 已塞进 event.reply，不用再调 get_msg）
+    quote = ""
+    if llm_cfg.read_reply:
+        quoted = getattr(event, "reply", None)
+        if quoted is not None:
+            rep_sender = getattr(quoted, "sender", None)
+            who = ""
+            if rep_sender is not None:
+                who = (
+                    getattr(rep_sender, "card", "")
+                    or getattr(rep_sender, "nickname", "")
+                    or ""
+                )
+            if not who:
+                who = str(getattr(quoted, "user_id", "") or "")
+            quote = quote_prefix(quoted.message, who, llm_cfg.reply_chars, self_ids)
+    if not text and not images and not quote:
+        return _llm_skip(event, "没有可读内容（只有 @ 或空消息）")
 
     nick = event.sender.card or event.sender.nickname or str(event.user_id)
     reply, reason = await llm_bot.chat(
-        event.group_id, event.user_id, nick, text, llm_cfg
+        event.group_id,
+        event.user_id,
+        nick,
+        text,
+        llm_cfg,
+        images=images,
+        quote=quote,
     )
     if reply:
         parts = split_text(reply)

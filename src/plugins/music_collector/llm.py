@@ -96,6 +96,65 @@ def is_context_overflow(message: str) -> bool:
     return any(mark in text for mark in _CONTEXT_OVERFLOW_MARKS)
 
 
+#: 上游「不认图片」的典型措辞。带图请求撞上这些就退化成纯文本重试一次——
+#: 这样以后换回不支持视觉的模型也不用改配置。
+_VISION_UNSUPPORTED_MARKS = (
+    "image_url",
+    "image url",
+    "image input",
+    "vision",
+    "multimodal",
+    "multi-modal",
+    "unsupported image",
+    "not support image",
+    "does not support image",
+    "invalid content",
+    "content must be a string",
+    "only text",
+    "不支持图片",
+    "不支持图像",
+    "仅支持文本",
+)
+
+
+def is_vision_unsupported(message: str) -> bool:
+    """错误信息是不是「这个模型/接口不接受图片」。"""
+    text = (message or "").lower()
+    return any(mark in text for mark in _VISION_UNSUPPORTED_MARKS)
+
+
+def build_question_content(text: str, images: list[str]) -> str | list[dict]:
+    """拼 ``user`` 消息的 content：没图给字符串，有图给 OpenAI vision 数组。
+
+    无图时坚持用**纯字符串**是有意的：绝大多数兼容接口只认字符串，只有真要带图
+    才切成数组，日常对话的行为一点不变。
+    """
+    if not images:
+        return text
+    parts: list[dict] = [{"type": "text", "text": text}]
+    for url in images:
+        parts.append({"type": "image_url", "image_url": {"url": url}})
+    return parts
+
+
+def content_chars(content) -> int:
+    """一条消息内容的字符数；多模态数组只算文字部分（图片本身不占字符预算）。"""
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        return sum(
+            len(str(part.get("text") or "")) for part in content if isinstance(part, dict)
+        )
+    return 0
+
+
+def without_images(messages: list[dict], text: str) -> list[dict]:
+    """把最后一条（user）消息换回纯文本，用于「上游不认图」的降级重试。"""
+    head = list(messages[:-1])
+    head.append({"role": "user", "content": text})
+    return head
+
+
 def system_text(cfg: LLMConfig) -> str:
     """带长度保护的系统提示词（人设再长也不会挤占上下文）。"""
     prompt = (cfg.system_prompt or "").strip()
@@ -327,7 +386,10 @@ class LLMBot:
     def history_stats(self) -> dict[int, dict[str, int]]:
         """各群的上下文占用：条数 + 字符数（判断「快爆了没」的直观指标）。"""
         return {
-            gid: {"msgs": len(msgs), "chars": sum(len(m.get("content", "")) for m in msgs)}
+            gid: {
+                "msgs": len(msgs),
+                "chars": sum(content_chars(m.get("content")) for m in msgs),
+            }
             for gid, msgs in self._history.items()
             if msgs
         }
@@ -342,11 +404,11 @@ class LLMBot:
         msgs = self.history(group_id)
         if max_chars <= 0 or not msgs:
             return msgs
-        total = sum(len(m.get("content", "")) for m in msgs)
+        total = sum(content_chars(m.get("content")) for m in msgs)
         while len(msgs) > 2 and total > max_chars:
-            total -= len(msgs.pop(0).get("content", ""))
+            total -= content_chars(msgs.pop(0).get("content"))
             if msgs:
-                total -= len(msgs.pop(0).get("content", ""))
+                total -= content_chars(msgs.pop(0).get("content"))
         return msgs
 
     def clear_history(self, group_id: Optional[int] = None) -> int:
@@ -409,24 +471,38 @@ class LLMBot:
         nick: str,
         text: str,
         cfg: LLMConfig,
+        images: Optional[list[str]] = None,
+        quote: str = "",
     ) -> tuple[Optional[str], str]:
         """生成一条回复。
+
+        ``images`` 是图片链接（``llm.vision`` 关着时会被忽略，只在文字里留
+        ``[图片]`` 标记）；``quote`` 是被引用消息压成的一句前缀。
 
         返回 ``(回复文本, 原因)``：
 
         - ``("文字", "")``  —— 成功
         - ``(None, "cooldown")`` —— 该用户还在冷却期，调用方**什么都别发**
-        - ``(None, "empty")`` —— 消息里没有可回答的文字
+        - ``(None, "empty")`` —— 消息里既没有文字也没有图
         - ``(None, "error: …")`` —— 调用失败，调用方可决定是否退回自我介绍
         """
         question = (text or "").strip()
-        if not question:
+        # 只有真的开了视觉、且模型那边支持，才把图片发出去
+        pics = []
+        if cfg.vision:
+            pics = [u for u in (images or []) if u][: max(0, cfg.max_images)]
+        if not question and not pics:
             return None, "empty"
         if cfg.max_input_chars > 0 and len(question) > cfg.max_input_chars:
             question = question[: cfg.max_input_chars].rstrip() + "…"
 
         # 昵称进 prompt 有助于模型称呼提问者；顺带做一次长度保护
         speaker = (nick or str(user_id)).strip()[:_HISTORY_CHAR_LIMIT]
+
+        # 纯文本版本：写历史、以及「上游不认图」降级时都用它，绝不带 URL
+        body = f"{speaker}：{question}"
+        if quote:
+            body = f"{quote}\n{body}"
 
         left = self.cooldown_left(group_id, user_id, cfg.cooldown)
         if left > 0:
@@ -439,60 +515,66 @@ class LLMBot:
 
         async with self._lock(group_id):
             system = system_text(cfg)
-            messages: list[dict] = []
+            base: list[dict] = []
             if system:
-                messages.append({"role": "system", "content": system})
+                base.append({"role": "system", "content": system})
             hist: list[dict] = []
             if cfg.history_rounds > 0:
                 hist = self._history_within(group_id, cfg.history_chars)
-                messages.extend(hist)
-            question_msg = {"role": "user", "content": f"{speaker}：{question}"}
-            messages.append(question_msg)
+            current = [*base, *hist, {"role": "user", "content": build_question_content(body, pics)}]
 
-            try:
-                reply = await self._post_chat(messages, cfg)
-            except Exception as exc:  # noqa: BLE001 — 任何失败都只记原因
-                # 上下文真的超窗时，别把「机器人坏了」暴露给群友：丢掉历史再试一次。
-                # 只对「带了历史」的情况重试——没有历史还超窗，说明单条提问/系统提示
-                # 就超了，重试也没用。
-                if not hist or not is_context_overflow(str(exc)):
-                    self.last_error = str(exc)
-                    logger.warning(f"[llm] 群{group_id} 生成失败: {exc}")
-                    return None, f"error: {exc}"
-                dropped = len(hist)
-                dropped_chars = sum(len(m.get("content", "")) for m in hist)
-                self.clear_history(group_id)
-                logger.warning(
-                    f"[llm] 群{group_id} 上下文超窗（丢弃 {dropped} 条 / {dropped_chars} 字）→ 不带历史重试"
-                )
-                retry: list[dict] = []
-                if system:
-                    retry.append({"role": "system", "content": system})
-                retry.append(question_msg)
+            allow_drop_images = bool(pics)
+            allow_drop_history = bool(hist)
+            reply: Optional[str] = None
+            while True:
                 try:
-                    reply = await self._post_chat(retry, cfg)
-                except Exception as exc2:  # noqa: BLE001
-                    self.last_error = str(exc2)
-                    logger.warning(f"[llm] 群{group_id} 丢弃上下文后仍失败: {exc2}")
-                    return None, f"error: {exc2}"
-                logger.info(f"[llm] 群{group_id} 丢弃上下文后重试成功")
+                    reply = await self._post_chat(current, cfg)
+                    break
+                except Exception as exc:  # noqa: BLE001 — 任何失败都只记原因
+                    err = str(exc)
+                    # ① 上游不认图（换了纯文本模型 / 中转层不支持多模态）：去掉图片再试
+                    if allow_drop_images and is_vision_unsupported(err):
+                        allow_drop_images = False
+                        logger.warning(
+                            f"[llm] 群{group_id} 上游不接受图片（{err[:80]}）→ 去掉图片重试"
+                        )
+                        current = without_images(current, body)
+                        continue
+                    # ② 上下文超窗：丢掉历史再试。没带历史还超窗说明单条提问就超了，
+                    #    重试也没用，直接报错。
+                    if allow_drop_history and is_context_overflow(err):
+                        allow_drop_history = False
+                        dropped = len(hist)
+                        dropped_chars = sum(content_chars(m.get("content")) for m in hist)
+                        self.clear_history(group_id)
+                        logger.warning(
+                            f"[llm] 群{group_id} 上下文超窗（丢弃 {dropped} 条 / "
+                            f"{dropped_chars} 字）→ 不带历史重试"
+                        )
+                        current = [*base, {"role": "user", "content": current[-1]["content"]}]
+                        continue
+                    self.last_error = err
+                    logger.warning(f"[llm] 群{group_id} 生成失败: {err}")
+                    return None, f"error: {err}"
 
             self.last_error = ""
             if cfg.max_reply_chars > 0 and len(reply) > cfg.max_reply_chars:
                 reply = reply[: cfg.max_reply_chars].rstrip() + "…"
 
-            # 只有成功才写上下文：失败时留着半个来回，下一轮会重复问同一句
+            # 只有成功才写上下文：失败时留着半个来回，下一轮会重复问同一句。
+            # 图片一律只记 [图片] 标记——URL 几小时就过期，塞进历史既没用又占预算。
             if cfg.history_rounds > 0:
-                hist = self._history.setdefault(group_id, deque())
-                hist.append({"role": "user", "content": messages[-1]["content"][:_HISTORY_CHAR_LIMIT]})
-                hist.append({"role": "assistant", "content": reply[:_HISTORY_CHAR_LIMIT]})
+                hist_box = self._history.setdefault(group_id, deque())
+                hist_box.append({"role": "user", "content": body[:_HISTORY_CHAR_LIMIT]})
+                hist_box.append({"role": "assistant", "content": reply[:_HISTORY_CHAR_LIMIT]})
                 keep = max(2, cfg.history_rounds * 2)
-                while len(hist) > keep:
-                    hist.popleft()
+                while len(hist_box) > keep:
+                    hist_box.popleft()
 
         self._last_reply[(int(group_id), int(user_id))] = time.monotonic()
+        pics_note = f"，图 {len(pics)} 张" if pics else ""
         logger.info(
-            f"[llm] 群{group_id} {speaker}({user_id}) 提问 {len(question)} 字 → "
+            f"[llm] 群{group_id} {speaker}({user_id}) 提问 {len(question)} 字{pics_note} → "
             f"回复 {len(reply)} 字（model={cfg.model}）"
         )
         return reply, ""

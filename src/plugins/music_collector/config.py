@@ -494,6 +494,16 @@ class LLMConfig(BaseModel):
     history_chars: int = Field(3000, ge=0, le=100000)
     #: 同一用户在同一群的冷却秒数，防止刷屏；0 = 不限
     cooldown: int = Field(3, ge=0, le=600)
+    # ---- 消息读取（群友发的东西能不能被「看懂」）----
+    #: 是否读取被引用消息的内容：群友「引用一条 + 提问」时，把被引用的文字一起给模型
+    read_reply: bool = True
+    #: 被引用内容最多取多少字（超出截断）；0 = 不限制
+    reply_chars: int = Field(200, ge=0, le=4000)
+    #: 是否把图片发给模型。**要求模型支持图片输入**（qwen-vl / glm-4v / gpt-4o 这类）；
+    #: 关着时图片只在文字里留 [图片] 标记。打开但模型不支持时会自动去掉图片重试
+    vision: bool = False
+    #: 一次最多带几张图（多余的只留 [图片] 标记）；0 = 不带图
+    max_images: int = Field(2, ge=0, le=9)
     #: 单条提问最多取多少字（超出截断后送模型）；0 = 不限制
     max_input_chars: int = Field(500, ge=0, le=8000)
     #: 回复最多发多少字（超出截断并加省略号）；0 = 不限制

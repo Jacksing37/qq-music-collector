@@ -1360,8 +1360,13 @@ const BOT_GROUPS=[
       + "不同厂商的参数名不一样（OpenAI 叫 reasoning_effort、通义叫 enable_thinking、GLM/Claude 用 thinking 对象），"
       + "默认按接口地址和模型名自动识别，识别不准可手动指定写法。",
    keys:["llm.thinking","llm.thinking_style","llm.thinking_budget"]},
+  {title:"消息读取",
+   note:"群友不只是打字：会发图、发语音、引用上一条再问。这里决定模型能读到哪些内容。<br>"
+      + "<b>「让模型看图」开关只决定发不发，能不能看懂取决于模型</b>——需要 qwen-vl / glm-4v / gpt-4o 这类视觉模型；"
+      + "关着或模型不支持时，图片只显示成 <code>[图片]</code> 标记，模型至少知道对方发了图。",
+   keys:["llm.read_reply","llm.reply_chars","llm.vision","llm.max_images"]},
   {title:"上下文与频率限制",
-   keys:["llm.history_rounds","llm.cooldown","llm.max_input_chars","llm.max_reply_chars","llm.at_sender","llm.fallback_intro","llm.timeout"]},
+   keys:["llm.history_rounds","llm.history_chars","llm.cooldown","llm.max_input_chars","llm.max_reply_chars","llm.at_sender","llm.fallback_intro","llm.timeout"]},
   {title:"高级",
    note:"厂商私有参数（top_k、repetition_penalty、chat_template_kwargs…）在这里用 JSON 直接塞进请求体，会覆盖上面同名项。",
    keys:["llm.extra_body","llm.stop","llm.seed"]}
