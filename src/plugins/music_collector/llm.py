@@ -98,6 +98,7 @@ def is_context_overflow(message: str) -> bool:
 
 #: 上游「不认图片」的典型措辞。带图请求撞上这些就退化成纯文本重试一次——
 #: 这样以后换回不支持视觉的模型也不用改配置。
+#: 后几条是「图拉不下来」：引用旧消息时 QQ 图片链接可能已过期签名，中转取不到图会报错。
 _VISION_UNSUPPORTED_MARKS = (
     "image_url",
     "image url",
@@ -114,6 +115,12 @@ _VISION_UNSUPPORTED_MARKS = (
     "不支持图片",
     "不支持图像",
     "仅支持文本",
+    "download",
+    "fetch image",
+    "invalid image",
+    "无法下载",
+    "图片下载",
+    "图片链接",
 )
 
 

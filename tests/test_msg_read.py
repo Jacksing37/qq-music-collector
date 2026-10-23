@@ -36,7 +36,11 @@ from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegme
 from nonebot.adapters.onebot.v11.event import Sender  # noqa: E402
 
 from music_collector import handle_at  # noqa: E402
-from music_collector.bot_utils import quote_prefix, read_message  # noqa: E402
+from music_collector.bot_utils import (  # noqa: E402
+    quote_prefix,
+    quote_prefix_and_images,
+    read_message,
+)
 from music_collector.config import LLMConfig, config_manager  # noqa: E402
 from music_collector.llm import (  # noqa: E402
     LLMBot,
@@ -118,13 +122,14 @@ class FakeReply:
 
     user_id = 7
 
-    def __init__(self, text: str) -> None:
-        self.message = Message(text)
+    def __init__(self, content) -> None:
+        # 既接受纯文字，也接受整条 Message（带图的那种引用）
+        self.message = Message(content) if isinstance(content, str) else content
 
 
-def attach_reply(event: GroupMessageEvent, text: str) -> None:
+def attach_reply(event: GroupMessageEvent, content) -> None:
     """把伪造的引用塞进事件（绕过 pydantic 校验）。"""
-    event.__dict__["reply"] = FakeReply(text)
+    event.__dict__["reply"] = FakeReply(content)
 
 
 def reset_llm(enabled: bool = True, **over) -> None:
@@ -256,6 +261,25 @@ def test_quote_prefix() -> None:
     got = quote_prefix(Message(image_seg(IMG1)), "张三")
     check("引用里只有图也给标记", "（引用 张三 的消息：[图片]）" == got, got)
 
+    # 关键：引用里带图时，图片链接必须一起带出去，否则模型只会看到 [图片]
+    prefix, imgs = quote_prefix_and_images(
+        Message(seg("text", text="这张") + image_seg(IMG1)), "张三"
+    )
+    check("带图引用：前缀照旧有 [图片]", "[图片]" in prefix, prefix)
+    check("带图引用：图片链接被带出", imgs == [IMG1], str(imgs))
+
+    prefix, imgs = quote_prefix_and_images(Message(image_seg(IMG2)), "张三")
+    check("只有图的引用也返回链接", imgs == [IMG2], str(imgs))
+
+    prefix, imgs = quote_prefix_and_images(Message("纯文字"), "张三")
+    check("纯文字引用没有图", imgs == [], str(imgs))
+
+    prefix, imgs = quote_prefix_and_images(Message(""), "张三")
+    check("空引用返回空前缀与空图", prefix == "" and imgs == [], f"{prefix!r} / {imgs}")
+
+    check("quote_prefix 仍只返回字符串",
+          isinstance(quote_prefix(Message("原话"), "张三"), str))
+
 
 # ---------------------------------------------------------------- 3. content 工具
 
@@ -301,6 +325,9 @@ def test_vision_unsupported() -> None:
         "HTTP 400: content must be a string",
         "HTTP 400: 该模型不支持图片输入",
         "HTTP 400: 仅支持文本输入",
+        # 图片拉不下来（引用旧消息时链接签名过期）也算「这张图没法用」，一样降级
+        "HTTP 400: failed to download image from url",
+        "HTTP 400: 无法下载图片，链接可能已过期",
     ):
         check(f"认得出：{msg[:36]}…", is_vision_unsupported(msg) is True, msg)
 
@@ -530,6 +557,96 @@ async def test_wiring() -> None:
           str(sender.sent))
 
 
+def _urls_in(content) -> list[str]:
+    """从请求内容里抠出所有 image_url（纯字符串时返回空）。"""
+    if not isinstance(content, list):
+        return []
+    return [
+        str(p.get("image_url", {}).get("url"))
+        for p in content
+        if isinstance(p, dict) and p.get("type") == "image_url"
+    ]
+
+
+async def test_quote_images() -> None:
+    """引用一张图问「什么意思」——图必须真的发出去（这是线上翻车过的场景）。"""
+    print("\n[8] 引用里的图片也要发给模型")
+    import music_collector as mc
+
+    tmp = Path(tempfile.mkdtemp())
+    service.store = Store(tmp / "collector.db")
+    await service.store.init()
+    config_manager.config.intro.cooldown = 0
+    config_manager.config.intro.enabled = True
+
+    reset_llm(vision=True)
+    bot_calls: list = []
+    stub = make_bot("看到了")[0]
+    original = stub._post_chat
+
+    async def spy(messages, cfg):
+        bot_calls.append([dict(m) for m in messages])
+        return await original(messages, cfg)
+
+    stub._post_chat = spy  # type: ignore[method-assign]
+    mc.llm_bot = stub
+
+    # (a) 引用一张图 + 提问 → 图进请求
+    ev = make_event([seg("text", text="什么意思")], user_id=3101)
+    attach_reply(ev, Message(image_seg(IMG2)))
+    await handle_at(StubBot(), ev)
+    urls = _urls_in(bot_calls[-1][-1]["content"])
+    check("引用里的图进了请求", urls == [IMG2], str(urls))
+    check("前缀里仍有 [图片] 占位", "[图片]" in str(bot_calls[-1][-1]["content"]),
+          str(bot_calls[-1][-1]["content"])[:120])
+
+    # (b) 当前消息的图优先占额度（max_images=1 时留当前的、不留引用的）
+    reset_llm(vision=True, max_images=1)
+    bot_calls.clear()
+    ev = make_event([seg("text", text="对比一下"), image_seg(IMG1)], user_id=3102)
+    attach_reply(ev, Message(image_seg(IMG2)))
+    await handle_at(StubBot(), ev)
+    urls = _urls_in(bot_calls[-1][-1]["content"])
+    check("当前消息的图优先", urls == [IMG1], str(urls))
+
+    # (c) 额度够时两张都发
+    reset_llm(vision=True, max_images=2)
+    bot_calls.clear()
+    ev = make_event([seg("text", text="对比一下"), image_seg(IMG1)], user_id=3103)
+    attach_reply(ev, Message(image_seg(IMG2)))
+    await handle_at(StubBot(), ev)
+    urls = _urls_in(bot_calls[-1][-1]["content"])
+    check("额度够时两张都发", urls == [IMG1, IMG2], str(urls))
+
+    # (d) 同一张图不重复发
+    reset_llm(vision=True, max_images=2)
+    bot_calls.clear()
+    ev = make_event([seg("text", text="就这个"), image_seg(IMG1)], user_id=3104)
+    attach_reply(ev, Message(image_seg(IMG1)))
+    await handle_at(StubBot(), ev)
+    urls = _urls_in(bot_calls[-1][-1]["content"])
+    check("重复的图只发一次", urls == [IMG1], str(urls))
+
+    # (e) vision 关掉 → 引用里的图也不发（只留标记）
+    reset_llm(vision=False)
+    bot_calls.clear()
+    ev = make_event([seg("text", text="什么意思")], user_id=3105)
+    attach_reply(ev, Message(image_seg(IMG2)))
+    await handle_at(StubBot(), ev)
+    content = bot_calls[-1][-1]["content"]
+    check("vision 关时引用图不发", not _urls_in(content), str(content)[:120])
+    check("vision 关时仍能看到 [图片]", "[图片]" in str(content), str(content)[:120])
+
+    # (f) read_reply 关掉 → 引用整体不读，图自然也不发
+    reset_llm(vision=True, read_reply=False)
+    bot_calls.clear()
+    ev = make_event([seg("text", text="什么意思")], user_id=3106)
+    attach_reply(ev, Message(image_seg(IMG2)))
+    await handle_at(StubBot(), ev)
+    content = bot_calls[-1][-1]["content"]
+    check("read_reply 关时引用图不发", not _urls_in(content), str(content)[:120])
+
+
 # ---------------------------------------------------------------- main
 
 
@@ -541,6 +658,7 @@ async def main() -> None:
     await test_chat_vision()
     test_config_and_form()
     await test_wiring()
+    await test_quote_images()
 
     print(f"\n{'=' * 56}")
     print(f"通过 {PASSED} / 失败 {FAILED}")

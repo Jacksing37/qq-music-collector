@@ -27,7 +27,7 @@ require("nonebot_plugin_apscheduler")
 
 from .bot_utils import (  # noqa: E402
     message_preview,
-    quote_prefix,
+    quote_prefix_and_images,
     read_message,
     safe_send_group,
     send_music_card,
@@ -211,8 +211,10 @@ async def _try_llm_reply(bot: Bot, event: GroupMessageEvent) -> bool:
     # 跳过 @机器人自己——「只 @ 了机器人、什么都没说」不该被当成一句提问。
     self_ids = {str(event.self_id)}
     text, images = read_message(event.message, self_ids)
-    # 引用回复：把被引用的那条压成一句前缀（OneBot 已塞进 event.reply，不用再调 get_msg）
+    # 引用回复：把被引用的那条压成一句前缀（OneBot 已塞进 event.reply，不用再调 get_msg）。
+    # 被引用消息里的图片也一并带出——只给 [图片] 占位符的话，模型会回「图我这边没瞅见」。
     quote = ""
+    quote_images: list[str] = []
     if llm_cfg.read_reply:
         quoted = getattr(event, "reply", None)
         if quoted is not None:
@@ -226,9 +228,17 @@ async def _try_llm_reply(bot: Bot, event: GroupMessageEvent) -> bool:
                 )
             if not who:
                 who = str(getattr(quoted, "user_id", "") or "")
-            quote = quote_prefix(quoted.message, who, llm_cfg.reply_chars, self_ids)
+            quote, quote_images = quote_prefix_and_images(
+                quoted.message, who, llm_cfg.reply_chars, self_ids
+            )
     if not text and not images and not quote:
         return _llm_skip(event, "没有可读内容（只有 @ 或空消息）")
+
+    # 当前这条消息的图优先占额度，剩下的才轮到被引用的图（max_images 在 chat 里统一切）
+    pics = list(images)
+    for url in quote_images:
+        if url not in pics:
+            pics.append(url)
 
     nick = event.sender.card or event.sender.nickname or str(event.user_id)
     reply, reason = await llm_bot.chat(
@@ -237,7 +247,7 @@ async def _try_llm_reply(bot: Bot, event: GroupMessageEvent) -> bool:
         nick,
         text,
         llm_cfg,
-        images=images,
+        images=pics,
         quote=quote,
     )
     if reply:

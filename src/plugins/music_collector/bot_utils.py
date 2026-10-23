@@ -245,26 +245,39 @@ def read_message(
     return " ".join("".join(parts).split()), images
 
 
+def quote_prefix_and_images(
+    message: Message | str,
+    who: str,
+    limit: int = 200,
+    skip_at: set[str] | None = None,
+) -> tuple[str, list[str]]:
+    """把被引用的那条消息压成一句前缀，**并带出其中的图片链接**。
+
+    OneBot V11 已经把被引用消息塞进 ``event.reply``，不必再调 ``get_msg``。
+
+    返回 ``(前缀文本, 图片链接列表)``；没有可读内容时返回 ``("", [])``。
+
+    图片链接必须一起返回：只给文字的话，模型只会看到 ``[图片]`` 这个占位符，
+    然后回一句「图我这边没瞅见」——群友引用一张图问「什么意思」时就是这么翻车的。
+    """
+    text, images = read_message(message, skip_at)
+    text = text.strip()
+    if not text:
+        return "", []
+    if limit > 0 and len(text) > limit:
+        text = text[: max(1, limit - 1)].rstrip() + "…"
+    name = (who or "").strip() or "对方"
+    return f"（引用 {name} 的消息：{text}）", images
+
+
 def quote_prefix(
     message: Message | str,
     who: str,
     limit: int = 200,
     skip_at: set[str] | None = None,
 ) -> str:
-    """把被引用的那条消息压成一句前缀；没有可用内容时返回空串。
-
-    OneBot V11 已经把被引用消息塞进 ``event.reply``，不必再调 ``get_msg``。
-    只取文字，**不读被引用消息里的图片**——引用的大多是机器人自己的公告卡片，
-    把图也捎上容易白白撑满上下文。
-    """
-    text, _ = read_message(message, skip_at)
-    text = text.strip()
-    if not text:
-        return ""
-    if limit > 0 and len(text) > limit:
-        text = text[: limit - 1].rstrip() + "…"
-    name = (who or "").strip() or "对方"
-    return f"（引用 {name} 的消息：{text}）"
+    """只要文字版前缀（保留旧调用与测试用）；需要图片请用 ``quote_prefix_and_images``。"""
+    return quote_prefix_and_images(message, who, limit, skip_at)[0]
 
 
 def trace_messages_enabled() -> bool:
