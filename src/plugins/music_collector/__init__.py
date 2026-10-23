@@ -42,7 +42,6 @@ from .detector import (  # noqa: E402
     extract_from_text,
     extract_from_xml,
     extract_urls,
-    match_url,
 )
 from .llm import disabled_reason as llm_disabled_reason  # noqa: E402
 from .llm import llm_bot  # noqa: E402
@@ -51,7 +50,6 @@ from .naming import build_context, render_template, resolve_alias  # noqa: E402
 from .scheduler import reload_jobs  # noqa: E402
 from .service import service  # noqa: E402
 from .store import MASTER_KEY  # noqa: E402
-from .webpage import fetch_pages  # noqa: E402
 
 from . import commands as _commands  # noqa: E402,F401  仅为注册命令
 from . import webui as _webui  # noqa: E402,F401  配置管理 Web UI
@@ -308,46 +306,6 @@ async def _llm_context(bot: Bot, event: object, llm_cfg, text: str) -> str:
             logger.info(
                 f"[llm] 群{getattr(event, 'group_id', '?')} 附带聊天记录 {rows} 条"
                 f"（{len(record)} 字）"
-            )
-
-    # ② 网页正文：模型本来只能看到一串 URL，只能靠标题瞎猜。
-    # 被引用的那条里的链接也算——「引用一条带链接的消息 + 问这是啥」很常见。
-    if llm_cfg.read_link and llm_cfg.link_max > 0:
-        sources: list[str] = [text]
-        if reply_message is not None:
-            try:
-                quoted_text, _ = read_message(reply_message)
-                sources.append(quoted_text)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(f"[llm] 读引用内容失败: {exc}")
-        urls: list[str] = []
-        for chunk in sources:
-            # 音乐链接不抓：那是收集流程的活，抓过来也是白花一次请求
-            urls.extend(u for u in extract_urls(chunk) if not match_url(u))
-        pages: list[dict] = []
-        if urls:
-            try:
-                pages = await fetch_pages(
-                    urls,
-                    limit=llm_cfg.link_max,
-                    timeout=llm_cfg.link_timeout,
-                    max_chars=llm_cfg.link_chars,
-                )
-            except Exception as exc:  # noqa: BLE001
-                pages = []
-                logger.debug(f"[llm] 抓取网页失败: {exc}")
-        for page in pages:
-            blocks.append(f"【网页内容：{page['title']}】\n{page['text']}")
-        if pages:
-            logger.info(
-                f"[llm] 群{getattr(event, 'group_id', '?')} 附带网页 {len(pages)} 篇"
-                f"（{sum(len(p['text']) for p in pages)} 字）"
-            )
-        elif urls:
-            # 明确告诉模型「打不开」，比让它凭 URL 猜内容强
-            blocks.append(
-                f"【下面这个链接没能抓取成功，只看到地址：{urls[0]}】\n"
-                "（打不开就不要编造里面的内容）"
             )
 
     return "\n\n".join(blocks)

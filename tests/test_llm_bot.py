@@ -116,7 +116,7 @@ def make_bot(stub_reply=None, *, error: str = "", calls: list | None = None) -> 
     bot = LLMBot()
     record = calls if calls is not None else []
 
-    async def fake_post(messages, cfg):
+    async def fake_post(messages, cfg, tools=None):
         record.append([dict(m) for m in messages])
         if error:
             raise RuntimeError(error)
@@ -526,7 +526,7 @@ async def test_context_budget() -> None:
     d2.append({"role": "assistant", "content": "上一轮回答"})
     seen: list[list[str]] = []
 
-    async def fake_post(messages, cfg):  # noqa: ANN001
+    async def fake_post(messages, cfg, tools=None):  # noqa: ANN001
         seen.append([m["role"] for m in messages])
         if len(seen) == 1:
             raise RuntimeError("HTTP 400: maximum context length exceeded")
@@ -544,7 +544,7 @@ async def test_context_budget() -> None:
     bot3 = LLMBot()
     calls = {"n": 0}
 
-    async def always_overflow(messages, cfg):  # noqa: ANN001
+    async def always_overflow(messages, cfg, tools=None):  # noqa: ANN001
         calls["n"] += 1
         raise RuntimeError("maximum context length exceeded")
 
@@ -563,7 +563,7 @@ async def test_context_budget() -> None:
         d4.append({"role": "assistant", "content": "答" * 600})
     got: dict = {}
 
-    async def record(messages, cfg):  # noqa: ANN001
+    async def record(messages, cfg, tools=None):  # noqa: ANN001
         got["roles"] = [m["role"] for m in messages]
         got["chars"] = sum(len(m["content"]) for m in messages)
         return "ok"
@@ -658,7 +658,7 @@ async def test_diagnostic_logs() -> None:
         # (b) 冷却：原来完全静默 → 现在留一条 INFO（带剩余秒数）
         bot = LLMBot()
 
-        async def no_call(messages, cfg):  # noqa: ANN001
+        async def no_call(messages, cfg, tools=None):  # noqa: ANN001
             raise AssertionError("冷却期不该真的发请求")
 
         bot._post_chat = no_call  # type: ignore[method-assign]
@@ -673,7 +673,7 @@ async def test_diagnostic_logs() -> None:
         # (c) 成功一条 INFO（含字数与模型名）、失败一条 WARNING（含原因）
         bot2 = LLMBot()
 
-        async def ok(messages, cfg):  # noqa: ANN001
+        async def ok(messages, cfg, tools=None):  # noqa: ANN001
             return "好的呀"
 
         bot2._post_chat = ok  # type: ignore[method-assign]
@@ -684,7 +684,7 @@ async def test_diagnostic_logs() -> None:
 
         bot3 = LLMBot()
 
-        async def bad(messages, cfg):  # noqa: ANN001
+        async def bad(messages, cfg, tools=None):  # noqa: ANN001
             raise RuntimeError("HTTP 401: bad key")
 
         bot3._post_chat = bad  # type: ignore[method-assign]
@@ -704,7 +704,7 @@ async def test_diagnostic_logs() -> None:
 
         bot5 = LLMBot()
 
-        async def bad2(messages, cfg):  # noqa: ANN001
+        async def bad2(messages, cfg, tools=None):  # noqa: ANN001
             raise RuntimeError("HTTP 500: boom")
 
         bot5._post_chat = bad2  # type: ignore[method-assign]

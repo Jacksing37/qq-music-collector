@@ -319,14 +319,22 @@ llm:
   reply_chars: 200            # 被引用内容最多取多少字，0=不限
   vision: false               # 把图片发给模型（需要视觉模型如 qwen-vl/glm-4v/gpt-4o）
   max_images: 2               # 一次最多带几张图，多的只留 [图片] 标记
-  # ---- 网页与聊天记录（模型原生看不到，要我们先取回来）----
+  # ---- 聊天记录（模型原生看不到，要我们先展开）----
   read_forward: true          # 展开「转发的聊天记录」给模型看
   forward_limit: 30           # 一次最多展开几条转发消息
   forward_chars: 2000         # 转发内容总字数上限，超出标出还剩几条
-  read_link: true             # 抓取链接的网页正文（只在 @机器人 / 非音乐链接时抓）
-  link_max: 2                 # 一条消息最多抓几个链接（同站点只抓第一个）
-  link_chars: 1500            # 单页最多取多少字正文
-  link_timeout: 8.0           # 抓网页超时秒数，抓不到就当没有
+  # ---- 工具与技能（模型自己能调的能力）----
+  tools: true                 # 工具总闸；关掉后模型只能纯聊天
+  tool_rounds: 3              # 一次回复最多调几轮工具；0=不许调
+  tool_chars: 2000            # 单次工具结果最多回填多少字
+  web_tool: true              # 提供 fetch_url（模型需要时自己抓网页正文）
+  fetch_chars: 2000           # fetch_url 返回的正文最多多少字
+  fetch_timeout: 15.0         # fetch_url 超时秒数
+  skills: true                # 启用技能包（扫 data/skills/*/SKILL.md）
+  skills_dir: ''              # 技能目录，留空=data/skills；相对路径按 data/ 解析
+  skill_body_chars: 3000      # use_skill 返回的技能正文上限
+  skill_scripts: false        # 允许执行技能自带脚本（危险，默认关）
+  skill_timeout: 20.0         # 技能脚本超时秒数，超时直接 kill
   max_input_chars: 500        # 单条提问最多取多少字，0=不限
   max_reply_chars: 800        # 回复最多发多少字，0=不限（超长自动分条）
   at_sender: true             # 回复时 @ 提问者

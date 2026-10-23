@@ -518,14 +518,33 @@ class LLMConfig(BaseModel):
     forward_limit: int = Field(30, ge=1, le=200)
     #: 转发记录最多取多少字（超出会标出还剩几条未展开）
     forward_chars: int = Field(2000, ge=0, le=8000)
-    #: 是否抓取群里链接的**网页正文**（让模型真能读到链接内容，而不是靠标题猜）
-    read_link: bool = True
-    #: 一条消息最多抓几个链接（同站点只抓第一个）
-    link_max: int = Field(2, ge=0, le=5)
-    #: 单页正文最多取多少字
-    link_chars: int = Field(1500, ge=0, le=6000)
-    #: 抓网页的超时秒数；抓不到就当没有，不会让回复卡住
-    link_timeout: float = Field(8.0, ge=2, le=60)
+
+    # ---- 工具与技能（模型自己能调的能力）----
+    #: 是否允许模型调用工具（总闸）。关掉后下面的开关都不生效，模型只能纯聊天
+    tools: bool = True
+    #: 一次回复里最多调几轮工具（每轮可含多个调用）；0 = 不许调
+    tool_rounds: int = Field(3, ge=0, le=8)
+    #: 单次工具结果最多回填多少字（防止一次抓取把上下文吃光）
+    tool_chars: int = Field(2000, ge=200, le=12000)
+    #: 是否提供 fetch_url（按需抓网页正文）。和以前的「自动抓取」不同：
+    #: 抓不抓、抓哪个，由模型自己决定
+    web_tool: bool = True
+    #: fetch_url 返回的正文最多多少字
+    fetch_chars: int = Field(2000, ge=200, le=12000)
+    #: fetch_url 的超时秒数
+    fetch_timeout: float = Field(15.0, ge=3, le=60)
+    #: 是否启用技能包（扫描技能目录下的 SKILL.md）
+    skills: bool = True
+    #: 技能目录；留空 = data/skills；相对路径按 data/ 解析
+    skills_dir: str = ""
+    #: use_skill 返回的技能正文最多多少字
+    skill_body_chars: int = Field(3000, ge=200, le=20000)
+    #: 是否允许执行技能自带的脚本。**默认关**：一开就是「模型可以让你服务器上跑
+    #: 技能目录里的代码」，只该在完全信任技能来源时打开
+    skill_scripts: bool = False
+    #: 技能脚本超时秒数（超时直接 kill）
+    skill_timeout: float = Field(20.0, ge=3, le=120)
+
     #: 单条提问最多取多少字（超出截断后送模型）；0 = 不限制
     max_input_chars: int = Field(500, ge=0, le=8000)
     #: 回复最多发多少字（超出截断并加省略号）；0 = 不限制

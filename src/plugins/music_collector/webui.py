@@ -40,6 +40,9 @@ from .config import (
     reset_config_value,
 )
 from . import logbuffer
+from . import skills as skills_mod
+from . import tools as tools_mod
+from . import webtool
 from .llm import (
     SYSTEM_CHAR_LIMIT,
     deepseek_effort,
@@ -419,25 +422,64 @@ FIELD_META["llm.forward_chars"] = (
     "转发内容的总字数上限，超出会标出「还有 N 条未展开」；0 = 不限制（不推荐）",
     False,
 )
-FIELD_META["llm.read_link"] = (
-    "读取网页正文",
-    "群友甩链接时，真去把网页抓下来读一遍（标题 + 正文），模型才不是靠 URL 瞎猜。"
-    "只在「@机器人」和「分享非音乐链接」时抓，不会扫全群；抓不到就静默降级，不影响回复",
+FIELD_META["llm.tools"] = (
+    "启用工具",
+    "总闸。开着模型才能在需要时调工具（抓网页、读技能）；关掉就纯聊天，"
+    "也不再往请求里塞 tools 字段——接口不认 tools 时这里关掉最省事",
     False,
 )
-FIELD_META["llm.link_max"] = (
-    "最多抓几个链接",
-    "一条消息里最多抓几个网址（同一站点只抓第一个）；0 = 不抓",
+FIELD_META["llm.tool_rounds"] = (
+    "最多调几轮工具",
+    "一次回复里允许连续调几次工具（每轮可含多个调用）。模型每轮都要多花一次请求，"
+    "3 轮足够应付「先抓网页再查技能」；0 = 不许调工具",
     False,
 )
-FIELD_META["llm.link_chars"] = (
-    "单页最多多少字",
-    "每篇网页最多取多少字正文，超出截断。调大更完整，但每次请求更贵",
+FIELD_META["llm.tool_chars"] = (
+    "工具结果上限（字）",
+    "单次工具结果最多回填多少字。网页正文动辄几千字，全塞进去会挤掉对话和上下文预算",
     False,
 )
-FIELD_META["llm.link_timeout"] = (
+FIELD_META["llm.web_tool"] = (
+    "允许抓网页（fetch_url）",
+    "给模型一个「抓这个链接」的工具，抓不抓由它自己判断。"
+    "和以前的自动抓取不同：不会每条消息都去抓，也不会把无关页面塞进上下文",
+    False,
+)
+FIELD_META["llm.fetch_chars"] = (
+    "抓回正文上限（字）",
+    "fetch_url 返回给模型的正文字数上限，超出截断。调大更完整，但每次调用更贵",
+    False,
+)
+FIELD_META["llm.fetch_timeout"] = (
     "抓网页超时（秒）",
-    "抓不到就放弃，不会让回复一直等着。国内站点一般 5~10 秒够",
+    "超过这个时间就放弃这次抓取，并把这个失败结果告诉模型（它会说打不开）",
+    False,
+)
+FIELD_META["llm.skills"] = (
+    "启用技能包",
+    "扫描技能目录下的 SKILL.md：模型先看「名字 + 简介」，需要时才读全文照着做。"
+    "加技能就是丢一个目录进去，不用改代码",
+    False,
+)
+FIELD_META["llm.skills_dir"] = (
+    "技能目录",
+    "留空 = data/skills。相对路径按 data/ 解析；每个技能一个子目录，里面必须有 SKILL.md",
+    False,
+)
+FIELD_META["llm.skill_body_chars"] = (
+    "技能正文上限（字）",
+    "use_skill 返回的技能正文最多多少字，超出截断。技能写得长可以调大",
+    False,
+)
+FIELD_META["llm.skill_scripts"] = (
+    "允许执行技能脚本",
+    "⚠️ 打开后模型可以运行技能目录里的 .py / .sh 脚本（只限已存在的文件，有超时和输出上限）。"
+    "这等于「模型能让你服务器上跑代码」，只在完全信任技能来源时打开",
+    False,
+)
+FIELD_META["llm.skill_timeout"] = (
+    "脚本超时（秒）",
+    "技能脚本跑超过这个时间直接被 kill，并把超时告诉模型",
     False,
 )
 FIELD_META["llm.max_input_chars"] = (
@@ -1403,6 +1445,33 @@ def _thinking_status(cfg) -> dict:
     }
 
 
+def _tools_status(cfg) -> dict:
+    """工具与技能的实际生效情况：哪些工具挂上了、扫到几个技能、抓取依赖装没装。
+
+    只看开关不够——技能目录不存在、trafilatura 没装时，开关开着也等于没有。
+    这里把**真实结果**摆出来，省得「明明开了却没动静」又要去翻日志。
+    """
+    names: list[str] = []
+    skills: list[str] = []
+    root = ""
+    try:
+        root = str(tools_mod.skills_root(cfg))
+        names = [t.name for t in tools_mod.build(cfg)[0]]
+        if cfg.skills:
+            skills = [s.name for s in skills_mod.discover(tools_mod.skills_root(cfg))]
+    except Exception:  # noqa: BLE001 — 状态接口不该因为一个坏技能 500
+        pass
+    return {
+        "enabled": bool(cfg.tools),
+        "names": names,
+        "rounds": int(cfg.tool_rounds),
+        "skills": skills,
+        "skills_dir": root,
+        "scripts": bool(cfg.skill_scripts),
+        "fetch_ready": webtool.available(),
+    }
+
+
 async def _api_bot(request: Request):
     """「机器人」页数据：llm 段的字段 + 当前值 + 运行状态。
 
@@ -1435,6 +1504,8 @@ async def _api_bot(request: Request):
             "last_error": llm_bot.last_error,
             # 思考模式：档位 + 实际采用的写法 + 真实强度/预算（可能被 max_tokens 压过）
             "thinking": _thinking_status(cfg),
+            # 工具与技能：真的挂上了哪些、扫到几个技能、抓取依赖装没装
+            "tools": _tools_status(cfg),
             # 「实际发出去的参数」预览：让「思考模式到底有没有生效」一眼可见
             "payload": payload_preview(cfg),
         },

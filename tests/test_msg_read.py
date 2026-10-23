@@ -348,7 +348,7 @@ def make_bot(reply_text: str = "好", *, fail=None) -> tuple[LLMBot, list]:
     bot = LLMBot()
     calls: list[list[dict]] = []
 
-    async def fake_post(messages, cfg):
+    async def fake_post(messages, cfg, tools=None):
         calls.append([dict(m) for m in messages])
         if fail is not None:
             raised = fail(messages)
@@ -513,7 +513,7 @@ async def test_wiring() -> None:
     stub = make_bot("图我收到了")[0]
     original = stub._post_chat
 
-    async def spy(messages, cfg):
+    async def spy(messages, cfg, tools=None):
         bot_calls.append([dict(m) for m in messages])
         return await original(messages, cfg)
 
@@ -584,7 +584,7 @@ async def test_quote_images() -> None:
     stub = make_bot("看到了")[0]
     original = stub._post_chat
 
-    async def spy(messages, cfg):
+    async def spy(messages, cfg, tools=None):
         bot_calls.append([dict(m) for m in messages])
         return await original(messages, cfg)
 

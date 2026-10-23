@@ -1385,13 +1385,21 @@ const BOT_GROUPS=[
       + "<b>「让模型看图」开关只决定发不发，能不能看懂取决于模型</b>——需要 qwen-vl / glm-4v / gpt-4o 这类视觉模型；"
       + "关着或模型不支持时，图片只显示成 <code>[图片]</code> 标记，模型至少知道对方发了图。",
    keys:["llm.read_reply","llm.reply_chars","llm.vision","llm.max_images"]},
-  {title:"网页与聊天记录",
-   note:"群里发的东西常常「在别处」：一个链接、一段转发记录。这两样模型原生看不到，要靠我们先取回来。<br>"
-      + "抓取只发生在<b>真要回话时</b>（@机器人 / 分享了非音乐链接），不会去扫全群消息；"
-      + "链接打不开或记录读不出就静默跳过，不会让群里没回应。取回的内容<b>只作用于这一次请求</b>，"
-      + "不写进上下文历史，所以不会越聊越贵。",
-   keys:["llm.read_link","llm.link_max","llm.link_chars","llm.link_timeout",
-         "llm.read_forward","llm.forward_limit","llm.forward_chars"]},
+  {title:"聊天记录",
+   note:"群友「转发一段聊天记录」再问「他们说的是啥」时，模型原生只看到 <code>[聊天记录]</code> 四个字，"
+      + "要靠我们先展开成「昵称：内容」才读得懂。<br>"
+      + "记录读不出就静默跳过，不会让群里没回应；展开的内容<b>只作用于这一次请求</b>，不写进上下文历史。",
+   keys:["llm.read_forward","llm.forward_limit","llm.forward_chars"]},
+  {title:"工具与技能",
+   note:"模型可以<b>自己决定</b>调工具：需要看网页就抓网页，遇到不熟的任务就看有没有对应技能。<br>"
+      + "和「自动抓取」不同——抓不抓、抓哪个由模型判断，不会每条消息都去抓，也不会把无关页面塞进上下文。<br>"
+      + "<b>技能</b>：技能目录下每个子目录放一个 <code>SKILL.md</code>（开头写 name / description，正文写步骤），"
+      + "模型先看简介、需要时才读全文。加技能不用改代码。<br>"
+      + "⚠️ <b>允许执行技能脚本</b>等于「模型能让你服务器上跑代码」，只在完全信任技能来源时打开。",
+   keys:["llm.tools","llm.tool_rounds","llm.tool_chars",
+         "llm.web_tool","llm.fetch_chars","llm.fetch_timeout",
+         "llm.skills","llm.skills_dir","llm.skill_body_chars",
+         "llm.skill_scripts","llm.skill_timeout"]},
   {title:"上下文与频率限制",
    keys:["llm.history_rounds","llm.history_chars","llm.cooldown","llm.max_input_chars","llm.max_reply_chars","llm.at_sender","llm.fallback_intro","llm.timeout"]},
   {title:"附加触发",
@@ -1462,6 +1470,21 @@ function renderBotStatus(st){
   }
   if(th.reasoning_model) parts.push(`<span class="muted">该模型自带思考，温度 / top_p / 惩罚项不会随请求发送</span>`);
   else if(th.style==="deepseek" && th.mode!=="off") parts.push(`<span class="muted">DeepSeek 思考模式开启时，温度与两项惩罚会被上游忽略（不报错也不生效）；top_p 仅在 0.95~1.0 内有效</span>`);
+  /* 工具与技能：开关开着 ≠ 真的生效（技能目录可能不存在、抓取库可能没装） */
+  const tw=st.tools||{};
+  if(tw.enabled){
+    const tn=tw.names||[];
+    let line = `工具：<b>${tn.length}</b> 个`;
+    if(tn.length) line += `（${tn.map(esc).join("、")}）`;
+    line += `　最多 ${esc(String(tw.rounds))} 轮`;
+    parts.push(line);
+    if((tw.skills||[]).length) parts.push(`技能：<b>${tw.skills.length}</b> 个（${tw.skills.map(esc).join("、")}）　目录 <code>${esc(tw.skills_dir||"")}</code>`);
+    else parts.push(`技能：<span class="muted">没扫到技能（${esc(tw.skills_dir||"—")} 下没有带 SKILL.md 的子目录）</span>`);
+    if(tw.scripts) parts.push(`<span style="color:var(--warn,#b45309)">⚠️ 已允许执行技能脚本：模型可以运行技能目录里的 .py / .sh</span>`);
+    if(!tw.fetch_ready) parts.push(`<span style="color:var(--warn,#b45309)">抓网页不可用：没装 trafilatura（pip install trafilatura）</span>`);
+  } else {
+    parts.push(`工具：<b>关闭</b>（模型只能纯聊天，请求里不带 tools）`);
+  }
   const hs=st.history||{}, keys=Object.keys(hs), hstat=st.history_stats||{};
   const lim=st.history_chars_limit;
   if(keys.length){

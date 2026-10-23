@@ -160,7 +160,7 @@ class Stubbed:
         self.reply_text = reply_text
         self.fail = fail
 
-        async def fake_post(messages, cfg):
+        async def fake_post(messages, cfg, tools=None):
             self.calls.append([dict(m) for m in messages])
             if self.fail:
                 raise RuntimeError(self.fail)

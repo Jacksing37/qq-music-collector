@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from . import tools as tools_mod
 from .config import LLMConfig
 
 logger = logging.getLogger("music_collector.llm")
@@ -56,6 +57,21 @@ _CONTEXT_OVERFLOW_MARKS = (
 #: 思考档位 -> 默认 token 预算。``low`` 取 1024 是为了兼容 Anthropic 风格的
 #: 最小预算限制（<1024 会被拒）；``high`` 不给太大，免得一次回复烧掉太多钱。
 _THINK_BUDGET = {"low": 1024, "medium": 4096, "high": 12000}
+
+#: 中转层不认 ``tools`` 时的典型报错。命中就去掉工具再试一次——
+#: 不做这个降级，一个只转发 messages 的中转会让整个机器人哑掉。
+_TOOLS_UNSUPPORTED_MARKS = (
+    "tool_choice",
+    "tools is not supported",
+    "tool is not supported",
+    "does not support tool",
+    "unsupported parameter: tools",
+    "unknown parameter: tools",
+    "unrecognized request argument",
+    "function calling",
+    "不支持工具",
+    "tools 字段",
+)
 
 #: DeepSeek 的思考强度只认 ``low`` / ``high`` / ``max`` 三档（见官方「思考模式」文档的
 #: 映射表：minimal→low、low→low、medium→high、high→high、xhigh→high、max→max、ultra→max）。
@@ -137,6 +153,16 @@ def is_vision_unsupported(message: str) -> bool:
     return any(mark in text for mark in _VISION_UNSUPPORTED_MARKS)
 
 
+def is_tools_unsupported(message: str) -> bool:
+    """错误信息是不是「这层接口不认 tools / 不支持函数调用」。
+
+    命中就去掉工具再试一次。不做这个降级，一个只转发 ``messages`` 的中转
+    会让整个机器人哑掉——而「不能用工具」本来只是少个功能。
+    """
+    text = (message or "").lower()
+    return any(mark in text for mark in _TOOLS_UNSUPPORTED_MARKS)
+
+
 def build_question_content(text: str, images: list[str]) -> str | list[dict]:
     """拼 ``user`` 消息的 content：没图给字符串，有图给 OpenAI vision 数组。
 
@@ -160,6 +186,72 @@ def content_chars(content) -> int:
             len(str(part.get("text") or "")) for part in content if isinstance(part, dict)
         )
     return 0
+
+
+def message_chars(message: dict) -> int:
+    """一条消息实际占用的字符数：正文 + 思考内容。
+
+    思考内容虽然用户看不见，但**确实会发给上游、确实占 token**。裁剪历史时
+    只算正文会让「开了思考 + 12 轮」的上下文比预期大一倍。
+    """
+    total = content_chars(message.get("content"))
+    reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+    return total + len(str(reasoning))
+
+
+def as_message(raw) -> dict:
+    """把 ``_post_chat`` 的返回值归一化成 message dict。
+
+    真实实现返回 dict；测试桩历史上返回**字符串**，这里兼容一下，
+    免得每个用桩的用例都要跟着改。
+    """
+    if isinstance(raw, dict):
+        return raw
+    text = "" if raw is None else str(raw)
+    return {"role": "assistant", "content": text}
+
+
+def message_text(message: dict) -> str:
+    """从一条 assistant message 里取正文；取不到就抛带原因的错误。
+
+    注意顺序：**先看 tool_calls**。模型这一轮只想调工具、不说话的
+    ``content`` 就是空的，这是正常情况，不能当成「空回复」报错。
+    """
+    content = message.get("content")
+    if isinstance(content, list):  # 少数实现返回分段数组
+        content = "".join(
+            str(part.get("text", "")) for part in content if isinstance(part, dict)
+        )
+    text = (content or "").strip()
+    if text:
+        return text
+    if message.get("tool_calls"):
+        return ""
+    # 推理模型把“想”和“说”分开：只拿到思考内容说明额度被思考吃光了
+    if message.get("reasoning_content") or message.get("reasoning"):
+        raise RuntimeError(
+            "模型只产出了思考内容、没有正式回答（多半是最大回复 token 太小，"
+            "把「最大回复 token」调大，或把思考档位调低）"
+        )
+    raise RuntimeError("模型返回了空内容")
+
+
+def parse_tool_arguments(raw) -> dict:
+    """``tool_calls[].function.arguments`` 是**字符串**，各家中转的写法还不一样。
+
+    解析失败不抛异常：把原文当成 ``{"raw": ...}`` 塞回去，让工具自己决定怎么处理
+    ——因为「参数格式错」不该让整条回复失败。
+    """
+    if isinstance(raw, dict):
+        return raw
+    text = (raw or "").strip() if isinstance(raw, str) else ""
+    if not text:
+        return {}
+    try:
+        data = json.loads(text)
+    except Exception:  # noqa: BLE001
+        return {"_raw": text[:500]}
+    return data if isinstance(data, dict) else {"_raw": text[:500]}
 
 
 #: 「参考资料」（网页正文 / 转发记录）的总字数上限。抓取时各自已经有上限，
@@ -327,7 +419,9 @@ def parse_extra_body(raw: str) -> dict:
     return data
 
 
-def build_payload(messages: list[dict], cfg: LLMConfig) -> dict:
+def build_payload(
+    messages: list[dict], cfg: LLMConfig, tools: Optional[list[dict]] = None
+) -> dict:
     """拼出真正发给模型的请求体（抽出来是为了网页端能预览、测试能断言）。"""
     payload: dict = {
         "model": (cfg.model or "").strip(),
@@ -349,18 +443,34 @@ def build_payload(messages: list[dict], cfg: LLMConfig) -> dict:
     if int(cfg.seed) >= 0:
         payload["seed"] = int(cfg.seed)
     payload.update(thinking_params(cfg))
-    # 高级兜底放最后：用户写的键可以覆盖上面任何一项（包括思考参数）
+    if tools:
+        # tool_choice=auto：让模型自己决定调不调。写死 "required" 会逼它每句都调工具
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+    # 高级兜底放最后：用户写的键可以覆盖上面任何一项（包括思考参数与工具）
     payload.update(parse_extra_body(cfg.extra_body))
     return payload
 
 
 def payload_preview(cfg: LLMConfig) -> dict:
-    """给网页端的状态预览：实际会发出去的参数（不含 Key，messages 只留占位）。"""
+    """给网页端的状态预览：实际会发出去的参数（不含 Key，messages 只留占位）。
+
+    工具只列名字不列完整 schema——预览区是给人看的，塞二十行 JSON Schema 就没法读了。
+    """
+    tool_names: list[str] = []
+    tool_list: list = []
     try:
-        payload = build_payload([{"role": "user", "content": "…"}], cfg)
+        if cfg.tools:
+            tool_list, _ = tools_mod.build(cfg)
+            tool_names = [t.name for t in tool_list]
+        payload = build_payload(
+            [{"role": "user", "content": "…"}], cfg, tools_mod.schemas(tool_list) if tool_names else None
+        )
     except Exception as exc:  # noqa: BLE001 — 预览失败不该让整页 500
         return {"error": str(exc)}
     payload.pop("messages", None)
+    if "tools" in payload:
+        payload["tools"] = tool_names
     return payload
 
 
@@ -395,23 +505,18 @@ def extract_reply(data: dict) -> str:
         raise RuntimeError(f"没有 choices: {str(err)[:200] or data}")
     choice = choices[0] or {}
     message = choice.get("message") or {}
-    content = message.get("content")
-    if isinstance(content, list):  # 少数实现返回分段数组
-        content = "".join(
-            str(part.get("text", "")) for part in content if isinstance(part, dict)
-        )
-    text = (content or "").strip()
-    if text:
-        return text
-    # 推理模型把“想”和“说”分开：只拿到思考内容说明额度被思考吃光了
-    if message.get("reasoning_content") or message.get("reasoning"):
-        raise RuntimeError(
-            "模型只产出了思考内容、没有正式回答（多半是最大回复 token 太小，"
-            "把「最大回复 token」调大，或把思考档位调低）"
-        )
-    if (choice.get("finish_reason") or "") == "length":
-        raise RuntimeError("回复被 max_tokens 截断（没有任何正文），请调大最大回复 token")
-    raise RuntimeError("模型返回了空内容")
+    try:
+        text = message_text(message)
+    except RuntimeError:
+        # 被 max_tokens 截断时的提示要和「模型啥也没说」区分开，否则排查方向全错
+        if (choice.get("finish_reason") or "") == "length":
+            raise RuntimeError(
+                "回复被 max_tokens 截断（没有任何正文），请调大最大回复 token"
+            ) from None
+        raise
+    if not text:
+        raise RuntimeError("模型返回了空内容")
+    return text
 
 
 class LLMBot:
@@ -445,11 +550,14 @@ class LLMBot:
         return {gid: len(msgs) for gid, msgs in self._history.items() if msgs}
 
     def history_stats(self) -> dict[int, dict[str, int]]:
-        """各群的上下文占用：条数 + 字符数（判断「快爆了没」的直观指标）。"""
+        """各群的上下文占用：条数 + 字符数（判断「快爆了没」的直观指标）。
+
+        字符数把 ``reasoning_content`` 也算进去——它一样要走请求、一样占 token。
+        """
         return {
             gid: {
                 "msgs": len(msgs),
-                "chars": sum(content_chars(m.get("content")) for m in msgs),
+                "chars": sum(message_chars(m) for m in msgs),
             }
             for gid, msgs in self._history.items()
             if msgs
@@ -461,15 +569,18 @@ class LLMBot:
         只按轮数（``history_rounds``）限制是不够的：20 轮 × 单条 600 字 ≈ 一万多字，
         小窗口模型（8k/16k）直接 400。这里再做一层总量裁剪，双保险。
         裁剪只作用于本次请求的副本，不动 deque——把配置调大后旧上下文还能回来。
+
+        历史里只有 ``user`` / ``assistant`` 成对的消息（工具往返不落库，见 ``chat``），
+        所以按两条一减不会把「tool_call 和它的结果」拆散。
         """
         msgs = self.history(group_id)
         if max_chars <= 0 or not msgs:
             return msgs
-        total = sum(content_chars(m.get("content")) for m in msgs)
+        total = sum(message_chars(m) for m in msgs)
         while len(msgs) > 2 and total > max_chars:
-            total -= content_chars(msgs.pop(0).get("content"))
+            total -= message_chars(msgs.pop(0))
             if msgs:
-                total -= content_chars(msgs.pop(0).get("content"))
+                total -= message_chars(msgs.pop(0))
         return msgs
 
     def clear_history(self, group_id: Optional[int] = None) -> int:
@@ -492,15 +603,21 @@ class LLMBot:
 
     # ------------------------------------------------------------ HTTP
 
-    async def _post_chat(self, messages: list[dict], cfg: LLMConfig) -> str:
-        """真正发一次请求并返回纯文本回复。失败抛 ``RuntimeError``（带可读原因）。
+    async def _post_chat(
+        self, messages: list[dict], cfg: LLMConfig, tools: Optional[list[dict]] = None
+    ) -> dict:
+        """真正发一次请求，返回**整条** assistant message。
 
-        单独拆出来是为了测试能直接 patch 它，不必去劫持 httpx。
+        返回整条而不只是正文，是因为工具调用要看 ``tool_calls``、下一轮历史又要
+        回传 ``reasoning_content``——只取正文这些信息就全丢了。
+
+        失败抛 ``RuntimeError``（带可读原因）。单独拆出来是为了测试能直接
+        patch 它，不必去劫持 httpx；桩返回纯字符串也认（见 :func:`as_message`）。
         """
         url = normalize_endpoint(cfg.base_url)
         if not url:
             raise RuntimeError("未填写接口地址（base_url）")
-        payload = build_payload(messages, cfg)
+        payload = build_payload(messages, cfg, tools)
         headers = {
             "Authorization": f"Bearer {cfg.api_key.strip()}",
             "Content-Type": "application/json",
@@ -521,9 +638,75 @@ class LLMBot:
             data = resp.json()
         except Exception:
             raise RuntimeError("返回的不是合法 JSON") from None
-        return extract_reply(data)
+        choices = data.get("choices") or []
+        if not choices:
+            err = data.get("error") or data.get("message") or data.get("detail")
+            raise RuntimeError(f"没有 choices: {str(err)[:200] or data}")
+        message = (choices[0] or {}).get("message") or {}
+        if not isinstance(message, dict):
+            raise RuntimeError("返回的 message 结构不认识")
+        return message
 
     # ------------------------------------------------------------ 对外
+
+    async def _run_turns(
+        self,
+        messages: list[dict],
+        cfg: LLMConfig,
+        tool_list: list,
+        tool_ctx,
+        tool_schemas: list[dict],
+        group_id: int,
+    ) -> tuple[str, str, int]:
+        """跑「模型 ⇄ 工具」往返，返回 ``(最终正文, 思考内容, 工具调用次数)``。
+
+        两个容易踩的点：
+
+        - **最后一轮不带 tools**。到了 ``tool_rounds`` 上限还在要工具，就只能拿到
+          空 content；这里强制最后取一次正文，比直接报「空回复」靠谱。
+        - **回填 assistant 消息时必须带 ``reasoning_content``**。DeepSeek 明确说，
+          请求带 ``tools`` 时历史里的 ``reasoning_content`` 要完整回传，否则 400。
+          这也是为什么历史里要存它（见 ``chat`` 的写库部分）。
+        """
+        working = [dict(m) for m in messages]
+        steps = max(0, int(cfg.tool_rounds))
+        used = 0
+        for step in range(steps + 1):
+            last = step >= steps
+            raw = await self._post_chat(
+                working, cfg, None if (last or not tool_schemas) else tool_schemas
+            )
+            msg = as_message(raw)
+            calls = msg.get("tool_calls") or []
+            if last or not calls:
+                return message_text(msg), str(msg.get("reasoning_content") or ""), used
+
+            assistant: dict = {"role": "assistant", "content": msg.get("content") or ""}
+            reasoning = msg.get("reasoning_content")
+            if reasoning:
+                assistant["reasoning_content"] = reasoning
+            assistant["tool_calls"] = calls
+            working.append(assistant)
+
+            for call in calls:
+                fn = (call or {}).get("function") or {}
+                name = str(fn.get("name") or "")
+                args = parse_tool_arguments(fn.get("arguments"))
+                used += 1
+                preview = json.dumps(args, ensure_ascii=False)[:120]
+                logger.info(f"[llm] 群{group_id} 调用工具 {name} 参数 {preview}")
+                result = await tools_mod.dispatch(
+                    tool_list, name, args, tool_ctx, cfg.tool_chars
+                )
+                working.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": str((call or {}).get("id") or f"call_{used}"),
+                        "content": result,
+                    }
+                )
+                logger.info(f"[llm] 群{group_id} 工具 {name} 返回 {len(result)} 字")
+        return "", "", used  # 循环必然在上面 return，这里只为让类型完整
 
     async def chat(
         self,
@@ -594,16 +777,39 @@ class LLMBot:
             # 重试」会把网页正文一起丢掉，模型突然从「知道内容」变成「不知道内容」。
             plain = with_context(body, context)
 
+            # 工具按配置组装。tool_rounds=0 等于「不许调工具」，连 schema 都不发，
+            # 省得模型调了却拿不到结果。
+            tool_list: list = []
+            tool_ctx = None
+            tool_schemas: list[dict] = []
+            if cfg.tools and cfg.tool_rounds > 0:
+                tool_list, tool_ctx = tools_mod.build(cfg, group_id, user_id)
+                tool_schemas = tools_mod.schemas(tool_list)
+
             allow_drop_images = bool(pics)
             allow_drop_history = bool(hist)
+            allow_drop_tools = bool(tool_schemas)
             reply: Optional[str] = None
+            reasoning = ""
+            used_tools = 0
             while True:
                 try:
-                    reply = await self._post_chat(current, cfg)
+                    reply, reasoning, used_tools = await self._run_turns(
+                        current, cfg, tool_list, tool_ctx, tool_schemas, group_id
+                    )
                     break
                 except Exception as exc:  # noqa: BLE001 — 任何失败都只记原因
                     err = str(exc)
-                    # ① 上游不认图（换了纯文本模型 / 中转层不支持多模态）：去掉图片再试
+                    # ① 接口不认 tools（中转只转发 messages / 模型不支持函数调用）：
+                    #    去掉工具重试。少了工具只是少个功能，不该让机器人哑掉。
+                    if allow_drop_tools and is_tools_unsupported(err):
+                        allow_drop_tools = False
+                        tool_schemas = []
+                        logger.warning(
+                            f"[llm] 群{group_id} 接口不接受 tools（{err[:80]}）→ 去掉工具重试"
+                        )
+                        continue
+                    # ② 上游不认图（换了纯文本模型 / 中转层不支持多模态）：去掉图片再试
                     if allow_drop_images and is_vision_unsupported(err):
                         allow_drop_images = False
                         logger.warning(
@@ -611,12 +817,12 @@ class LLMBot:
                         )
                         current = without_images(current, plain)
                         continue
-                    # ② 上下文超窗：丢掉历史再试。没带历史还超窗说明单条提问就超了，
+                    # ③ 上下文超窗：丢掉历史再试。没带历史还超窗说明单条提问就超了，
                     #    重试也没用，直接报错。
                     if allow_drop_history and is_context_overflow(err):
                         allow_drop_history = False
                         dropped = len(hist)
-                        dropped_chars = sum(content_chars(m.get("content")) for m in hist)
+                        dropped_chars = sum(message_chars(m) for m in hist)
                         self.clear_history(group_id)
                         logger.warning(
                             f"[llm] 群{group_id} 上下文超窗（丢弃 {dropped} 条 / "
@@ -629,15 +835,29 @@ class LLMBot:
                     return None, f"error: {err}"
 
             self.last_error = ""
+            if not reply:
+                # 工具轮数用尽还在要工具、或者模型干脆不说话：别把空串当成功，
+                # 否则群里会出现「@了但什么都没发」而日志显示一切正常。
+                err = "模型没有给出正文（工具调用可能达到上限）"
+                self.last_error = err
+                logger.warning(f"[llm] 群{group_id} {err}（已用工具 {used_tools} 次）")
+                return None, f"error: {err}"
             if cfg.max_reply_chars > 0 and len(reply) > cfg.max_reply_chars:
                 reply = reply[: cfg.max_reply_chars].rstrip() + "…"
 
             # 只有成功才写上下文：失败时留着半个来回，下一轮会重复问同一句。
             # 图片一律只记 [图片] 标记——URL 几小时就过期，塞进历史既没用又占预算。
+            # **思考内容要留着**：带 tools 的请求若不回传历史 reasoning_content，
+            # DeepSeek 会直接 400；不带 tools 时传了也会被忽略，所以存着没有副作用。
+            # 工具往返（tool_calls / tool 结果）**不进历史**：它对下一轮对话没有价值，
+            # 存进去反而会让「按两条一裁」的历史裁剪拆散 tool_call 与它的结果。
             if cfg.history_rounds > 0:
                 hist_box = self._history.setdefault(group_id, deque())
                 hist_box.append({"role": "user", "content": body[:_HISTORY_CHAR_LIMIT]})
-                hist_box.append({"role": "assistant", "content": reply[:_HISTORY_CHAR_LIMIT]})
+                entry: dict = {"role": "assistant", "content": reply[:_HISTORY_CHAR_LIMIT]}
+                if reasoning:
+                    entry["reasoning_content"] = reasoning[:_HISTORY_CHAR_LIMIT]
+                hist_box.append(entry)
                 keep = max(2, cfg.history_rounds * 2)
                 while len(hist_box) > keep:
                     hist_box.popleft()
@@ -645,9 +865,10 @@ class LLMBot:
         self._last_reply[(int(group_id), int(user_id))] = time.monotonic()
         pics_note = f"，图 {len(pics)} 张" if pics else ""
         ctx_note = f"，资料 {len(context)} 字" if context else ""
+        tool_note = f"，工具 {used_tools} 次" if used_tools else ""
         logger.info(
             f"[llm] 群{group_id} {speaker}({user_id}) 提问 {len(question)} 字{pics_note}{ctx_note}"
-            f" → 回复 {len(reply)} 字（model={cfg.model}）"
+            f" → 回复 {len(reply)} 字{tool_note}（model={cfg.model}）"
         )
         return reply, ""
 
@@ -670,7 +891,9 @@ class LLMBot:
             }
         )
         try:
-            reply = await self._post_chat(messages, probe)
+            # 测试连接**不带工具**：这里只想验证「接口通不通、模型回不回话」，
+            # 带上 tools 反而会被中转的兼容性问题干扰，排查方向就糊了。
+            reply = message_text(as_message(await self._post_chat(messages, probe)))
         except Exception as exc:  # noqa: BLE001
             self.last_error = str(exc)
             # 网页上闪一下的结果会被关掉，日志里留一份才能事后回溯

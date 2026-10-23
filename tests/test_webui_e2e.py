@@ -109,6 +109,21 @@ def test_endpoints():
         assert "history_stats" in b3["status"] and b3["status"]["history_chars_limit"] == 3000, \
             b3["status"]
 
+        # 工具与技能：状态里要能看出「真的挂上了什么」
+        tw = b3["status"]["tools"]
+        assert tw["enabled"] is True and "fetch_url" in tw["names"], tw
+        assert tw["rounds"] == 3 and tw["scripts"] is False, tw
+        assert isinstance(tw["skills"], list) and tw["skills_dir"], tw
+        # 关掉总闸后请求体里就不该再有 tools
+        client.patch("/api/music-admin/config", headers=H,
+                     json={"values": {"llm.tools": False}})
+        b_off = client.get("/api/music-admin/bot", headers=H).json()
+        assert b_off["status"]["tools"]["enabled"] is False, b_off["status"]["tools"]
+        assert b_off["status"]["tools"]["names"] == [], b_off["status"]["tools"]
+        assert "tools" not in b_off["status"]["payload"], b_off["status"]["payload"]
+        client.patch("/api/music-admin/config", headers=H,
+                     json={"values": {"llm.tools": True}})
+
         # DeepSeek 写法：状态里要给出「实际强度」而不是一个不存在的预算
         p5 = client.patch("/api/music-admin/config", headers=H, json={"values": {
             "llm.model": "deepseek-v4.1-flash",
