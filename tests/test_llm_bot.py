@@ -202,7 +202,12 @@ async def test_chat_success_and_history() -> None:
     check("返回回复文本", reply == "你好呀", repr(reply))
     check("reason 为空", reason == "", repr(reason))
     sent = calls[0]
-    check("首条是 system", sent[0]["role"] == "system" and sent[0]["content"] == "你是助手")
+    check("首条是 system", sent[0]["role"] == "system" and sent[0]["content"].startswith("你是助手"),
+          repr(sent[0])[:80])
+    # 工具开着时，代码会把「能力边界」追加在人设后面（用户改人设删不掉）
+    check("system 末尾带工具能力边界",
+          sent[0]["content"].endswith("不要假装完成。") and "安装/卸载/修改技能的权限" in sent[0]["content"],
+          sent[0]["content"][-60:])
     check("末条是 user 且带昵称", sent[-1]["role"] == "user" and sent[-1]["content"] == "张三：在吗",
           repr(sent[-1]))
     check("历史记了 2 条（问 + 答）", len(bot.history(GID)) == 2)

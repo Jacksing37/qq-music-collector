@@ -12,12 +12,17 @@
 技能正文只是**说明文字**，真正的动作只有内置工具能做。想让技能带可执行脚本，
 必须在配置里显式打开 ``llm.skill_scripts``（默认关），并且脚本只能来自技能
 目录内、后缀白名单、有超时和输出上限。
+
+**聊天里不能安装技能**（硬规则，没有开关）：模型没有任何写文件的工具，脚本跑完
+还会拿快照比对技能目录，新增的文件删掉、被改的写回去（见 :func:`revert_changes`）。
+所以「在群里让机器人装个技能」这件事在代码层面就走不通，只能管理员手动放目录。
 """
 
 import asyncio
 import os
 import re
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
@@ -32,6 +37,9 @@ MAX_ARGS = 8
 MAX_ARG_CHARS = 200
 #: 脚本输出最多回给模型多少字
 MAX_OUTPUT = 4000
+#: 只读守卫的快照上限：文件数 / 总字节数，超了就只报告不还原（避免读爆内存）
+SNAPSHOT_MAX_FILES = 800
+SNAPSHOT_MAX_BYTES = 8 * 1024 * 1024
 
 _FRONTMATTER = re.compile(r"\A\ufeff?---\s*\n(.*?)\n---\s*\n?(.*)\Z", re.S)
 
@@ -164,17 +172,134 @@ def _decode(raw: bytes) -> str:
         return raw.decode("gb18030", errors="replace")
 
 
-def _minimal_env(root: Path) -> dict:
-    """最小环境变量集：不把 API Key、数据库路径这些东西漏给技能脚本。"""
+def _minimal_env() -> dict:
+    """最小环境变量集：不把 API Key、数据库路径这些东西漏给技能脚本。
+
+    ``HOME`` / ``TMPDIR`` 故意指到系统临时目录而不是技能目录——脚本随手写临时文件
+    不该落在「只读」的技能根目录里，否则每次运行都要被守卫还原一遍。
+    """
+    tmp = tempfile.gettempdir()
     env = {
         "PATH": os.environ.get("PATH") or "/usr/local/bin:/usr/bin:/bin",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "PYTHONIOENCODING": "utf-8",
-        "HOME": str(root),
-        "TMPDIR": str(root),
+        "HOME": tmp,
+        "TMPDIR": tmp,
+        "TEMP": tmp,
+        "TMP": tmp,
     }
     return env
+
+
+def _snapshot(root: Path) -> Optional[dict[str, bytes]]:
+    """把技能根目录下的文件读进内存，供脚本跑完后比对。
+
+    返回 ``None`` 表示「太大了，不比对」——宁可漏检也不能把进程内存吃满。
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return {}
+    snap: dict[str, bytes] = {}
+    total = 0
+    try:
+        paths = sorted(p for p in root.rglob("*") if p.is_file())
+    except OSError:
+        return None
+    if len(paths) > SNAPSHOT_MAX_FILES:
+        return None
+    for path in paths:
+        try:
+            size = path.stat().st_size
+            total += size
+            if total > SNAPSHOT_MAX_BYTES:
+                return None
+            snap[path.relative_to(root).as_posix()] = path.read_bytes()
+        except OSError:
+            return None
+    return snap
+
+
+def _dirs_of(paths: Iterable[str]) -> set[str]:
+    """这些相对路径涉及的所有父目录（用来判断哪个目录是脚本新建的）。"""
+    out: set[str] = set()
+    for rel in paths:
+        parts = Path(rel).parts[:-1]
+        for i in range(1, len(parts) + 1):
+            out.add(Path(*parts[:i]).as_posix())
+    return out
+
+
+def _looks_like_data_root(root: Path) -> bool:
+    """技能根目录里直接躺着数据库文件？
+
+    说明 ``llm.skills_dir`` 指到了 ``data/`` 这种地方——这时「还原技能目录」会把
+    数据库一起写回去，那就是真的数据损坏了。宁可放弃守卫也不碰数据库。
+    """
+    try:
+        for path in root.iterdir():
+            if not path.is_file():
+                continue
+            suffix = path.suffix.lower()
+            if suffix in {".db", ".db-wal", ".db-shm", ".sqlite", ".sqlite3"}:
+                return True
+    except OSError:
+        return True
+    return False
+
+
+def revert_changes(root: Path, before: Optional[dict[str, bytes]]) -> list[str]:
+    """把脚本对技能目录的改动还原，返回被改动过的相对路径（升序）。
+
+    「QQ 聊天里禁止安装技能」的最后一道闸：模型没有写文件的工具，但脚本是真进程，
+    它可以自己往技能目录里塞东西。所以跑完做一次快照比对——
+
+    - 新增的文件：删掉；脚本新建的目录：空了就删；
+    - 被改/被删的原文件：按快照内容写回。
+
+    快照为 ``None``（目录太大）时不做任何事，只由调用方按「无法校验」处理。
+    """
+    if before is None:
+        return []
+    root = Path(root)
+    changes: list[str] = []
+    try:
+        current = sorted(p for p in root.rglob("*") if p.is_file())
+    except OSError:
+        return changes
+    now: dict[str, bytes] = {}
+    for path in current:
+        rel = path.relative_to(root).as_posix()
+        try:
+            now[rel] = path.read_bytes()
+        except OSError:
+            continue
+    # ① 新增的：删掉
+    for rel in sorted(set(now) - set(before)):
+        try:
+            (root / rel).unlink()
+            changes.append(rel)
+        except OSError as exc:
+            logger.warning(f"[skill] 还原失败（删 {rel}）：{exc}")
+    # ② 内容变了 / 被删了的：写回原样
+    for rel, data in sorted(before.items()):
+        if now.get(rel) == data:
+            continue
+        try:
+            target = root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            changes.append(rel)
+        except OSError as exc:
+            logger.warning(f"[skill] 还原失败（写 {rel}）：{exc}")
+    # ③ 脚本新建的空目录
+    added_dirs = _dirs_of(set(now) | set(before)) - _dirs_of(before)
+    for rel in sorted(added_dirs, key=len, reverse=True):
+        try:
+            (root / rel).rmdir()  # 非空会抛，说明里面还有东西，留着
+        except OSError:
+            pass
+    return sorted(set(changes))
 
 
 async def run_script(
@@ -187,17 +312,27 @@ async def run_script(
     - 脚本必须已经存在于技能目录内（模型只能选，不能写）；
     - 后缀白名单（``.py`` / ``.sh``）；
     - 参数个数与长度封顶（防止拿参数拼命令）；
-    - 独立进程 + 超时 + 输出截断 + 最小环境变量。
+    - 独立进程 + 超时 + 输出截断 + 最小环境变量；
+    - **技能目录只读**：跑完比对快照，脚本往里塞的东西会被删掉/写回，
+      这样「靠脚本装技能」也走不通。
     """
     target = _resolve_script(skill, script)
     argv = [str(a)[:MAX_ARG_CHARS] for a in (args or [])][:MAX_ARGS]
     cmd = [*_command(target), *argv]
+    # 守卫范围是整个技能根目录（不只是这个技能），脚本往兄弟目录塞东西也拦得住。
+    # 根目录里直接有数据库就不守卫（防止 skills_dir 指错时把库写回去）。
+    guard_root = skill.root.parent
+    if _looks_like_data_root(guard_root):
+        logger.warning(f"[skill] 技能根目录像数据目录（{guard_root}）→ 跳过只读守卫")
+        before = None
+    else:
+        before = _snapshot(guard_root)
     started = asyncio.get_running_loop().time()
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=str(skill.root),
-            env=_minimal_env(skill.root),
+            env=_minimal_env(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -212,9 +347,11 @@ async def run_script(
             await proc.wait()
         except Exception:  # noqa: BLE001
             pass
+        revert_changes(guard_root, before)
         raise RuntimeError(f"脚本超时（{timeout:g}s）已被终止") from None
 
     elapsed = asyncio.get_running_loop().time() - started
+    changes = revert_changes(guard_root, before)
     text = _decode(out).strip()
     errtext = _decode(err).strip()
     if errtext:
@@ -227,4 +364,13 @@ async def run_script(
         f"[skill] 执行 {skill.name}/{script} 参数 {len(argv)} 个 → "
         f"退出码 {proc.returncode}，{elapsed:.1f}s，输出 {len(text)} 字"
     )
+    if changes:
+        sample = "、".join(changes[:5]) + ("…" if len(changes) > 5 else "")
+        logger.warning(
+            f"[skill] 脚本试图修改技能目录（{len(changes)} 处）→ 已还原：{sample}"
+        )
+        text = (
+            f"{text}\n[安全] 这个脚本动了技能目录（{sample}），已被还原——"
+            "QQ 聊天中不允许安装或修改技能。"
+        )
     return f"退出码 {proc.returncode}，耗时 {elapsed:.1f}s\n{text}"

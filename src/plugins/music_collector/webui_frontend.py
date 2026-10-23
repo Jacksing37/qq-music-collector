@@ -1395,6 +1395,9 @@ const BOT_GROUPS=[
       + "和「自动抓取」不同——抓不抓、抓哪个由模型判断，不会每条消息都去抓，也不会把无关页面塞进上下文。<br>"
       + "<b>技能</b>：技能目录下每个子目录放一个 <code>SKILL.md</code>（开头写 name / description，正文写步骤），"
       + "模型先看简介、需要时才读全文。加技能不用改代码。<br>"
+      + "🔒 <b>QQ 聊天中禁止安装任何技能</b>（代码硬规则、没有开关）：模型没有写文件/装技能的工具，"
+      + "自己编个 <code>install_skill</code> 也会被拒绝；技能只能在这里配好目录后、由管理员把文件夹放到服务器上。"
+      + "开了脚本执行后，脚本跑完还会比对技能目录，往里塞的东西会被还原。<br>"
       + "⚠️ <b>允许执行技能脚本</b>等于「模型能让你服务器上跑代码」，只在完全信任技能来源时打开。",
    keys:["llm.tools","llm.tool_rounds","llm.tool_chars",
          "llm.web_tool","llm.fetch_chars","llm.fetch_timeout",
@@ -1480,8 +1483,9 @@ function renderBotStatus(st){
     parts.push(line);
     if((tw.skills||[]).length) parts.push(`技能：<b>${tw.skills.length}</b> 个（${tw.skills.map(esc).join("、")}）　目录 <code>${esc(tw.skills_dir||"")}</code>`);
     else parts.push(`技能：<span class="muted">没扫到技能（${esc(tw.skills_dir||"—")} 下没有带 SKILL.md 的子目录）</span>`);
-    if(tw.scripts) parts.push(`<span style="color:var(--warn,#b45309)">⚠️ 已允许执行技能脚本：模型可以运行技能目录里的 .py / .sh</span>`);
+    if(tw.scripts) parts.push(`<span style="color:var(--warn,#b45309)">⚠️ 已允许执行技能脚本：模型可以运行技能目录里的 .py / .sh（脚本改动技能目录会被还原）</span>`);
     if(!tw.fetch_ready) parts.push(`<span style="color:var(--warn,#b45309)">抓网页不可用：没装 trafilatura（pip install trafilatura）</span>`);
+    parts.push(`技能安装：<b>聊天内已禁用</b>（只能由管理员把目录放到服务器 <code>${esc(tw.skills_dir||"data/skills")}</code>）`);
   } else {
     parts.push(`工具：<b>关闭</b>（模型只能纯聊天，请求里不带 tools）`);
   }

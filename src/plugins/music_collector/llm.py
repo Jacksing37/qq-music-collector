@@ -287,15 +287,20 @@ def without_images(messages: list[dict], text: str) -> list[dict]:
     return head
 
 
-def system_text(cfg: LLMConfig) -> str:
-    """带长度保护的系统提示词（人设再长也不会挤占上下文）。"""
+def system_text(cfg: LLMConfig, rules: str = "") -> str:
+    """带长度保护的系统提示词（人设再长也不会挤占上下文）。
+
+    ``rules`` 是代码写死的硬规则（目前只有工具能力边界，见
+    :data:`tools.TOOL_RULES`）。它**拼在截断之后**，这样用户把人设写满 4000 字也
+    挤不掉「聊天里装不了技能」这条。
+    """
     prompt = (cfg.system_prompt or "").strip()
-    if len(prompt) <= SYSTEM_CHAR_LIMIT:
-        return prompt
-    logger.warning(
-        f"[llm] system_prompt 过长（{len(prompt)} 字），已截断到 {SYSTEM_CHAR_LIMIT} 字"
-    )
-    return prompt[:SYSTEM_CHAR_LIMIT]
+    if len(prompt) > SYSTEM_CHAR_LIMIT:
+        logger.warning(
+            f"[llm] system_prompt 过长（{len(prompt)} 字），已截断到 {SYSTEM_CHAR_LIMIT} 字"
+        )
+        prompt = prompt[:SYSTEM_CHAR_LIMIT]
+    return prompt + (rules or "")
 
 
 def is_reasoning_model(model: str) -> bool:
@@ -761,7 +766,9 @@ class LLMBot:
             return None, "cooldown"
 
         async with self._lock(group_id):
-            system = system_text(cfg)
+            # 工具一开就是「agent 模式」：能力边界（不许装技能、不许写文件）由代码
+            # 追加在系统提示词末尾，用户改人设也删不掉。
+            system = system_text(cfg, tools_mod.TOOL_RULES if cfg.tools else "")
             base: list[dict] = []
             if system:
                 base.append({"role": "system", "content": system})

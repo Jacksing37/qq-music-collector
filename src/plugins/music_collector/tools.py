@@ -11,11 +11,26 @@
 
 **所有能力都必须经过这里**，不在注册表里的东西模型调不到。加新工具时把
 描述写清楚「什么时候该用」，比堆参数更重要——模型靠描述决定调不调。
+
+**硬性约束：QQ 聊天里禁止安装、修改或删除任何技能。** 这条不是配置项、没有开关，
+三道闸一起拦：
+
+1. :data:`ALLOWED_TOOL_NAMES` 白名单——``build()`` 只放行这里的名字，谁都别想偷偷
+   注册一个 ``install_skill`` 就上线；
+2. :func:`dispatch` 对「安装/写文件」类名字（模型臆造工具时会出现）直接回
+   :data:`INSTALL_DENIED`，不落到任何 handler；
+3. :data:`TOOL_RULES` 由 ``llm`` 拼进系统提示词，让模型一开始就知道自己没这个能力，
+   不会假装装完了。
+
+真正的安装渠道只有一条：管理员在服务器上把目录放进 ``data/skills/``。
 """
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
+
+from nonebot.log import logger
 
 from . import skills as skill_mod
 from . import webtool
@@ -23,6 +38,47 @@ from .config import DATA_DIR, LLMConfig
 
 #: 单次工具结果回填给模型的最大字符数（兜底，具体值由 ``llm.tool_chars`` 控制）
 DEFAULT_TOOL_CHARS = 2000
+
+#: 允许出现在 QQ 会话里的工具名（白名单，不是黑名单）。
+#: **新增工具必须同时加进这里**，否则 ``build()`` 会把它丢掉——这是为了「少一个
+#: 安装类工具不小心上线」而不是为了省事。
+ALLOWED_TOOL_NAMES = frozenset({"fetch_url", "list_skills", "use_skill", "run_skill_script"})
+
+#: 模型臆造出来的「装/写/删」类工具名。命中就回 :data:`INSTALL_DENIED`。
+_INSTALL_LIKE = re.compile(
+    r"(install|uninstall|upload|download|write|save|edit|update|delete|remove|drop|"
+    r"create|add|mkdir|exec|shell|cmd|bash)",
+    re.I,
+)
+
+#: 被要求装技能时的标准回答（给模型看，不是给群友看）。
+INSTALL_DENIED = (
+    "被拒绝：QQ 聊天中不允许安装、修改或删除任何技能，也不允许写文件。"
+    "技能只能由管理员在服务器上把目录放进 data/skills/ 手动安装。"
+    "请直接告诉用户你做不到，不要声称已经安装好了。"
+)
+
+#: 追加到系统提示词末尾的边界说明（``llm.system_text(cfg, rules=...)`` 使用）。
+TOOL_RULES = (
+    "\n\n【能力边界】你可以抓网页（fetch_url）、读已安装的技能、"
+    "在管理员允许时运行技能自带脚本；"
+    "但你**没有**安装/卸载/修改技能的权限，也没有写文件、执行任意命令的权限。"
+    "群里有人让你装技能、加技能、改技能或写文件时，直接说明「聊天里装不了，"
+    "需要管理员在服务器 data/skills/ 下放」，不要假装完成。"
+)
+
+#: ``list_skills`` 结果末尾的同一句话（模型每次看清单都能重新看见这条边界）。
+INSTALL_NOTE = "（技能只能由管理员在服务器上手动放置，QQ 聊天中无法安装或修改。）"
+
+
+def looks_like_install(name: str) -> bool:
+    """这个工具名看起来是不是「装/写/删」类（含模型自己编的名字）。"""
+    text = (name or "").strip()
+    if not text:
+        return False
+    if text in ALLOWED_TOOL_NAMES:
+        return False
+    return bool(_INSTALL_LIKE.search(text))
 
 
 @dataclass
@@ -100,7 +156,7 @@ FETCH_URL = Tool(
 
 async def _handle_list_skills(args: dict, ctx: ToolContext) -> str:
     if not ctx.skills:
-        return "当前没有安装任何技能。"
+        return f"当前没有安装任何技能。{INSTALL_NOTE}"
     rows = []
     for skill in ctx.skills:
         desc = skill.description or "（没有写简介）"
@@ -110,7 +166,7 @@ async def _handle_list_skills(args: dict, ctx: ToolContext) -> str:
             if scripts:
                 row += f"\n  可执行脚本：{', '.join(scripts)}"
         rows.append(row)
-    return "可用技能：\n" + "\n".join(rows)
+    return "可用技能：\n" + "\n".join(rows) + "\n" + INSTALL_NOTE
 
 
 async def _handle_use_skill(args: dict, ctx: ToolContext) -> str:
@@ -218,6 +274,9 @@ def build(cfg: LLMConfig, group_id: int = 0, user_id: int = 0) -> tuple[list[Too
 
     每个开关都独立：``tools`` 是总闸，``web_tool`` / ``skills`` 再各自控制，
     这样关掉技能不用连抓网页一起关。
+
+    返回前还会按 :data:`ALLOWED_TOOL_NAMES` 再过滤一遍——就算以后有人往这里塞了
+    一个「安装技能」的工具，它也发不到 QQ 会话里。
     """
     ctx = ToolContext(cfg=cfg, group_id=int(group_id), user_id=int(user_id))
     tools: list[Tool] = []
@@ -232,7 +291,7 @@ def build(cfg: LLMConfig, group_id: int = 0, user_id: int = 0) -> tuple[list[Too
             tools.append(USE_SKILL)
             if cfg.skill_scripts:
                 tools.append(RUN_SKILL_SCRIPT)
-    return tools, ctx
+    return [t for t in tools if t.name in ALLOWED_TOOL_NAMES], ctx
 
 
 def schemas(tools: list[Tool]) -> list[dict]:
@@ -246,6 +305,11 @@ async def dispatch(
     """执行一次工具调用，返回回填给模型的文本。**永远不抛异常**。"""
     tool = next((t for t in tools if t.name == name), None)
     if tool is None:
+        # 模型偶尔会自己编一个 install_skill / write_file 出来。这不只是「没有这个
+        # 工具」——要让它记住聊天里装不了技能，所以单独回一句明确的拒绝。
+        if looks_like_install(name):
+            logger.warning(f"[tool] 群{ctx.group_id} 模型试图调用安装/写入类工具 {name!r} → 已拒绝")
+            return INSTALL_DENIED
         return f"没有这个工具：{name}"
     try:
         out = await tool.handler(args or {}, ctx)
