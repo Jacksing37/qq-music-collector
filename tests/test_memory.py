@@ -296,6 +296,35 @@ def test_llm_persistence() -> None:
     check("库里也清了", asyncio.run(store.load_chat(9)) == [])
     check("清空后不会又冒出来", bot.history(9) == [])
 
+    # 预热条数要跟着字数预算走，**不能被旧的硬编码 4000 卡住**——
+    # 卡住的话 history_chars 配到 160 万也吃不满 1M 窗口（20~40 万字就到顶了）。
+    seen: dict = {}
+
+    async def fake_load(group_id, *, kind="chat", max_chars=0, limit=0, since=0.0):
+        seen["limit"] = limit
+        return []
+
+    spy = _store()
+    spy.load_chat = fake_load  # type: ignore[method-assign]
+    big_bot = LLMBot()
+    big_bot.set_store(spy)
+    big = LLMConfig(history_rounds=20000, history_chars=1_400_000)
+    asyncio.run(big_bot._sync_history(77, big))
+    check("大预算下预热条数 > 4000（不再被硬编码卡住）", seen.get("limit", 0) > 4000, str(seen))
+    check("按字数预算反推条数（1400000/40=35000）", seen.get("limit") == 35000, str(seen))
+
+    # 反过来：轮数小的时候仍然听轮数的
+    seen.clear()
+    small_bot = LLMBot()
+    small_bot.set_store(spy)
+    asyncio.run(small_bot._sync_history(78, LLMConfig(history_rounds=10, history_chars=1_400_000)))
+    check("轮数更小时以轮数为准（10 轮=20 条）", seen.get("limit") == 20, str(seen))
+
+    # 预算不设上限（history_chars=0）时退回轮数，不受字数限制
+    seen.clear()
+    asyncio.run(small_bot._sync_history(79, LLMConfig(history_rounds=3000, history_chars=0)))
+    check("history_chars=0 时不按字数砍（3000 轮=6000 条）", seen.get("limit") == 6000, str(seen))
+
 
 def test_system_text() -> None:
     print("\n[9] 系统提示词顺序：人设 → 记忆 → 硬规则")

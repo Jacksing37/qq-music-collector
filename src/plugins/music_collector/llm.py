@@ -588,8 +588,17 @@ class LLMBot:
             since = 0.0
             if cfg.history_days > 0:
                 since = time.time() - float(cfg.history_days) * 86400
-            # 预热多少条：轮数×2 就是全部需要，但封顶 4000 条防止一次读爆内存
-            limit = max(2, min(4000, int(cfg.history_rounds) * 2))
+            # 预热条数 = 轮数×2，再按**字数预算**反推一道上限，两者取小。
+            # 以前这里写死 4000 条（2000 轮），按每条约 50~100 字算只有 20~40 万字，
+            # 于是 history_chars 配到 160 万也吃不满 1M 窗口——上限卡在读库这一步。
+            # 现在按「平均每条 40 字」保守估算：宁可多读几行（后面 _history_within
+            # 还会按字数精裁），也不能让预算在预热阶段就被砍掉。
+            # 另留 50000 条硬顶防呆（约 5M 字符、十几 MB 内存），避免配置写错吃爆内存。
+            rounds_limit = int(cfg.history_rounds) * 2
+            chars_limit = (
+                max(2, int(cfg.history_chars) // 40) if cfg.history_chars > 0 else rounds_limit
+            )
+            limit = max(2, min(rounds_limit, chars_limit, 50000))
             rows = await self._store.load_chat(
                 group_id, kind="chat", limit=limit, since=since
             )
