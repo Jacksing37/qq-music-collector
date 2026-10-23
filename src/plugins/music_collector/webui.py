@@ -40,6 +40,7 @@ from .config import (
     reset_config_value,
 )
 from . import logbuffer
+from . import memory as memory_mod
 from . import skills as skills_mod
 from . import tools as tools_mod
 from . import webtool
@@ -59,6 +60,7 @@ from .store import MASTER_KEY
 from .naming import resolve_alias
 from .scheduler import next_runs, reload_jobs
 from .service import service
+from .digest import digest_group
 
 # -------------------------------------------------------------------- 元数据
 
@@ -75,6 +77,7 @@ SECTION_TITLES = {
     "netease": "网易云登录",
     "logs": "运行日志",
     "llm": "机器人设置",
+    "memory": "群记忆",
 }
 
 #: 配置页分组的展示顺序。网易云登录紧跟「通用设置」，登录 / 重登 / 粘贴 cookie
@@ -482,6 +485,68 @@ FIELD_META["llm.skill_timeout"] = (
     "技能脚本跑超过这个时间直接被 kill，并把超时告诉模型",
     False,
 )
+
+# ---- 群记忆（单独一段，挂在「机器人」页）----
+FIELD_META["memory.enabled"] = (
+    "记忆总开关",
+    "关掉后不旁听、不注入档案、也不给模型记忆工具；已有档案原样留在磁盘上",
+    False,
+)
+FIELD_META["memory.dir"] = (
+    "记忆目录",
+    "留空 = data/memory；每人一份 md，可以直接编辑。相对路径按 data/ 解析",
+    False,
+)
+FIELD_META["memory.inject_chars"] = (
+    "单次注入字数",
+    "每次请求最多带多少字的档案（按最近活跃取人，超出的会提示用 recall 查）",
+    False,
+)
+FIELD_META["memory.note_chars"] = (
+    "单人档案上限",
+    "一个人的档案最多多少字；到顶后新记录会挤掉最早的条目",
+    False,
+)
+FIELD_META["memory.listen"] = (
+    "旁听群消息",
+    "只记录、不回复。关掉的话机器人只记得 @ 它的那几句，基本等于记不住人",
+    False,
+)
+FIELD_META["memory.listen_groups"] = (
+    "旁听群号",
+    "留空 = 跟「大模型生效群号」一致；多个用逗号分隔",
+    False,
+)
+FIELD_META["memory.digest_hours"] = (
+    "整理间隔（小时）",
+    "多久把新群聊归纳进档案一次；0 = 不自动整理，只能在「群记忆」页手动点",
+    False,
+)
+FIELD_META["memory.digest_msgs"] = (
+    "单次整理条数",
+    "一次最多看多少条新消息（新的优先，太旧的会被丢掉）",
+    False,
+)
+FIELD_META["memory.digest_chars"] = (
+    "整理素材字数",
+    "喂给整理任务的聊天记录最多多少字",
+    False,
+)
+FIELD_META["memory.digest_model"] = (
+    "整理用模型",
+    "留空 = 跟主模型一致；整理是读+归纳，用便宜的小模型也够",
+    False,
+)
+FIELD_META["memory.digest_max_tokens"] = (
+    "整理输出上限",
+    "整理结果是 JSON，太小会被截断导致解析失败",
+    False,
+)
+FIELD_META["memory.keep_days"] = (
+    "记录保留天数",
+    "群聊记录（上下文 + 整理素材）留多少天；0 = 永久保留",
+    False,
+)
 FIELD_META["llm.max_input_chars"] = (
     "提问字数上限",
     "单条提问最多取多少字送模型，超出截断；0 = 不限",
@@ -648,11 +713,12 @@ def build_schema() -> list[dict]:
 SCHEMA = build_schema()
 KEY_INDEX: dict[str, dict] = {f["key"]: f for s in SCHEMA for f in s["fields"]}
 
-#: ``llm`` 段单独挂在「机器人」页，**不再出现在配置页**——避免同一个开关在两处
-#: 都能改、改完互相覆盖。KEY_INDEX 仍然包含它，所以 PATCH 接口照常能写。
-BOT_SECTION = "llm"
-BOT_SCHEMA = [s for s in SCHEMA if s["key"] == BOT_SECTION]
-CONFIG_SCHEMA = [s for s in SCHEMA if s["key"] != BOT_SECTION]
+#: ``llm`` / ``memory`` 两段单独挂在「机器人」页，**不再出现在配置页**——避免
+#: 同一个开关在两处都能改、改完互相覆盖。KEY_INDEX 仍然包含它们，所以 PATCH 接口
+#: 照常能写。记忆跟大模型是一体的：没有模型就没有整理，分两页反而更难理解。
+BOT_SECTIONS = ("llm", "memory")
+BOT_SCHEMA = [s for s in SCHEMA if s["key"] in BOT_SECTIONS]
+CONFIG_SCHEMA = [s for s in SCHEMA if s["key"] not in BOT_SECTIONS]
 
 
 # -------------------------------------------------------------------- 值转换
@@ -1423,6 +1489,139 @@ async def _api_logs(request: Request):
     })
 
 
+# -------------------------------------------------------------------- 群记忆
+
+
+def _memory_payload(person, full: bool = False) -> dict:
+    """一份档案的 JSON 形态。列表页只要摘要，详情页才带全文。"""
+    data = {
+        "uid": person.uid,
+        "nick": person.nick,
+        "display": person.display,
+        "aliases": list(person.aliases),
+        "first_seen": person.first_seen,
+        "last_seen": person.last_seen,
+        "msgs": int(person.msgs),
+        "notes": len(person.notes()),
+        "chars": len(person.body),
+        "summary": person.summary(300),
+    }
+    if full:
+        data["body"] = person.body
+    return data
+
+
+async def _api_memory(request: Request):
+    """群记忆：GET 列表 / 单人文档，POST 保存 / 删除 / 改群概况 / 立即整理。
+
+    一个路由担四件事，是跟着这个 WebUI 里 ``/action`` 的既有风格——前端只用记
+    一个地址，鉴权也只有一处。
+    """
+    if not _token_ok(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    if request.method == "GET":
+        try:
+            gid = int(request.query_params.get("group") or 0)
+        except (TypeError, ValueError):
+            gid = 0
+        if gid <= 0:
+            # 不传群号 = 列一下「哪些群已经有记忆」，前端据此填下拉
+            mem0 = service.config.memory
+            ids = set(memory_mod.list_groups(mem0))
+            try:
+                ids |= set(await service.store.chat_groups())
+            except Exception:  # noqa: BLE001
+                pass
+            return JSONResponse({
+                "ok": True,
+                "root": str(memory_mod.memory_root(mem0)),
+                "groups": [
+                    {"group_id": g, **memory_mod.stats(mem0, g)} for g in sorted(ids)
+                ],
+            })
+        mem = service.cfg(gid).memory
+        uid = (request.query_params.get("uid") or "").strip()
+        if uid:
+            person = memory_mod.load_person(mem, gid, uid)
+            if person is None:
+                return JSONResponse(
+                    {"ok": False, "message": "没有这份档案"}, status_code=404
+                )
+            return JSONResponse({"ok": True, "person": _memory_payload(person, full=True)})
+        people = memory_mod.list_people(mem, gid)
+        return JSONResponse({
+            "ok": True,
+            "enabled": mem.enabled,
+            "people": [_memory_payload(p) for p in people],
+            "group_note": memory_mod.read_group_note(mem, gid),
+            "stats": memory_mod.stats(mem, gid),
+            "log": await service.store.chat_log_stats(gid),
+            "limits": {
+                "note_chars": int(mem.note_chars),
+                "inject_chars": int(mem.inject_chars),
+                "digest_hours": float(mem.digest_hours),
+            },
+        })
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "message": "请求体不是合法 JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "message": "请求体格式不对"}, status_code=400)
+    action = str(body.get("action") or "save")
+    try:
+        gid = int(body.get("group") or 0)
+    except (TypeError, ValueError):
+        gid = 0
+    if gid <= 0:
+        return JSONResponse({"ok": False, "message": "缺少群号"}, status_code=400)
+    mem = service.cfg(gid).memory
+
+    if action == "save":
+        uid = str(body.get("uid") or "").strip()
+        ok, msg = memory_mod.rewrite_body(mem, gid, uid, str(body.get("body") or ""))
+        nick = str(body.get("nick") or "").strip()
+        if ok and nick:
+            person = memory_mod.load_person(mem, gid, uid)
+            if person is not None and person.nick != nick:
+                person.nick = nick[:40]
+                memory_mod.save_person(mem, gid, person)
+        return JSONResponse({"ok": ok, "message": msg}, status_code=200 if ok else 400)
+
+    if action == "delete":
+        uid = str(body.get("uid") or "").strip()
+        gone = memory_mod.delete_person(mem, gid, uid)
+        return JSONResponse(
+            {"ok": gone, "message": "已删除这份档案" if gone else "没有这份档案"},
+            status_code=200 if gone else 404,
+        )
+
+    if action == "group":
+        ok, msg = memory_mod.write_group_note(mem, gid, str(body.get("text") or ""))
+        return JSONResponse({"ok": ok, "message": msg}, status_code=200 if ok else 400)
+
+    if action == "digest":
+        res = await digest_group(gid, mem=mem, force=True)
+        status = res.get("status")
+        if status == "ok":
+            msg = (
+                f"整理完成：{res.get('rows', 0)} 条消息 → "
+                f"{res.get('facts', 0)} 条新记忆（{res.get('people', 0)} 人）"
+            )
+        elif status == "skipped":
+            msg = res.get("why") or "没有新内容"
+        else:
+            msg = f"整理失败：{res.get('why') or '未知原因'}"
+        return JSONResponse(
+            {"ok": status == "ok", "message": msg, "detail": res},
+            status_code=200 if status == "ok" else 400,
+        )
+
+    return JSONResponse({"ok": False, "message": f"未知操作: {action}"}, status_code=400)
+
+
 # -------------------------------------------------------------------- 机器人（大模型）
 
 
@@ -1445,7 +1644,7 @@ def _thinking_status(cfg) -> dict:
     }
 
 
-def _tools_status(cfg) -> dict:
+def _tools_status(cfg, mem=None) -> dict:
     """工具与技能的实际生效情况：哪些工具挂上了、扫到几个技能、抓取依赖装没装。
 
     只看开关不够——技能目录不存在、trafilatura 没装时，开关开着也等于没有。
@@ -1456,7 +1655,7 @@ def _tools_status(cfg) -> dict:
     root = ""
     try:
         root = str(tools_mod.skills_root(cfg))
-        names = [t.name for t in tools_mod.build(cfg)[0]]
+        names = [t.name for t in tools_mod.build(cfg, 0, 0, "", mem)[0]]
         if cfg.skills:
             skills = [s.name for s in skills_mod.discover(tools_mod.skills_root(cfg))]
     except Exception:  # noqa: BLE001 — 状态接口不该因为一个坏技能 500
@@ -1469,6 +1668,7 @@ def _tools_status(cfg) -> dict:
         "skills_dir": root,
         "scripts": bool(cfg.skill_scripts),
         "fetch_ready": webtool.available(),
+        "memory_tools": [n for n in names if n in ("remember", "recall", "forget")],
     }
 
 
@@ -1480,9 +1680,13 @@ async def _api_bot(request: Request):
     """
     if not _token_ok(request):
         raise HTTPException(status_code=401, detail="unauthorized")
-    cfg = effective_config(None).llm
+    app_cfg = effective_config(None)
+    cfg = app_cfg.llm
+    mem = app_cfg.memory
     values = {
-        k: v for k, v in current_values(None).items() if k.startswith(f"{BOT_SECTION}.")
+        k: v
+        for k, v in current_values(None).items()
+        if k.startswith("llm.") or k.startswith("memory.")
     }
     return JSONResponse({
         "schema": BOT_SCHEMA,
@@ -1505,7 +1709,21 @@ async def _api_bot(request: Request):
             # 思考模式：档位 + 实际采用的写法 + 真实强度/预算（可能被 max_tokens 压过）
             "thinking": _thinking_status(cfg),
             # 工具与技能：真的挂上了哪些、扫到几个技能、抓取依赖装没装
-            "tools": _tools_status(cfg),
+            "tools": _tools_status(cfg, mem),
+            # 群记忆：开没开、醒了多少人、攒了多少群聊（重启后上下文从这张表恢复）
+            "memory": {
+                "enabled": bool(mem.enabled),
+                "listen": bool(mem.listen),
+                "digest_hours": float(mem.digest_hours),
+                "inject_chars": int(mem.inject_chars),
+                "note_chars": int(mem.note_chars),
+                "root": str(memory_mod.memory_root(mem)),
+                "groups": {
+                    str(g): memory_mod.stats(mem, g)
+                    for g in memory_mod.list_groups(mem)
+                },
+                "log": await service.store.chat_log_stats(),
+            },
             # 「实际发出去的参数」预览：让「思考模式到底有没有生效」一眼可见
             "payload": payload_preview(cfg),
         },
@@ -1585,6 +1803,7 @@ def register_webui() -> None:
     app.add_api_route("/api/music-admin/admin", _api_admin, methods=["GET", "POST"])
     app.add_api_route("/api/music-admin/account", _api_account, methods=["GET", "POST"])
     app.add_api_route("/api/music-admin/logs", _api_logs, methods=["GET", "POST"])
+    app.add_api_route("/api/music-admin/memory", _api_memory, methods=["GET", "POST"])
     logger.info("[music] WebUI 已挂载: http://<本机IP>:8080/music-admin  (需 token 访问)")
 
 

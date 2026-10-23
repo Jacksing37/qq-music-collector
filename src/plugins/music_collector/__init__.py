@@ -45,6 +45,7 @@ from .detector import (  # noqa: E402
 )
 from .llm import disabled_reason as llm_disabled_reason  # noqa: E402
 from .llm import llm_bot  # noqa: E402
+from . import memory as memory_mod  # noqa: E402
 from .models import PLATFORM_NAMES, Song  # noqa: E402
 from .naming import build_context, render_template, resolve_alias  # noqa: E402
 from .scheduler import reload_jobs  # noqa: E402
@@ -66,6 +67,8 @@ driver = get_driver()
 @driver.on_startup
 async def _startup() -> None:
     await service.setup()
+    # 把持久化后端交给大模型：上下文从此跨重启保留（库里那份才是真相）
+    llm_bot.set_store(service.store)
     ok, info = reload_jobs()
     logger.info(f"[music] 插件初始化完成，定时任务{'已注册' if ok else '注册失败'}\n{info}")
     _webui.register_webui()
@@ -142,6 +145,86 @@ async def _trace_incoming(bot: Bot, event: Event) -> None:
     logger.info(
         f"[music] ← {where} {nick}({event.user_id}): {message_preview(event.message)}"
     )
+
+
+# ----------------------------------------------------- 旁听：给「记住每个人」攒素材
+
+# priority=2、block=False：只观察，绝不回复、也绝不改变任何流程走向。
+# 与 trace_listener 分开是有意的——trace 只写日志（可以关），旁听要落库，
+# 两者开关不同、失败后果也不同。
+listen_listener = on_message(priority=2, block=False)
+
+#: (群号, QQ号) -> 上次更新档案活跃度的 monotonic 时刻。
+#: 每条消息都写一次盘没必要，10 分钟一次足够反映「最近活跃」
+_touch_at: dict[tuple[int, str], float] = {}
+_TOUCH_INTERVAL = 600.0
+
+
+def memory_goal(gid: int) -> tuple[bool, object]:
+    """记忆对该群是否生效。返回 ``(是否旁听, memory 配置)``。
+
+    四个条件缺一不可：记忆总开关、旁听开关、大模型开着（没有模型就没有整理）、
+    群在白名单里（``memory.listen_groups`` 优先，留空就看 ``llm.groups``）。
+    """
+    app_cfg = service.cfg(gid)
+    mem = app_cfg.memory
+    if not (mem.enabled and mem.listen):
+        return False, mem
+    if not app_cfg.llm.enabled:
+        return False, mem
+    groups = list(mem.listen_groups or app_cfg.llm.groups or [])
+    if groups and gid not in groups:
+        return False, mem
+    return True, mem
+
+
+@listen_listener.handle()
+async def _listen_group_message(bot: Bot, event: GroupMessageEvent) -> None:
+    """把群消息记进 ``chat_log(kind='listen')``，并更新说话人的活跃度。
+
+    **只落库，不回复**。它解决的是「机器人只在被 @ 时才看得见群里的话」这个问题：
+    没有这份素材，「记住每个人」就只能靠运气。
+
+    失败一律静默：磁盘满、目录没权限都不该让群里出现报错。
+    """
+    gid = int(getattr(event, "group_id", 0) or 0)
+    uid = int(getattr(event, "user_id", 0) or 0)
+    if not gid or not uid or uid == int(getattr(event, "self_id", 0) or 0):
+        return
+    ok, mem = memory_goal(gid)
+    if not ok:
+        return
+    text = (event.get_plaintext() or "").strip()
+    # 纯图片 / 表情 / 卡片没有可读文字，记下来也没用
+    if not text:
+        return
+    # 命令不记："/music list" 这类不能反映「这个人平时聊什么」
+    if text.lower().startswith(_COMMAND_PREFIXES):
+        return
+
+    app_cfg = service.cfg(gid)
+    item = max(200, int(app_cfg.llm.history_item_chars))
+    nick = _sender_nick(event)
+    try:
+        await service.store.append_chat(
+            gid, uid, nick, "user", text[:item], kind="listen"
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[memory] 群{gid} 旁听落库失败: {exc}")
+        return
+
+    key = (gid, str(uid))
+    now = time.monotonic()
+    if now - _touch_at.get(key, 0.0) < _TOUCH_INTERVAL:
+        return
+    _touch_at[key] = now
+    try:
+        created = memory_mod.touch(mem, gid, uid, nick)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[memory] 群{gid} 更新活跃度失败: {exc}")
+        return
+    if created:
+        logger.info(f"[memory] 群{gid} 新成员进档：{nick}({uid})")
 
 
 # ----------------------------------------------------- 被 @ 时回复自我介绍
@@ -336,6 +419,8 @@ async def _llm_answer(
         images=list(images or []),
         quote=quote,
         context=context,
+        # 记忆配置挂在 AppConfig 顶层（memory: 段），llm_cfg 里没有它
+        mem=service.cfg(group_id).memory if group_id else None,
     )
     if not reply:
         return False, reason

@@ -347,8 +347,11 @@ def test_install_denied() -> None:
     check("组装出来的工具全在白名单里", set(names) <= tl.ALLOWED_TOOL_NAMES, str(names))
     check("没有任何安装类工具",
           not [n for n in names if tl.looks_like_install(n)], str(names))
-    check("白名单本身就是四个只读工具",
-          tl.ALLOWED_TOOL_NAMES == {"fetch_url", "list_skills", "use_skill", "run_skill_script"},
+    check("白名单就是这七个工具（新增的必须显式加进来）",
+          tl.ALLOWED_TOOL_NAMES == {
+              "fetch_url", "list_skills", "use_skill", "run_skill_script",
+              "remember", "recall", "forget",
+          },
           str(sorted(tl.ALLOWED_TOOL_NAMES)))
 
     # 模型自己编出「装技能 / 写文件」的名字：不能落到 handler，且要明确拒绝

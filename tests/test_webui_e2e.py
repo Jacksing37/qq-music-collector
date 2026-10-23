@@ -60,14 +60,20 @@ def test_endpoints():
         assert ac.status_code == 200
         assert "logged_in" in ac.json()
 
-        # ---- 机器人页（大模型回复）：独立一页，配置页不再出现 llm 段 ----
-        assert all(sec["key"] != "llm" for sec in c.json()["schema"])
+        # ---- 机器人页（大模型回复 + 群记忆）：独立一页，配置页不再出现这两段 ----
+        assert all(sec["key"] not in ("llm", "memory") for sec in c.json()["schema"])
         b = client.get("/api/music-admin/bot", headers=H)
         assert b.status_code == 200
         bj = b.json()
-        assert [sec["key"] for sec in bj["schema"]] == ["llm"]
+        assert [sec["key"] for sec in bj["schema"]] == ["llm", "memory"]
         assert any(k.startswith("llm.") for k in bj["values"])
+        assert any(k.startswith("memory.") for k in bj["values"])
         assert "ready" in bj["status"] and "endpoint" in bj["status"]
+        # 群记忆状态块（enabled / 整理节奏 / 预算 / 落盘目录）
+        assert "memory" in bj["status"]
+        mem_st = bj["status"]["memory"]
+        assert "enabled" in mem_st and "digest_hours" in mem_st and "inject_chars" in mem_st
+        assert "root" in mem_st
         # 未带 token -> 401
         assert client.get("/api/music-admin/bot").status_code == 401
 

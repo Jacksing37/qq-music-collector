@@ -364,7 +364,7 @@ async def test_chat_vision() -> None:
     print("\n[5] chat：vision 开关、max_images、降级重试、历史不存 URL")
 
     q = "这图里是什么 [图片]"
-    image = f"张三：{q}"
+    image = f"张三(1)：{q}"
 
     # (a) vision 关 → 只发字符串，图片被忽略
     bot, calls = make_bot("看到了吗")
@@ -436,7 +436,7 @@ async def test_chat_vision() -> None:
     await bot.chat(8008, 1, "张三", "那这个呢", cfg, quote="（引用 李四 的消息：原唱是谁）")
     sent = calls[-1][-1]["content"]
     check("引用在提问前面", sent.startswith("（引用 李四 的消息：原唱是谁）"), repr(sent[:40]))
-    check("提问仍在", "张三：那这个呢" in sent, repr(sent))
+    check("提问仍在", "张三(1)：那这个呢" in sent, repr(sent))
     check("引用写进历史", "原唱是谁" in bot._history[8008][0]["content"],
           bot._history[8008][0]["content"])
 

@@ -25,12 +25,14 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from . import memory as memory_mod
 from . import tools as tools_mod
-from .config import LLMConfig
+from .config import LLMConfig, MemoryConfig
 
 logger = logging.getLogger("music_collector.llm")
 
-#: 单条历史消息的字符上限（防止某条超长消息长期占着上下文窗口）
+#: 单条历史消息的字符上限**兜底值**（真正生效的是 ``llm.history_item_chars``）。
+#: 以前写死 600 会把人家长回复腰斩，模型下一轮就看不懂自己在说什么了。
 _HISTORY_CHAR_LIMIT = 600
 
 #: 系统提示词字符上限。人设写得再长也不该吃掉半个上下文窗口。
@@ -287,12 +289,15 @@ def without_images(messages: list[dict], text: str) -> list[dict]:
     return head
 
 
-def system_text(cfg: LLMConfig, rules: str = "") -> str:
+def system_text(cfg: LLMConfig, rules: str = "", memory_text: str = "") -> str:
     """带长度保护的系统提示词（人设再长也不会挤占上下文）。
 
-    ``rules`` 是代码写死的硬规则（目前只有工具能力边界，见
-    :data:`tools.TOOL_RULES`）。它**拼在截断之后**，这样用户把人设写满 4000 字也
-    挤不掉「聊天里装不了技能」这条。
+    拼接顺序是 **人设 → 记忆 → 硬规则**，两个理由：
+
+    - ``rules`` 是代码写死的硬规则（见 :data:`tools.TOOL_RULES`），必须排在最后、
+      且**拼在截断之后**——用户把人设写满 4000 字也挤不掉「聊天里装不了技能」；
+    - ``memory_text`` 是群成员档案（见 :mod:`memory`），它只会随人数增长、
+      不该挤占人设位置，也不该盖住能力边界。
     """
     prompt = (cfg.system_prompt or "").strip()
     if len(prompt) > SYSTEM_CHAR_LIMIT:
@@ -300,7 +305,7 @@ def system_text(cfg: LLMConfig, rules: str = "") -> str:
             f"[llm] system_prompt 过长（{len(prompt)} 字），已截断到 {SYSTEM_CHAR_LIMIT} 字"
         )
         prompt = prompt[:SYSTEM_CHAR_LIMIT]
-    return prompt + (rules or "")
+    return prompt + (memory_text or "") + (rules or "")
 
 
 def is_reasoning_model(model: str) -> bool:
@@ -528,7 +533,7 @@ class LLMBot:
     """大模型回复器（进程内单例，按群维护上下文与并发锁）。"""
 
     def __init__(self) -> None:
-        #: 群号 -> 最近几轮 [{"role","content"}]
+        #: 群号 -> 最近几轮 [{"role","content"}]（内存视图，进程内热数据）
         self._history: dict[int, deque[dict]] = {}
         #: 群号 -> 锁：同一个群的并发 @ 排队，别把上下文搅乱
         self._locks: dict[int, asyncio.Lock] = {}
@@ -536,6 +541,71 @@ class LLMBot:
         self._last_reply: dict[tuple[int, int], float] = {}
         #: 最近一次失败原因（网页端「测试连接」与日志排查用）
         self.last_error: str = ""
+        #: 持久化后端（有 ``load_chat`` / ``append_chat`` 的 store）。注入后
+        #: 上下文**跨重启保留**——这就是「持久化上下文」的全部机制
+        self._store = None
+        #: 已经从库里预热过的群，避免每次请求都读库
+        self._history_loaded: set[int] = set()
+        #: 已点了「清空上下文」但还没来得及清库的群
+        self._pending_clear: set[int] = set()
+        #: 一次性清空全部（用户点「清空所有群」时置位，下次任意群 sync 时执行）
+        self._clear_all: bool = False
+
+    # ------------------------------------------------------------ 持久化
+
+    def set_store(self, store) -> None:
+        """注入持久化后端。**不注入就退化成纯内存**（测试、离线场景）。"""
+        self._store = store
+
+    async def _sync_history(self, group_id: int, cfg: LLMConfig) -> None:
+        """把该群的历史从库里预热到内存；顺带执行「用户要求的清空」。
+
+        只在**每群第一次**真正发请求时读一次库，之后都走内存——否则每条消息
+        都要扫一遍几万行，白白拖慢回复。
+
+        注意顺序：清空标记要在「已加载」判断之前处理，否则用户点了清空之后
+        新消息进来会看到旧上下文复活。
+        """
+        if self._store is None:
+            return
+        if self._clear_all:
+            self._clear_all = False
+            self._pending_clear.clear()
+            self._history_loaded.clear()
+            self._history.clear()
+            for gid in await self._store.chat_groups():
+                await self._store.clear_chat(gid, kind="chat")
+            return
+        if group_id in self._pending_clear:
+            self._pending_clear.discard(group_id)
+            self._history_loaded.discard(group_id)
+            await self._store.clear_chat(group_id, kind="chat")
+            return
+        if group_id in self._history_loaded:
+            return
+        self._history_loaded.add(group_id)
+        try:
+            since = 0.0
+            if cfg.history_days > 0:
+                since = time.time() - float(cfg.history_days) * 86400
+            # 预热多少条：轮数×2 就是全部需要，但封顶 4000 条防止一次读爆内存
+            limit = max(2, min(4000, int(cfg.history_rounds) * 2))
+            rows = await self._store.load_chat(
+                group_id, kind="chat", limit=limit, since=since
+            )
+        except Exception as exc:  # noqa: BLE001 — 读库失败就用空历史
+            logger.warning(f"[llm] 群{group_id} 载入历史失败（按空历史继续）: {exc}")
+            return
+        if not rows:
+            return
+        box = self._history.setdefault(group_id, deque())
+        box.clear()
+        for row in rows:
+            box.append(row)
+        logger.info(
+            f"[llm] 群{group_id} 从库里恢复 {len(rows)} 条历史"
+            f"（{sum(message_chars(m) for m in rows)} 字）"
+        )
 
     # ------------------------------------------------------------ 上下文
 
@@ -589,12 +659,23 @@ class LLMBot:
         return msgs
 
     def clear_history(self, group_id: Optional[int] = None) -> int:
-        """清空上下文：传群号只清该群，不传清全部。返回清掉的群数。"""
+        """清空上下文（内存 + 库）：传群号只清该群，不传清全部。返回清掉的群数。
+
+        库里那份**不能在这里删**：这是个同步方法，网页端点一下就直接返回了。
+        这里只记个标记，等下一次真正发请求时由 :meth:`_sync_history` 落库删除。
+        """
         if group_id is None:
             n = len(self._history)
             self._history.clear()
+            self._history_loaded.clear()
+            self._pending_clear.clear()
+            self._clear_all = True
             return n
-        return 1 if self._history.pop(int(group_id), None) is not None else 0
+        gid = int(group_id)
+        had = self._history.pop(gid, None) is not None
+        self._history_loaded.discard(gid)
+        self._pending_clear.add(gid)
+        return 1 if had or self._store is not None else 0
 
     def cooldown_left(self, group_id: int, user_id: int, cooldown: int) -> float:
         """距离上次回复还要等几秒；<=0 表示可以回了。"""
@@ -723,13 +804,15 @@ class LLMBot:
         images: Optional[list[str]] = None,
         quote: str = "",
         context: str = "",
+        mem: Optional[MemoryConfig] = None,
     ) -> tuple[Optional[str], str]:
         """生成一条回复。
 
         ``images`` 是图片链接（``llm.vision`` 关着时会被忽略，只在文字里留
         ``[图片]`` 标记）；``quote`` 是被引用消息压成的一句前缀；
         ``context`` 是**当次**附带的参考资料（网页正文 / 转发记录），
-        只拼进这次请求，不写进上下文历史。
+        只拼进这次请求，不写进上下文历史；``mem`` 是记忆配置（不传就用默认值，
+        指向 ``data/memory``）。
 
         返回 ``(回复文本, 原因)``：
 
@@ -749,10 +832,13 @@ class LLMBot:
             question = question[: cfg.max_input_chars].rstrip() + "…"
 
         # 昵称进 prompt 有助于模型称呼提问者；顺带做一次长度保护
-        speaker = (nick or str(user_id)).strip()[:_HISTORY_CHAR_LIMIT]
+        item_limit = max(200, int(cfg.history_item_chars or _HISTORY_CHAR_LIMIT))
+        speaker = (nick or str(user_id)).strip()[:item_limit]
 
-        # 纯文本版本：写历史、以及「上游不认图」降级时都用它，绝不带 URL
-        body = f"{speaker}：{question}"
+        # 纯文本版本：写历史、以及「上游不认图」降级时都用它，绝不带 URL。
+        # 带上 QQ 号是有意的：模型要调 remember 记「这个人」时，必须有稳定标识，
+        # 光靠昵称会撞名（群里两个「小明」太常见了）。
+        body = f"{speaker}({user_id})：{question}"
         if quote:
             body = f"{quote}\n{body}"
 
@@ -766,9 +852,17 @@ class LLMBot:
             return None, "cooldown"
 
         async with self._lock(group_id):
+            memory_cfg = mem if mem is not None else MemoryConfig()
+            # 每群第一次发请求时把历史从库里捞回来（重启后也能接上话）
+            await self._sync_history(group_id, cfg)
             # 工具一开就是「agent 模式」：能力边界（不许装技能、不许写文件）由代码
-            # 追加在系统提示词末尾，用户改人设也删不掉。
-            system = system_text(cfg, tools_mod.TOOL_RULES if cfg.tools else "")
+            # 追加在系统提示词末尾，用户改人设也删不掉。群成员档案插在人设之后，
+            # 硬规则之前——档案再长也盖不掉能力边界。
+            system = system_text(
+                cfg,
+                tools_mod.TOOL_RULES if cfg.tools else "",
+                memory_mod.render_for_prompt(memory_cfg, group_id),
+            )
             base: list[dict] = []
             if system:
                 base.append({"role": "system", "content": system})
@@ -790,7 +884,9 @@ class LLMBot:
             tool_ctx = None
             tool_schemas: list[dict] = []
             if cfg.tools and cfg.tool_rounds > 0:
-                tool_list, tool_ctx = tools_mod.build(cfg, group_id, user_id)
+                tool_list, tool_ctx = tools_mod.build(
+                    cfg, group_id, user_id, speaker, memory_cfg
+                )
                 tool_schemas = tools_mod.schemas(tool_list)
 
             allow_drop_images = bool(pics)
@@ -860,14 +956,29 @@ class LLMBot:
             # 存进去反而会让「按两条一裁」的历史裁剪拆散 tool_call 与它的结果。
             if cfg.history_rounds > 0:
                 hist_box = self._history.setdefault(group_id, deque())
-                hist_box.append({"role": "user", "content": body[:_HISTORY_CHAR_LIMIT]})
-                entry: dict = {"role": "assistant", "content": reply[:_HISTORY_CHAR_LIMIT]}
+                hist_box.append({"role": "user", "content": body[:item_limit]})
+                entry: dict = {"role": "assistant", "content": reply[:item_limit]}
                 if reasoning:
-                    entry["reasoning_content"] = reasoning[:_HISTORY_CHAR_LIMIT]
+                    entry["reasoning_content"] = reasoning[:item_limit]
                 hist_box.append(entry)
                 keep = max(2, cfg.history_rounds * 2)
                 while len(hist_box) > keep:
                     hist_box.popleft()
+
+            # 落库**不受 history_rounds 限制**：即使关了上下文，这些对话仍然是
+            # 记忆整理任务的素材。写库失败只记一条日志，绝不拖累「已经把回复发出去了」
+            # 这个结果。
+            if self._store is not None:
+                try:
+                    await self._store.append_chat(
+                        group_id, user_id, speaker, "user", body[:item_limit], kind="chat"
+                    )
+                    await self._store.append_chat(
+                        group_id, 0, "", "assistant", reply[:item_limit],
+                        reasoning[:item_limit], kind="chat",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[llm] 群{group_id} 对话落库失败: {exc}")
 
         self._last_reply[(int(group_id), int(user_id))] = time.monotonic()
         pics_note = f"，图 {len(pics)} 张" if pics else ""
@@ -878,6 +989,47 @@ class LLMBot:
             f" → 回复 {len(reply)} 字{tool_note}（model={cfg.model}）"
         )
         return reply, ""
+
+    async def complete(
+        self,
+        prompt: str,
+        cfg: LLMConfig,
+        *,
+        system: str = "",
+        model: str = "",
+        max_tokens: int = 0,
+        temperature: float = 0.3,
+    ) -> tuple[str, str]:
+        """一次性纯文本补全：不带历史、不带工具、不占冷却、不写上下文。
+
+        专给后台任务用（目前是「整理群成员记忆」）。这类任务要的是模型的阅读
+        理解能力，不是聊天人格——所以 ``system`` 由调用方给任务说明，**不拼人设
+        也不拼记忆**，免得让它总结别人的时候先把自己的人设演一遍。
+
+        返回 ``(正文, 错误原因)``；失败时正文是空串，不抛异常。
+        """
+        text = (prompt or "").strip()
+        if not text:
+            return "", "empty"
+        messages: list[dict] = []
+        if (system or "").strip():
+            messages.append({"role": "system", "content": system.strip()})
+        messages.append({"role": "user", "content": text})
+        probe = cfg.model_copy(
+            update={
+                "model": (model or cfg.model),
+                "max_tokens": int(max_tokens or cfg.max_tokens),
+                "temperature": float(temperature),
+                # 整理任务是「读一遍、归纳一下」，不需要长思考：既省钱也省时间
+                "thinking": "off",
+            }
+        )
+        try:
+            msg = as_message(await self._post_chat(messages, probe))
+            return message_text(msg), ""
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[llm] 一次性调用失败（model={probe.model}）: {exc}")
+            return "", str(exc)
 
     async def test(self, cfg: LLMConfig, prompt: str = "用一句话介绍你自己") -> tuple[bool, str]:
         """网页端「测试连接」：发一条最小请求，返回是否成功 + 可读结果。"""

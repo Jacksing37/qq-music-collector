@@ -208,7 +208,7 @@ async def test_chat_success_and_history() -> None:
     check("system 末尾带工具能力边界",
           sent[0]["content"].endswith("不要假装完成。") and "安装/卸载/修改技能的权限" in sent[0]["content"],
           sent[0]["content"][-60:])
-    check("末条是 user 且带昵称", sent[-1]["role"] == "user" and sent[-1]["content"] == "张三：在吗",
+    check("末条是 user 且带昵称+QQ号", sent[-1]["role"] == "user" and sent[-1]["content"] == "张三(42)：在吗",
           repr(sent[-1]))
     check("历史记了 2 条（问 + 答）", len(bot.history(GID)) == 2)
     check("history_sizes 有该群", bot.history_sizes().get(GID) == 2)
@@ -217,7 +217,7 @@ async def test_chat_success_and_history() -> None:
     await bot.chat(GID, 42, "张三", "第二句", cfg)
     second = calls[1]
     check("第二轮带上下文（system + 2 历史 + 本轮 = 4 条）", len(second) == 4, str(len(second)))
-    check("历史顺序正确", second[1]["content"] == "张三：在吗" and second[2]["content"] == "你好呀")
+    check("历史顺序正确", second[1]["content"] == "张三(42)：在吗" and second[2]["content"] == "你好呀")
 
     # 轮数上限：history_rounds=1 时只留最后一轮
     cfg.history_rounds = 1
@@ -308,7 +308,14 @@ def test_config_and_schema() -> None:
     config_manager.config.llm.model = "test-model"
 
     check("配置页不含 llm 段", all(s["key"] != "llm" for s in CONFIG_SCHEMA))
-    check("「机器人」页只含 llm 段", [s["key"] for s in BOT_SCHEMA] == ["llm"])
+    check("「机器人」页含 llm 与 memory 两段",
+          [s["key"] for s in BOT_SCHEMA] == ["llm", "memory"])
+    mem_fields = [f["key"] for f in BOT_SCHEMA[1]["fields"]]
+    check("memory 段带 enabled/listen/digest_hours", "memory.enabled" in mem_fields
+          and "memory.listen" in mem_fields and "memory.digest_hours" in mem_fields)
+    check("memory 段是可编辑配置（字段数 ≥ 10）", len(mem_fields) >= 10, str(len(mem_fields)))
+    mem_keys = [k for k in KEY_INDEX if k.startswith("memory.")]
+    check("PATCH 认得 memory.*（KEY_INDEX 完整）", len(mem_keys) >= 12, str(len(mem_keys)))
     llm_keys = [k for k in KEY_INDEX if k.startswith("llm.")]
     check("PATCH 仍认得 llm.*（KEY_INDEX 完整）", len(llm_keys) >= 14, str(len(llm_keys)))
     check("api_key 在表单里是密码框", KEY_INDEX["llm.api_key"]["secret"] is True)
@@ -577,7 +584,8 @@ async def test_context_budget() -> None:
     await bot4.chat(gid4, 1, "张三", "在吗", LLMConfig(history_chars=1000, max_input_chars=0))
     check("请求里只剩最近一对历史",
           got["roles"] == ["system", "user", "assistant", "user"], str(got))
-    check("请求总字符远小于原始 6000", got["chars"] < 1500, str(got["chars"]))
+        # 单条上限从硬编码 600 改成 history_item_chars（默认 2000），所以这里放宽到 4000
+    check("请求被预算裁过（远小于原始 6000）", got["chars"] < 4000, str(got["chars"]))
 
     # (f) 系统提示词封顶
     long_cfg = LLMConfig(system_prompt="设" * 5000)
@@ -589,16 +597,25 @@ async def test_context_budget() -> None:
     check("history_chars 默认 3000", LLMConfig().history_chars == 3000)
     check("表单含 llm.history_chars", "llm.history_chars" in KEY_INDEX)
 
-    # (h) 轮数上限放宽到 200（原来 20 就封顶），200 之外仍拒绝；真正的闸门是字数
+    # (h) 轮数上限放宽到 2 万轮（1M 窗口装得下），再大仍拒绝；真正的闸门是字数
     check("history_rounds 允许 200", LLMConfig(history_rounds=200).history_rounds == 200)
-    for bad in (201, 1000):
+    check("history_rounds 允许 20000", LLMConfig(history_rounds=20000).history_rounds == 20000)
+    for bad in (20001, 100000):
         try:
             LLMConfig(history_rounds=bad)
             check(f"history_rounds={bad} 被拒绝", False, "没报错")
         except Exception:
             check(f"history_rounds={bad} 被拒绝", True)
     check("history_rounds=0 仍表示不带上下文", LLMConfig(history_rounds=0).history_rounds == 0)
-    # 200 轮 × 2 条 × 单条 600 字 ≈ 24 万字，字数预算会先截到预算内 → 请求不会因此变大
+    # 上下文上限放到 200 万字（≈94 万 token，实测 250 万字才会撞 1M 窗口）
+    check("history_chars 允许 200 万", LLMConfig(history_chars=2000000).history_chars == 2000000)
+    try:
+        LLMConfig(history_chars=2000001)
+        check("history_chars 超 200 万被拒绝", False, "没报错")
+    except Exception:
+        check("history_chars 超 200 万被拒绝", True)
+    check("单条历史默认放宽到 2000 字", LLMConfig().history_item_chars == 2000)
+    # 200 轮 × 2 条 × 单条 2000 字 ≈ 80 万字，字数预算会先截到预算内 → 请求不会因此变大
     bot5 = LLMBot()
     gid5 = 8206
     d5 = bot5._history.setdefault(gid5, deque())

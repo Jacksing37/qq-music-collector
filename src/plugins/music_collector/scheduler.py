@@ -25,6 +25,7 @@ from nonebot_plugin_apscheduler import scheduler
 
 from .bot_utils import safe_send_group, send_report
 from .config import group_overrides
+from .digest import digest_all
 from .service import service
 from .window import WindowParseError, parse_daily
 
@@ -214,6 +215,17 @@ async def job_clean() -> None:
 
 async def job_prune() -> None:
     """定时清理过期的已收集歌曲（区别于图片缓存清理）。"""
+    # 群聊记录跟着一起清：它是记忆整理任务的素材，留太久只会让库无限长大。
+    # 这一条**不受 clear.scheduled_enabled 控制**——记忆有自己的保留天数。
+    mem = service.config.memory
+    if mem.keep_days and mem.keep_days > 0:
+        before_chat = time.time() - float(mem.keep_days) * 86400
+        dropped = await service.store.prune_chat(before_chat)
+        if dropped:
+            logger.info(
+                f"[memory] 清理过期群聊记录 {dropped} 条（保留 {mem.keep_days} 天）"
+            )
+
     cfg = service.config.clear
     if not cfg.scheduled_enabled:
         return
@@ -235,6 +247,30 @@ async def job_descfix() -> None:
         logger.info(f"[music] 简介补写：成功 {ok} 个，仍失败 {failed} 个")
 
 
+async def job_memory_digest() -> None:
+    """定时整理群成员记忆：把旁听到的群聊归纳进每个人的档案。
+
+    它做的事和 ``remember`` 工具一样，只是**主动**——不用等模型在对话里想起来，
+    隔几小时自己扫一遍。失败只写日志，群里什么都不会看到。
+    """
+    mem = service.config.memory
+    if not mem.enabled or mem.digest_hours <= 0:
+        return
+    result = await digest_all()
+    if not result:
+        return
+    ok = {g: r for g, r in result.items() if r.get("status") == "ok"}
+    bad = {g: r for g, r in result.items() if r.get("status") == "error"}
+    if ok:
+        parts = [
+            f"群{g}:{r.get('facts', 0)}条/{r.get('people', 0)}人" for g, r in ok.items()
+        ]
+        logger.info("[memory] 定时整理完成 " + "；".join(parts))
+    if bad:
+        detail = "；".join(f"群{g}:{r.get('why', '')}" for g, r in bad.items())
+        logger.warning(f"[memory] 定时整理有 {len(bad)} 个群失败：{detail}")
+
+
 _JOB_FUNCS = {
     "start": job_start,
     "summary": job_summary,
@@ -243,6 +279,7 @@ _JOB_FUNCS = {
     "clean": job_clean,
     "prune": job_prune,
     "descfix": job_descfix,
+    "memory_digest": job_memory_digest,
 }
 
 
@@ -303,6 +340,14 @@ def _descfix_spec() -> Optional[tuple[str, str, dict]]:
     return ("descfix", "interval", {"minutes": minutes})
 
 
+def _memory_spec() -> Optional[tuple[str, str, dict]]:
+    """群记忆整理：进程级任务，按全局配置的间隔跑（不看单个群的时间窗口）。"""
+    mem = service.config.memory
+    if not mem.enabled or mem.digest_hours <= 0:
+        return None
+    return ("memory_digest", "interval", {"hours": float(mem.digest_hours)})
+
+
 def _register(name: str, trigger: str, kwargs: dict, group_id: Optional[int] = None):
     """注册一个任务；``group_id`` 非空时任务只处理该群。"""
     func = _JOB_FUNCS[name]
@@ -327,7 +372,7 @@ def reload_jobs() -> tuple[bool, str]:
     except WindowParseError as exc:
         return False, f"时间配置有误，定时任务未生效：{exc}"
 
-    for extra in (_clean_spec(), _prune_spec(), _descfix_spec()):
+    for extra in (_clean_spec(), _prune_spec(), _descfix_spec(), _memory_spec()):
         if extra is not None:
             specs.append(extra)
 

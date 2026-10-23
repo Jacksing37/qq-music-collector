@@ -128,6 +128,26 @@ CREATE TABLE IF NOT EXISTS song_notices (
     created_at  REAL    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_song_notices_group ON song_notices(group_id, message_id);
+
+-- 群聊记录。一张表两个用途，靠 kind 区分：
+--   kind='chat'   与机器人的一问一答 —— 就是「对话上下文」，重启后从这里恢复；
+--   kind='listen' 旁听到的群消息 —— 只喂给记忆整理任务，绝不进请求上下文
+--                （否则群友的闲聊会被当成「机器人和你的对话」，几小时就把窗口撑爆）。
+-- digested 是整理游标：整理任务处理过的行标 1，下次只取 0 的。
+CREATE TABLE IF NOT EXISTS chat_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id    INTEGER NOT NULL,
+    user_id     INTEGER NOT NULL DEFAULT 0,
+    nick        TEXT    NOT NULL DEFAULT '',
+    kind        TEXT    NOT NULL DEFAULT 'chat',
+    role        TEXT    NOT NULL,
+    content     TEXT    NOT NULL,
+    reasoning   TEXT    NOT NULL DEFAULT '',
+    digested    INTEGER NOT NULL DEFAULT 0,
+    created_at  REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chat_log_group ON chat_log(group_id, kind, id);
+CREATE INDEX IF NOT EXISTS idx_chat_log_time ON chat_log(created_at);
 """
 
 _COLUMNS = (
@@ -1005,3 +1025,184 @@ class Store:
                 ) as cur:
                     rows = await cur.fetchall()
         return [(r["window_key"], int(r["n"])) for r in rows]
+
+    # ------------------------------------------- 群聊记录（上下文 / 记忆素材）
+
+    async def append_chat(
+        self,
+        group_id: int,
+        user_id: int = 0,
+        nick: str = "",
+        role: str = "user",
+        content: str = "",
+        reasoning: str = "",
+        kind: str = "chat",
+        created_at: Optional[float] = None,
+    ) -> int:
+        """写一行群聊记录，返回行 id；内容为空则跳过（返回 0）。
+
+        ``kind='chat'`` 是与机器人的对话（= 上下文），``kind='listen'`` 是旁听到的
+        群消息（只给记忆整理用）。两者混在一张表里是因为它们共用「按群按时间」
+        这一个索引；靠 kind 隔开就不会互相污染。
+        """
+        text = str(content or "")
+        if not text.strip():
+            return 0
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "INSERT INTO chat_log"
+                "(group_id,user_id,nick,kind,role,content,reasoning,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    int(group_id),
+                    int(user_id or 0),
+                    str(nick or "")[:64],
+                    str(kind),
+                    str(role),
+                    text,
+                    str(reasoning or ""),
+                    float(created_at if created_at is not None else time.time()),
+                ),
+            )
+            await db.commit()
+            return int(cur.lastrowid or 0)
+
+    async def load_chat(
+        self,
+        group_id: int,
+        *,
+        kind: str = "chat",
+        max_chars: int = 0,
+        limit: int = 0,
+        since: float = 0.0,
+    ) -> list[dict]:
+        """按时间正序取上下文消息，返回 ``[{role, content[, reasoning_content]}]``。
+
+        两个约束要注意：
+
+        - ``limit`` 是「最新的 N 行」，取完再反转成正序；
+        - ``max_chars`` 超预算时从**最旧**的一对（user + assistant）开始丢——
+          按单条丢会把某一轮的问答拆开，模型看到「答非所问」的历史只会更糊涂。
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            sql = "SELECT id, role, content, reasoning FROM chat_log WHERE group_id=? AND kind=?"
+            params: list[object] = [int(group_id), str(kind)]
+            if since > 0:
+                sql += " AND created_at>=?"
+                params.append(float(since))
+            sql += " ORDER BY id DESC"
+            if limit > 0:
+                sql += " LIMIT ?"
+                params.append(int(limit))
+            async with db.execute(sql, params) as cur:
+                rows = await cur.fetchall()
+
+        msgs: list[dict] = []
+        for row in reversed(rows):
+            item = {"role": row["role"], "content": row["content"]}
+            if row["reasoning"]:
+                item["reasoning_content"] = row["reasoning"]
+            msgs.append(item)
+
+        def size(msg: dict) -> int:
+            return len(msg.get("content") or "") + len(msg.get("reasoning_content") or "")
+
+        # 首条必须是 user：limit 截断后很容易以 assistant 开头
+        while msgs and msgs[0]["role"] != "user":
+            msgs.pop(0)
+        if max_chars and max_chars > 0:
+            total = sum(size(m) for m in msgs)
+            while len(msgs) > 2 and total > max_chars:
+                total -= size(msgs.pop(0))
+                if msgs and msgs[0]["role"] == "assistant":
+                    total -= size(msgs.pop(0))
+        return msgs
+
+    async def pending_digest(
+        self, group_id: int, *, limit: int = 300, since: float = 0.0
+    ) -> list[dict]:
+        """取「还没整理过的群友消息」，按时间正序，只保留最新的 ``limit`` 条。
+
+        只取 ``role='user'``：机器人自己的回复对「这个人是什么样」没有信息量，
+        混进去反而会让模型把自己的口气当成成员特征。
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            sql = (
+                "SELECT id, user_id, nick, content, created_at FROM chat_log "
+                "WHERE group_id=? AND role='user' AND digested=0"
+            )
+            params: list[object] = [int(group_id)]
+            if since > 0:
+                sql += " AND created_at>=?"
+                params.append(float(since))
+            sql += " ORDER BY id DESC LIMIT ?"
+            params.append(max(1, int(limit)))
+            async with db.execute(sql, params) as cur:
+                rows = await cur.fetchall()
+        return [dict(r) for r in reversed(rows)]
+
+    async def mark_digested(self, group_id: int, up_to_id: int = 0) -> int:
+        """把该群 ``id <= up_to_id`` 的**群友消息**标成已整理。返回影响行数。
+
+        只标 ``role='user'``：整理任务本来就只看群友说的话，把机器人的回复也标掉
+        只会让「已整理条数」这个数字失真，排查时还会以为漏了内容。
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "UPDATE chat_log SET digested=1 "
+                "WHERE group_id=? AND id<=? AND digested=0 AND role='user'",
+                (int(group_id), int(up_to_id)),
+            )
+            await db.commit()
+            return int(cur.rowcount or 0)
+
+    async def chat_log_stats(self, group_id: Optional[int] = None) -> dict:
+        """群聊记录的规模统计（网页状态区用）：条数、未整理数、最早时间。"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            where = "" if group_id is None else " WHERE group_id=?"
+            params: tuple = () if group_id is None else (int(group_id),)
+            async with db.execute(
+                "SELECT COUNT(*) AS n, MIN(created_at) AS oldest, "
+                "SUM(CASE WHEN digested=0 AND role='user' THEN 1 ELSE 0 END) AS pending, "
+                "SUM(LENGTH(content)) AS chars FROM chat_log" + where,
+                params,
+            ) as cur:
+                row = await cur.fetchone()
+        return {
+            "rows": int(row["n"] or 0) if row else 0,
+            "pending": int(row["pending"] or 0) if row else 0,
+            "chars": int(row["chars"] or 0) if row else 0,
+            "oldest": float(row["oldest"] or 0) if row else 0.0,
+        }
+
+    async def chat_groups(self) -> list[int]:
+        """出现过群聊记录的群号（定时整理按这个列表遍历）。"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT DISTINCT group_id FROM chat_log ORDER BY group_id"
+            ) as cur:
+                rows = await cur.fetchall()
+        return [int(r[0]) for r in rows]
+
+    async def prune_chat(self, before_ts: float) -> int:
+        """删除早于 ``before_ts`` 的群聊记录（上下文与整理素材一并清）。"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute("DELETE FROM chat_log WHERE created_at < ?", (before_ts,))
+            await db.commit()
+        return int(cur.rowcount or 0)
+
+    async def clear_chat(self, group_id: int, kind: Optional[str] = None) -> int:
+        """清空某群的群聊记录：``kind`` 为空时连上下文带旁听一起清。"""
+        async with aiosqlite.connect(self.db_path) as db:
+            if kind is None:
+                cur = await db.execute("DELETE FROM chat_log WHERE group_id=?", (int(group_id),))
+            else:
+                cur = await db.execute(
+                    "DELETE FROM chat_log WHERE group_id=? AND kind=?",
+                    (int(group_id), str(kind)),
+                )
+            await db.commit()
+        return int(cur.rowcount or 0)

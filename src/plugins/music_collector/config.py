@@ -494,12 +494,20 @@ class LLMConfig(BaseModel):
     #: 请求超时（秒）
     timeout: float = Field(30.0, ge=1, le=300)
     #: 携带最近几轮对话作为上下文；0 = 不带（每次都是全新对话）。
-    #: 上限 200 轮是**物理护栏**：deque 保留 rounds×2 条，填太大只是白占内存。
-    #: 真正限制「一次请求多大」的是下面的 history_chars（谁先到头谁生效）。
-    history_rounds: int = Field(3, ge=0, le=200)
-    #: 上下文**总字符**预算：只按轮数限制时，几十轮 × 600 字能把小窗口模型撑爆。
-    #: 超出就从最旧的成对丢弃；0 = 只按轮数限制（不推荐，会直接撞模型窗口）
-    history_chars: int = Field(3000, ge=0, le=100000)
+    #: 真正限制「一次请求多大」的是下面的 history_chars（谁先到头谁生效），
+    #: 这里只是「最多翻多远的记忆」——所以上限放到 2 万轮（1M 窗口够装）。
+    history_rounds: int = Field(3, ge=0, le=20000)
+    #: 上下文**总字符**预算。实测 deepseek 系列中文约 2 字/token，窗口 1M token：
+    #: 200 万字≈947K token 仍能过，250 万字就会 400（1184219 > 1048576）。
+    #: 所以上限留 200 万，实际取值要留出「输出 + 档案 + 系统提示词」的余量。
+    #: 0 = 不限字符（只按轮数），模型窗口装不下时靠 `is_context_overflow` 降级兜底。
+    history_chars: int = Field(3000, ge=0, le=2000000)
+    #: 单条历史消息最多保留多少字。以前硬编码 600，等于「长回复一律腰斩」——
+    #: 想真正记住上下文就得放开；它同时决定落库时单行的长度上限
+    history_item_chars: int = Field(2000, ge=200, le=20000)
+    #: 对话历史在库里保留多少天（0 = 永久）。只影响「从库里载入」的范围，
+    #: 超过天数的旧对话不会进上下文，但会被记忆整理任务用过就不再需要
+    history_days: float = Field(180, ge=0, le=3650)
     #: 同一用户在同一群的冷却秒数，防止刷屏；0 = 不限
     cooldown: int = Field(3, ge=0, le=600)
     # ---- 消息读取（群友发的东西能不能被「看懂」）----
@@ -567,6 +575,46 @@ class LLMConfig(BaseModel):
     link_hint: str = "（这不是音乐平台的歌曲链接，顺口接一句就行，不用当成点歌）"
 
 
+class MemoryConfig(BaseModel):
+    """群成员长期记忆（谁是谁、喜欢什么、说过什么）。
+
+    和 ``llm.history_*`` 的区别值得记清楚：
+
+    - ``llm.history_*`` 是**对话上下文**——只有和机器人说过的话，按预算整个塞进请求；
+    - ``memory`` 是**人物档案**——旁听全群攒出来的「这个人是怎样的」，
+      整理成每人一份 markdown，每次只注入摘要。它是跨对话、跨重启、跨月份的。
+
+    档案落在 ``data/memory/<群号>/`` 下，是普通文本文件：你能直接打开改，
+    模型也只能通过 ``remember`` / ``forget`` 工具在**这个目录里**写。
+    """
+
+    #: 总开关。关掉后不旁听、不注入、也不注册记忆工具（已有档案原样留在磁盘上）
+    enabled: bool = True
+    #: 记忆根目录；留空 = data/memory；相对路径按 data/ 解析
+    dir: str = ""
+    #: 每次请求最多注入多少字的档案。超了按「最近活跃」截断，并在提示里注明还有几人未注入
+    inject_chars: int = Field(60000, ge=1000, le=1000000)
+    #: 单个成员的档案上限。到顶后新记录会挤掉**最早**的条目（并在工具结果里说明）
+    note_chars: int = Field(8000, ge=200, le=100000)
+    #: 是否旁听群消息（只落库不回复）。这是「记住每个人」的前提——
+    #: 不旁听的话，机器人只看得见 @ 它的那几句
+    listen: bool = True
+    #: 旁听哪些群；留空 = 跟 ``llm.groups`` 一致（再留空就是所有群）
+    listen_groups: list[int] = Field(default_factory=list)
+    #: 多久自动整理一次档案（小时）。0 = 不自动整理，只能手动触发
+    digest_hours: float = Field(6.0, ge=0, le=720)
+    #: 一次整理最多看多少条新消息（从最旧的开始丢，新的优先）
+    digest_msgs: int = Field(300, ge=20, le=5000)
+    #: 喂给整理任务的素材最多多少字
+    digest_chars: int = Field(20000, ge=1000, le=300000)
+    #: 整理用哪个模型；留空 = 跟 ``llm.model``
+    digest_model: str = ""
+    #: 整理结果的 token 上限（要输出 JSON，别给太小）
+    digest_max_tokens: int = Field(4000, ge=256, le=32000)
+    #: 群聊记录在库里保留多少天（0 = 永久）。上下文与整理素材共用这张表
+    keep_days: float = Field(180, ge=0, le=3650)
+
+
 class AppConfig(BaseModel):
     #: 总开关
     enabled: bool = True
@@ -595,6 +643,7 @@ class AppConfig(BaseModel):
     master: MasterConfig = Field(default_factory=MasterConfig)
     logs: LogsConfig = Field(default_factory=LogsConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
 
 
 #: 键名里含这些词的配置项属于敏感信息，写日志时打码，别把密码 / cookie / 密钥记进日志页
@@ -784,7 +833,7 @@ GLOBAL_ONLY_KEYS: frozenset[str] = frozenset({
 #: - ``llm.``：这一段的「哪些群启用」由 ``llm.groups`` 自己决定，且按要求只能
 #:   在网页端改；如果允许按群覆盖，会出现「按群改了 base_url 但 groups 没包含自己」
 #:   这种谁也说不清的组合，所以整段锁在全局层
-GLOBAL_ONLY_PREFIXES: tuple[str, ...] = ("logs.", "cache.", "netease.", "llm.")
+GLOBAL_ONLY_PREFIXES: tuple[str, ...] = ("logs.", "cache.", "netease.", "llm.", "memory.")
 
 
 def is_group_scopable(dotted_key: str) -> bool:

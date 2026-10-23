@@ -217,6 +217,20 @@ button:disabled{opacity:.5;cursor:not-allowed}
   background:linear-gradient(135deg,rgba(110,168,254,.22),rgba(167,139,250,.22))}
 .cfg-sec{scroll-margin-top:calc(var(--cfg-stick) + var(--cfg-bar-h) + 72px)}
 
+/* ---- 群记忆 ---- */
+.mem-layout{display:grid;grid-template-columns:300px 1fr;gap:14px;align-items:start}
+@media(max-width:860px){.mem-layout{grid-template-columns:1fr}}
+.mem-side{min-height:340px}
+.mem-body{width:100%;min-height:280px;resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace;
+  font-size:13px;line-height:1.65;background:var(--input);color:var(--txt);
+  border:1px solid var(--card-bd);border-radius:10px;padding:10px}
+.mem-item{display:flex;flex-direction:column;gap:2px;padding:7px 9px;border-radius:9px;cursor:pointer;
+  border:1px solid transparent}
+.mem-item:hover{background:var(--input)}
+.mem-item.active{background:var(--input);border-color:var(--accent)}
+.mem-item .mi-name{font-weight:600;font-size:13px}
+.mem-item .mi-sub{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
 /* 按群配置：被单独覆盖过的项高亮，并给一个「继承全局」的还原按钮 */
 .field.overridden{border-left:3px solid var(--accent2);padding-left:11px;margin-left:-14px}
 .field.overridden .flabel .ink{font-size:11px;color:var(--accent2);border:1px solid var(--accent2);
@@ -307,6 +321,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
     <button class="nav" data-page="master">📚 总库</button>
     <button class="nav" data-page="config">⚙ 配置</button>
     <button class="nav" data-page="bot">🤖 机器人</button>
+    <button class="nav" data-page="memory">🧠 群记忆</button>
     <button class="nav" data-page="aliases">✏ 昵称映射</button>
     <button class="nav" data-page="admin">🛡 管理员</button>
     <button class="nav" data-page="logs">📜 运行日志</button>
@@ -424,6 +439,55 @@ button:disabled{opacity:.5;cursor:not-allowed}
           <span class="msg" id="botMsg"></span>
           <button id="botReset">重置改动</button>
           <button id="botSave" class="btn-primary">保存</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 群记忆 -->
+    <section id="page-memory" class="page hidden">
+      <div class="card">
+        <h2><span class="dot"></span>群成员记忆 · 机器人长期档案</h2>
+        <p class="muted">机器人会旁听群里的话（只记录、不回复），每过几小时把「谁是什么样的」整理进每个人的档案；
+          聊天时这些档案会自动带上，所以它能记住几个月前说过的事，进程重启也不丢。</p>
+        <p class="muted">档案就是服务器上 <code>data/memory/&lt;群号&gt;/people/&lt;QQ号&gt;.md</code> 这些文件——你可以在这里改，也可以直接改文件。
+          记错了就在这儿删掉那一行，机器人下次读到的就是改过的版本。</p>
+        <div class="row">
+          <label class="muted">群：<select id="memGroup"></select></label>
+          <button id="memReload" title="重新读取磁盘上的档案">↻ 刷新</button>
+          <button id="memDigest" class="btn-primary" title="立刻把还没整理过的群聊归纳进档案（不必等定时任务）">🔄 立即整理</button>
+          <div class="spacer"></div>
+          <span class="muted" id="memStats">加载中…</span>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <span class="msg" id="memMsg"></span>
+        </div>
+      </div>
+
+      <div class="mem-layout">
+        <div class="card mem-side">
+          <input id="memSearch" placeholder="搜索昵称 / QQ 号" style="width:100%;margin-bottom:10px">
+          <div id="memPeople"><div class="empty">加载中…</div></div>
+        </div>
+        <div class="card mem-side">
+          <div class="row" style="margin-bottom:8px">
+            <input id="memUid" placeholder="QQ 号" style="flex:0 0 130px">
+            <input id="memNick" placeholder="昵称" style="flex:0 0 140px">
+            <span class="muted" id="memMeta"></span>
+          </div>
+          <textarea id="memBody" class="mem-body" placeholder="选左边一个人，或者直接在这里写一个新档案（记得填昵称）"></textarea>
+          <div class="row end" style="margin-top:10px">
+            <button id="memDelete" title="把这个人的档案整个删掉">🗑 删除档案</button>
+            <button id="memSave" class="btn-primary">💾 保存档案</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2><span class="dot"></span>群概况</h2>
+        <p class="muted">群层面的共识：黑话、常聊的话题、群规、内部梗。这段会跟成员档案一起塞给模型。</p>
+        <textarea id="memGroupNote" class="mem-body" style="min-height:110px" placeholder="（还没有记录）"></textarea>
+        <div class="row end" style="margin-top:10px">
+          <button id="memGroupSave">💾 保存群概况</button>
         </div>
       </div>
     </section>
@@ -613,6 +677,7 @@ function switchPage(name){
   if(name==="master") loadMaster();
   if(name==="config") loadConfig();
   if(name==="bot") loadBot();
+  if(name==="memory") loadMemory();
   if(name==="aliases") loadAliases();
   if(name==="admin") loadAdmin();
   if(name==="logs"){ loadLogs(); startLogTimer(); }
@@ -1395,9 +1460,11 @@ const BOT_GROUPS=[
       + "和「自动抓取」不同——抓不抓、抓哪个由模型判断，不会每条消息都去抓，也不会把无关页面塞进上下文。<br>"
       + "<b>技能</b>：技能目录下每个子目录放一个 <code>SKILL.md</code>（开头写 name / description，正文写步骤），"
       + "模型先看简介、需要时才读全文。加技能不用改代码。<br>"
-      + "🔒 <b>QQ 聊天中禁止安装任何技能</b>（代码硬规则、没有开关）：模型没有写文件/装技能的工具，"
+      + "🔒 <b>QQ 聊天中禁止安装任何技能</b>（代码硬规则、没有开关）：模型没有装技能的工具，"
       + "自己编个 <code>install_skill</code> 也会被拒绝；技能只能在这里配好目录后、由管理员把文件夹放到服务器上。"
       + "开了脚本执行后，脚本跑完还会比对技能目录，往里塞的东西会被还原。<br>"
+      + "唯一的写权限是<b>记忆档案</b>（<code>data/memory/</code>）：模型能用 remember / recall / forget "
+      + "记录群友特征，路径由代码拼死，出不了那个目录；内容在「群记忆」页随时可改可删。<br>"
       + "⚠️ <b>允许执行技能脚本</b>等于「模型能让你服务器上跑代码」，只在完全信任技能来源时打开。",
    keys:["llm.tools","llm.tool_rounds","llm.tool_chars",
          "llm.web_tool","llm.fetch_chars","llm.fetch_timeout",
@@ -1502,6 +1569,23 @@ function renderBotStatus(st){
     parts.push("上下文：无（只在内存里，重启即清空）");
   }
   if(st.last_error) parts.push(`<span style="color:var(--bad)">最近一次失败：${esc(st.last_error)}</span>`);
+  /* 群记忆：旁听有没有在跑、攒了多少素材、库里有没有历史（重启能不能接上话） */
+  const mm=st.memory||{};
+  if(mm.enabled){
+    const gs=mm.groups||{}, glist=Object.keys(gs);
+    const lg=mm.log||{};
+    const people=glist.reduce((n,g)=>n+(gs[g].people||0),0);
+    const chars=glist.reduce((n,g)=>n+(gs[g].chars||0),0);
+    let line = `记忆：<b>${people}</b> 人 / <b>${chars}</b> 字`;
+    line += '　旁听：' + (mm.listen ? '<b>开</b>' : '<span style="color:var(--warn,#b45309)">关</span>');
+    line += `　整理：${Number(mm.digest_hours)>0?("每 "+mm.digest_hours+" 小时"):"仅手动"}`;
+    parts.push(line);
+    parts.push(`资料库：${lg.rows||0} 条群聊记录（未整理 ${lg.pending||0} 条）　目录 <code>${esc(mm.root||"")}</code>`);
+    if(glist.length) parts.push(`有档案的群：` + glist.map(g=>`群${esc(g)}（${gs[g].people||0} 人）`).join("、"));
+    else parts.push(`<span class="muted">还没有人物档案：等群友聊几句，或到「群记忆」页点「立即整理」</span>`);
+  } else {
+    parts.push(`记忆：<b>关闭</b>（不旁听、不注入档案，也不给模型 remember / recall / forget）`);
+  }
   /* 真正发出去的请求体（不含 Key）：排查「参数到底有没有生效」用 */
   if(st.payload && Object.keys(st.payload).length){
     const txt = st.payload.error ? ("参数有问题："+st.payload.error) : JSON.stringify(st.payload,null,1);
@@ -1558,6 +1642,153 @@ $("#botSave").onclick=saveBot;
 $("#botTest").onclick=testBot;
 $("#botClearHist").onclick=clearBotHist;
 $("#botReset").onclick=()=>{ BOT_DIRTY={}; renderBotForm(BOT_SCHEMA, BOT_ORIG); botMsg("已重置本地改动"); };
+
+/* ---- 群记忆 ---- */
+let MEM = {groups:[], people:[], gid:0, uid:"", noteChars:8000, loaded:false};
+
+function memMsg(t, kind){
+  const el=$("#memMsg"); if(!el) return;
+  el.textContent=t||""; el.className="msg"+(kind?(" "+kind):"");
+}
+async function memPost(body){
+  const r=await api("/api/music-admin/memory",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(body)});
+  return await r.json();
+}
+
+async function loadMemory(){
+  try{
+    if(!MEM.loaded){
+      const j=await (await api("/api/music-admin/memory")).json();
+      MEM.groups=j.groups||[]; MEM.loaded=true;
+      const sel=$("#memGroup"); sel.innerHTML="";
+      if(!MEM.groups.length){
+        const op=document.createElement("option");
+        op.value=""; op.textContent="（还没有任何记忆）"; sel.appendChild(op);
+      } else {
+        MEM.groups.forEach(g=>{
+          const op=document.createElement("option");
+          op.value=String(g.group_id);
+          op.textContent=`群 ${g.group_id}（${g.people||0} 人 / ${g.chars||0} 字）`;
+          sel.appendChild(op);
+        });
+        const want=(new URLSearchParams(location.search).get("group")||"").trim();
+        if(want && MEM.groups.some(g=>String(g.group_id)===want)) sel.value=want;
+      }
+      MEM.gid=parseInt(sel.value||"0",10)||0;
+    }
+    await loadMemoryGroup();
+  }catch(e){ if(e.message!=="unauthorized") memMsg("加载失败: "+e.message,"bad"); }
+}
+
+async function loadMemoryGroup(){
+  const gid=MEM.gid;
+  if(!gid){
+    $("#memPeople").innerHTML='<div class="empty">还没有任何记录。等群里聊几句、或者去「机器人 → 工具与技能」确认记忆是开着的。</div>';
+    $("#memStats").textContent="—"; $("#memGroupNote").value="";
+    $("#memBody").value=""; $("#memNick").value=""; $("#memUid").value=""; $("#memMeta").textContent="";
+    return;
+  }
+  const j=await (await api("/api/music-admin/memory?group="+gid)).json();
+  if(!j.ok){ memMsg(j.message||"读取失败","bad"); return; }
+  MEM.people=j.people||[];
+  MEM.noteChars=(j.limits&&j.limits.note_chars)||8000;
+  const st=j.stats||{}, lg=j.log||{};
+  $("#memStats").textContent =
+    `${st.people||0} 人 / ${st.chars||0} 字 ｜ 群聊记录 ${lg.rows||0} 条（未整理 ${lg.pending||0}）`
+    + ` ｜ 每 ${(j.limits&&j.limits.digest_hours)||0} 小时自动整理`;
+  $("#memGroupNote").value=j.group_note||"";
+  if(!j.enabled) memMsg("记忆功能当前是关闭的（档案还能看和改，但不会再自动更新）","bad");
+  renderMemPeople();
+  if(MEM.people.length) await selectMemPerson(MEM.people[0].uid);
+  else { $("#memBody").value=""; $("#memNick").value=""; $("#memUid").value=""; $("#memMeta").textContent=""; }
+}
+
+function renderMemPeople(){
+  const q=($("#memSearch").value||"").trim().toLowerCase();
+  const box=$("#memPeople"); box.innerHTML="";
+  const rows=MEM.people.filter(p=> !q
+    || String(p.display||"").toLowerCase().includes(q)
+    || String(p.summary||"").toLowerCase().includes(q));
+  if(!rows.length){
+    box.innerHTML='<div class="empty">'+(MEM.people.length?"没有匹配的人":"这个群还没有人物档案")+'</div>';
+    return;
+  }
+  rows.forEach(p=>{
+    const d=document.createElement("div");
+    d.className="mem-item"+(p.uid===MEM.uid?" active":"");
+    d.dataset.uid=p.uid;
+    d.innerHTML=`<div class="mi-name">${esc(p.display)}</div>
+      <div class="mi-sub">${p.notes||0} 条 ｜ ${esc(p.last_seen||"")}</div>
+      <div class="mi-sub">${esc(p.summary||"")}</div>`;
+    d.onclick=()=>selectMemPerson(p.uid);
+    box.appendChild(d);
+  });
+}
+
+async function selectMemPerson(uid){
+  MEM.uid=uid;
+  document.querySelectorAll(".mem-item").forEach(d=>d.classList.toggle("active", d.dataset.uid===uid));
+  try{
+    const j=await (await api(`/api/music-admin/memory?group=${MEM.gid}&uid=${encodeURIComponent(uid)}`)).json();
+    if(!j.ok){ memMsg(j.message||"读取失败","bad"); return; }
+    const p=j.person;
+    MEM.uid=p.uid;
+    $("#memUid").value=p.uid;
+    $("#memNick").value=p.nick||"";
+    $("#memBody").value=p.body||"";
+    $("#memMeta").textContent=`首次 ${p.first_seen||"?"} ｜ 最后 ${p.last_seen||"?"} ｜ 消息 ${p.msgs||0} 条 ｜ ${p.chars||0}/${MEM.noteChars} 字`;
+  }catch(e){ memMsg("读取失败: "+e.message,"bad"); }
+}
+
+async function saveMemPerson(){
+  const uid=($("#memUid").value||"").trim();
+  if(!uid){ memMsg("先填 QQ 号（左边选人会自动带出来）","bad"); return; }
+  if(!/^\d{1,20}$/.test(uid)){ memMsg("QQ 号只能是数字","bad"); return; }
+  try{
+    const j=await memPost({action:"save", group:MEM.gid, uid, nick:$("#memNick").value.trim(),
+      body:$("#memBody").value});
+    memMsg(j.message||(j.ok?"已保存":"保存失败"), j.ok?"ok":"bad");
+    if(j.ok){ MEM.loaded=false; await loadMemory(); }
+  }catch(e){ memMsg("保存失败: "+e.message,"bad"); }
+}
+
+async function deleteMemPerson(){
+  const uid=($("#memUid").value||"").trim();
+  if(!uid){ memMsg("先选一个人","bad"); return; }
+  if(!confirm(`确定删掉 ${uid} 的整份档案？删除后模型就完全不记得这个人了。`)) return;
+  try{
+    const j=await memPost({action:"delete", group:MEM.gid, uid});
+    memMsg(j.message||"已删除", j.ok?"ok":"bad");
+    if(j.ok){ MEM.uid=""; MEM.loaded=false; await loadMemory(); }
+  }catch(e){ memMsg("删除失败: "+e.message,"bad"); }
+}
+
+async function saveMemGroupNote(){
+  try{
+    const j=await memPost({action:"group", group:MEM.gid, text:$("#memGroupNote").value});
+    memMsg(j.message||(j.ok?"已保存":"保存失败"), j.ok?"ok":"bad");
+  }catch(e){ memMsg("保存失败: "+e.message,"bad"); }
+}
+
+async function digestNow(){
+  const btn=$("#memDigest");
+  btn.disabled=true; memMsg("正在让模型读这段时间的群聊…（可能要几十秒）");
+  try{
+    const j=await memPost({action:"digest", group:MEM.gid});
+    memMsg(j.message||(j.ok?"整理完成":"整理失败"), j.ok?"ok":"bad");
+    if(j.ok){ MEM.loaded=false; await loadMemory(); }
+  }catch(e){ memMsg("整理失败: "+e.message,"bad"); }
+  finally{ btn.disabled=false; }
+}
+
+$("#memGroup").onchange=()=>{ MEM.gid=parseInt($("#memGroup").value||"0",10)||0; MEM.uid=""; loadMemoryGroup(); };
+$("#memReload").onclick=()=>{ MEM.loaded=false; MEM.uid=""; loadMemory(); };
+$("#memDigest").onclick=digestNow;
+$("#memSave").onclick=saveMemPerson;
+$("#memDelete").onclick=deleteMemPerson;
+$("#memGroupSave").onclick=saveMemGroupNote;
+$("#memSearch").oninput=renderMemPeople;
 
 /* ---- 昵称映射 ---- */
 function dictToLines(m){ return Object.keys(m||{}).map(k=>k+"="+m[k]).join("\n"); }

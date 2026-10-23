@@ -32,9 +32,10 @@ from typing import Awaitable, Callable, Optional
 
 from nonebot.log import logger
 
+from . import memory as memory_mod
 from . import skills as skill_mod
 from . import webtool
-from .config import DATA_DIR, LLMConfig
+from .config import DATA_DIR, LLMConfig, MemoryConfig
 
 #: 单次工具结果回填给模型的最大字符数（兜底，具体值由 ``llm.tool_chars`` 控制）
 DEFAULT_TOOL_CHARS = 2000
@@ -42,7 +43,9 @@ DEFAULT_TOOL_CHARS = 2000
 #: 允许出现在 QQ 会话里的工具名（白名单，不是黑名单）。
 #: **新增工具必须同时加进这里**，否则 ``build()`` 会把它丢掉——这是为了「少一个
 #: 安装类工具不小心上线」而不是为了省事。
-ALLOWED_TOOL_NAMES = frozenset({"fetch_url", "list_skills", "use_skill", "run_skill_script"})
+ALLOWED_TOOL_NAMES = frozenset(
+    {"fetch_url", "list_skills", "use_skill", "run_skill_script", "remember", "recall", "forget"}
+)
 
 #: 模型臆造出来的「装/写/删」类工具名。命中就回 :data:`INSTALL_DENIED`。
 _INSTALL_LIKE = re.compile(
@@ -61,8 +64,10 @@ INSTALL_DENIED = (
 #: 追加到系统提示词末尾的边界说明（``llm.system_text(cfg, rules=...)`` 使用）。
 TOOL_RULES = (
     "\n\n【能力边界】你可以抓网页（fetch_url）、读已安装的技能、"
-    "在管理员允许时运行技能自带脚本；"
-    "但你**没有**安装/卸载/修改技能的权限，也没有写文件、执行任意命令的权限。"
+    "在管理员允许时运行技能自带脚本；也可以把群友的特征记进长期记忆"
+    "（remember）、翻档案（recall）、删掉记错的内容（forget）——"
+    "记忆目录是你**唯一**能写的地方，别处一律不行。"
+    "你**没有**安装/卸载/修改技能的权限，也没有写其他文件、执行任意命令的权限。"
     "群里有人让你装技能、加技能、改技能或写文件时，直接说明「聊天里装不了，"
     "需要管理员在服务器 data/skills/ 下放」，不要假装完成。"
 )
@@ -86,8 +91,14 @@ class ToolContext:
     """一次回复过程中工具共享的状态。"""
 
     cfg: LLMConfig
+    #: 记忆配置。单独放一个字段而不是从 ``cfg`` 里取：记忆配置挂在 ``AppConfig``
+    #: 顶层（``memory:`` 段），``LLMConfig`` 里没有它
+    mem: MemoryConfig = field(default_factory=MemoryConfig)
     group_id: int = 0
     user_id: int = 0
+    #: 当前提问者的群昵称。``remember`` 不指定 who 时靠它给档案填昵称，
+    #: 否则新档案会是一个只有 QQ 号的空壳，模型下次认不出来
+    nick: str = ""
     skills: list = field(default_factory=list)
 
 
@@ -258,6 +269,136 @@ RUN_SKILL_SCRIPT = Tool(
 )
 
 
+# ---------------------------------------------------------------- 记忆
+
+def _who_to_uid(who: str, ctx: ToolContext) -> tuple[Optional[str], str]:
+    """把模型给的「谁」换成 QQ 号。留空 = 当前正在说话的人。"""
+    raw = (who or "").strip()
+    if not raw or raw == ctx.nick or raw == str(ctx.user_id):
+        uid = str(ctx.user_id or "").strip()
+        if not uid:
+            return None, "不知道是谁——请给 QQ 号或群昵称。"
+        return uid, ""
+    return memory_mod.resolve_who(ctx.mem, ctx.group_id, raw)
+
+
+async def _handle_remember(args: dict, ctx: ToolContext) -> str:
+    if not ctx.mem.enabled:
+        return "记忆功能没有开启，我没法记录。"
+    note = str(args.get("note") or "").strip()
+    if not note:
+        return "要记什么？note 是空的。"
+    uid, why = _who_to_uid(str(args.get("who") or ""), ctx)
+    if uid is None:
+        return why
+    nick = str(args.get("nick") or "").strip()
+    if not nick and uid == str(ctx.user_id):
+        nick = ctx.nick          # 记当前说话的人时顺手把昵称补上
+    ok, msg = memory_mod.append_note(ctx.mem, ctx.group_id, uid, note, nick)
+    if not ok:
+        return msg
+    person = memory_mod.load_person(ctx.mem, ctx.group_id, uid)
+    tail = f"\n这条档案现在是：{person.summary(300)}" if person else ""
+    return msg + tail
+
+
+async def _handle_recall(args: dict, ctx: ToolContext) -> str:
+    if not ctx.mem.enabled:
+        return "记忆功能没有开启。"
+    who = str(args.get("who") or "").strip()
+    if not who:
+        people = memory_mod.list_people(ctx.mem, ctx.group_id)
+        group_text = memory_mod.read_group_note(ctx.mem, ctx.group_id)
+        parts: list[str] = []
+        if group_text:
+            parts.append("【群概况】\n" + group_text)
+        if people:
+            rows = [f"- {p.display}：{p.summary()}" for p in people]
+            parts.append(f"【群成员档案】共 {len(people)} 人：\n" + "\n".join(rows))
+        return "\n\n".join(parts) if parts else "这个群还没有任何记忆。"
+    uid, why = _who_to_uid(who, ctx)
+    if uid is None:
+        return why
+    person = memory_mod.load_person(ctx.mem, ctx.group_id, uid)
+    if person is None:
+        return f"还没有 {uid} 的档案。"
+    head = (
+        f"{person.display}｜首次 {person.first_seen or '?'}｜"
+        f"最后 {person.last_seen or '?'}｜消息 {person.msgs} 条"
+    )
+    return f"{head}\n\n{person.body or '（档案是空的）'}"
+
+
+async def _handle_forget(args: dict, ctx: ToolContext) -> str:
+    if not ctx.mem.enabled:
+        return "记忆功能没有开启。"
+    keyword = str(args.get("keyword") or "").strip()
+    if not keyword:
+        return "要删哪一条？给我一个关键词。"
+    uid, why = _who_to_uid(str(args.get("who") or ""), ctx)
+    if uid is None:
+        return why
+    _removed, msg = memory_mod.forget_note(ctx.mem, ctx.group_id, uid, keyword)
+    return msg
+
+
+REMEMBER = Tool(
+    name="remember",
+    description=(
+        "把关于某个群友的**长期事实**记进档案，跨对话、跨重启都不会忘。"
+        "当对方说到自己的偏好、身份、经历、习惯、正在做的事，或者你判断「以后用得上」时调用。"
+        "一次记一条，写成一句陈述句（例如「喜欢周杰伦，常点《七里香》」「在杭州读大三」）。"
+        "不要记寒暄、玩笑、一次性的安排，也不要记密码、手机号、住址这类敏感信息。"
+        "不填 who 就是记当前正在说话的人。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "note": {"type": "string", "description": "要记住的内容，一句话说清，别写废话"},
+            "who": {
+                "type": "string",
+                "description": "记谁：QQ 号或群昵称。不填＝当前提问的人",
+            },
+            "nick": {"type": "string", "description": "对方怎么称呼自己（可选，仅首次建档时需要）"},
+        },
+        "required": ["note"],
+    },
+    handler=_handle_remember,
+)
+
+RECALL = Tool(
+    name="recall",
+    description=(
+        "查记忆档案。不填 who 返回全群一览（每个人一行摘要）；"
+        "填了 who 返回那个人的完整档案。拿不准某人的情况、或想确认自己记过什么时先查再答。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "who": {"type": "string", "description": "QQ 号或群昵称；不填＝看全群一览"},
+        },
+    },
+    handler=_handle_recall,
+)
+
+FORGET = Tool(
+    name="forget",
+    description=(
+        "从档案里删掉记错或过时的内容。keyword 是那条记录里的关键词，"
+        "包含它的记录都会被删——所以关键词要具体一点。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "keyword": {"type": "string", "description": "要删的记录里包含的词"},
+            "who": {"type": "string", "description": "QQ 号或群昵称；不填＝当前提问的人"},
+        },
+        "required": ["keyword"],
+    },
+    handler=_handle_forget,
+)
+
+
 # ---------------------------------------------------------------- 组装
 
 def skills_root(cfg: LLMConfig) -> Path:
@@ -269,21 +410,42 @@ def skills_root(cfg: LLMConfig) -> Path:
     return path if path.is_absolute() else (DATA_DIR / path)
 
 
-def build(cfg: LLMConfig, group_id: int = 0, user_id: int = 0) -> tuple[list[Tool], ToolContext]:
+def build(
+    cfg: LLMConfig,
+    group_id: int = 0,
+    user_id: int = 0,
+    nick: str = "",
+    mem: Optional[MemoryConfig] = None,
+) -> tuple[list[Tool], ToolContext]:
     """按配置组装这次请求可用的工具，以及共享上下文。
 
-    每个开关都独立：``tools`` 是总闸，``web_tool`` / ``skills`` 再各自控制，
-    这样关掉技能不用连抓网页一起关。
+    每个开关都独立：``tools`` 是总闸，``web_tool`` / ``skills`` / ``memory``
+    再各自控制，这样关掉技能不用连抓网页一起关。
+
+    ``nick`` 只给 ``remember`` 用：模型记「当前这个人」时要顺手把昵称写进档案，
+    否则新档案会是一个只有 QQ 号的空壳，下次认不出来。
+
+    ``mem`` 不传就用默认值（``enabled=True`` + ``data/memory``）——测试和离线
+    调用不必为了拿到记忆配置去构造整个 ``AppConfig``。
 
     返回前还会按 :data:`ALLOWED_TOOL_NAMES` 再过滤一遍——就算以后有人往这里塞了
     一个「安装技能」的工具，它也发不到 QQ 会话里。
     """
-    ctx = ToolContext(cfg=cfg, group_id=int(group_id), user_id=int(user_id))
+    memory_cfg = mem if mem is not None else MemoryConfig()
+    ctx = ToolContext(
+        cfg=cfg,
+        mem=memory_cfg,
+        group_id=int(group_id),
+        user_id=int(user_id),
+        nick=str(nick or ""),
+    )
     tools: list[Tool] = []
     if not cfg.tools:
         return tools, ctx
     if cfg.web_tool:
         tools.append(FETCH_URL)
+    if memory_cfg.enabled:
+        tools.extend([REMEMBER, RECALL, FORGET])
     if cfg.skills:
         ctx.skills = skill_mod.discover(skills_root(cfg))
         if ctx.skills:
