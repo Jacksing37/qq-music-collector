@@ -319,6 +319,14 @@ llm:
   reply_chars: 200            # 被引用内容最多取多少字，0=不限
   vision: false               # 把图片发给模型（需要视觉模型如 qwen-vl/glm-4v/gpt-4o）
   max_images: 2               # 一次最多带几张图，多的只留 [图片] 标记
+  # ---- 网页与聊天记录（模型原生看不到，要我们先取回来）----
+  read_forward: true          # 展开「转发的聊天记录」给模型看
+  forward_limit: 30           # 一次最多展开几条转发消息
+  forward_chars: 2000         # 转发内容总字数上限，超出标出还剩几条
+  read_link: true             # 抓取链接的网页正文（只在 @机器人 / 非音乐链接时抓）
+  link_max: 2                 # 一条消息最多抓几个链接（同站点只抓第一个）
+  link_chars: 1500            # 单页最多取多少字正文
+  link_timeout: 8.0           # 抓网页超时秒数，抓不到就当没有
   max_input_chars: 500        # 单条提问最多取多少字，0=不限
   max_reply_chars: 800        # 回复最多发多少字，0=不限（超长自动分条）
   at_sender: true             # 回复时 @ 提问者

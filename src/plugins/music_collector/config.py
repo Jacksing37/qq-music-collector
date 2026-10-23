@@ -512,6 +512,20 @@ class LLMConfig(BaseModel):
     vision: bool = False
     #: 一次最多带几张图（多余的只留 [图片] 标记）；0 = 不带图
     max_images: int = Field(2, ge=0, le=9)
+    #: 是否读取**合并转发的聊天记录**（「转发聊天记录」那条消息的内容）
+    read_forward: bool = True
+    #: 一次最多展开几条转发消息（聊天记录可能几百条，不封顶会撑爆上下文）
+    forward_limit: int = Field(30, ge=1, le=200)
+    #: 转发记录最多取多少字（超出会标出还剩几条未展开）
+    forward_chars: int = Field(2000, ge=0, le=8000)
+    #: 是否抓取群里链接的**网页正文**（让模型真能读到链接内容，而不是靠标题猜）
+    read_link: bool = True
+    #: 一条消息最多抓几个链接（同站点只抓第一个）
+    link_max: int = Field(2, ge=0, le=5)
+    #: 单页正文最多取多少字
+    link_chars: int = Field(1500, ge=0, le=6000)
+    #: 抓网页的超时秒数；抓不到就当没有，不会让回复卡住
+    link_timeout: float = Field(8.0, ge=2, le=60)
     #: 单条提问最多取多少字（超出截断后送模型）；0 = 不限制
     max_input_chars: int = Field(500, ge=0, le=8000)
     #: 回复最多发多少字（超出截断并加省略号）；0 = 不限制

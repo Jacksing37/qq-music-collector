@@ -1385,6 +1385,13 @@ const BOT_GROUPS=[
       + "<b>「让模型看图」开关只决定发不发，能不能看懂取决于模型</b>——需要 qwen-vl / glm-4v / gpt-4o 这类视觉模型；"
       + "关着或模型不支持时，图片只显示成 <code>[图片]</code> 标记，模型至少知道对方发了图。",
    keys:["llm.read_reply","llm.reply_chars","llm.vision","llm.max_images"]},
+  {title:"网页与聊天记录",
+   note:"群里发的东西常常「在别处」：一个链接、一段转发记录。这两样模型原生看不到，要靠我们先取回来。<br>"
+      + "抓取只发生在<b>真要回话时</b>（@机器人 / 分享了非音乐链接），不会去扫全群消息；"
+      + "链接打不开或记录读不出就静默跳过，不会让群里没回应。取回的内容<b>只作用于这一次请求</b>，"
+      + "不写进上下文历史，所以不会越聊越贵。",
+   keys:["llm.read_link","llm.link_max","llm.link_chars","llm.link_timeout",
+         "llm.read_forward","llm.forward_limit","llm.forward_chars"]},
   {title:"上下文与频率限制",
    keys:["llm.history_rounds","llm.history_chars","llm.cooldown","llm.max_input_chars","llm.max_reply_chars","llm.at_sender","llm.fallback_intro","llm.timeout"]},
   {title:"附加触发",

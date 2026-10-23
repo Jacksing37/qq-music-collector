@@ -162,6 +162,32 @@ def content_chars(content) -> int:
     return 0
 
 
+#: 「参考资料」（网页正文 / 转发记录）的总字数上限。抓取时各自已经有上限，
+#: 这里是最后一道闸：一次请求别因为外链内容把上下文预算吃光。
+CONTEXT_CHAR_LIMIT = 4000
+
+
+def with_context(content, context: str):
+    """把参考资料拼到提问前面（保持「资料在前、问题在后」的阅读顺序）。
+
+    ``context`` 只作用于**当次请求**：调用方写上下文历史时仍只存原始提问，
+    否则几小时前的网页正文会一直挂在历史里，越聊越贵。
+    """
+    note = (context or "").strip()
+    if not note:
+        return content
+    if len(note) > CONTEXT_CHAR_LIMIT:
+        note = note[:CONTEXT_CHAR_LIMIT].rstrip() + "…"
+    if isinstance(content, str):
+        return f"{note}\n\n{content}"
+    parts = list(content)
+    if parts and isinstance(parts[0], dict) and parts[0].get("type") == "text":
+        parts[0] = {"type": "text", "text": f"{note}\n\n{parts[0].get('text') or ''}"}
+    else:
+        parts.insert(0, {"type": "text", "text": note})
+    return parts
+
+
 def without_images(messages: list[dict], text: str) -> list[dict]:
     """把最后一条（user）消息换回纯文本，用于「上游不认图」的降级重试。"""
     head = list(messages[:-1])
@@ -508,11 +534,14 @@ class LLMBot:
         cfg: LLMConfig,
         images: Optional[list[str]] = None,
         quote: str = "",
+        context: str = "",
     ) -> tuple[Optional[str], str]:
         """生成一条回复。
 
         ``images`` 是图片链接（``llm.vision`` 关着时会被忽略，只在文字里留
-        ``[图片]`` 标记）；``quote`` 是被引用消息压成的一句前缀。
+        ``[图片]`` 标记）；``quote`` 是被引用消息压成的一句前缀；
+        ``context`` 是**当次**附带的参考资料（网页正文 / 转发记录），
+        只拼进这次请求，不写进上下文历史。
 
         返回 ``(回复文本, 原因)``：
 
@@ -556,7 +585,14 @@ class LLMBot:
             hist: list[dict] = []
             if cfg.history_rounds > 0:
                 hist = self._history_within(group_id, cfg.history_chars)
-            current = [*base, *hist, {"role": "user", "content": build_question_content(body, pics)}]
+            current = [
+                *base,
+                *hist,
+                {"role": "user", "content": with_context(build_question_content(body, pics), context)},
+            ]
+            # 降级重试时用的纯文本版本：参考资料的顺序要和上面一致，否则「去掉图片
+            # 重试」会把网页正文一起丢掉，模型突然从「知道内容」变成「不知道内容」。
+            plain = with_context(body, context)
 
             allow_drop_images = bool(pics)
             allow_drop_history = bool(hist)
@@ -573,7 +609,7 @@ class LLMBot:
                         logger.warning(
                             f"[llm] 群{group_id} 上游不接受图片（{err[:80]}）→ 去掉图片重试"
                         )
-                        current = without_images(current, body)
+                        current = without_images(current, plain)
                         continue
                     # ② 上下文超窗：丢掉历史再试。没带历史还超窗说明单条提问就超了，
                     #    重试也没用，直接报错。
@@ -608,9 +644,10 @@ class LLMBot:
 
         self._last_reply[(int(group_id), int(user_id))] = time.monotonic()
         pics_note = f"，图 {len(pics)} 张" if pics else ""
+        ctx_note = f"，资料 {len(context)} 字" if context else ""
         logger.info(
-            f"[llm] 群{group_id} {speaker}({user_id}) 提问 {len(question)} 字{pics_note} → "
-            f"回复 {len(reply)} 字（model={cfg.model}）"
+            f"[llm] 群{group_id} {speaker}({user_id}) 提问 {len(question)} 字{pics_note}{ctx_note}"
+            f" → 回复 {len(reply)} 字（model={cfg.model}）"
         )
         return reply, ""
 

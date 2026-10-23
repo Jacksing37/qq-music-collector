@@ -245,6 +245,154 @@ def read_message(
     return " ".join("".join(parts).split()), images
 
 
+# ------------------------------------------------------------ 合并转发（聊天记录）
+#
+# 群友「转发聊天记录」时，OneBot 给的只是一个 ``forward`` 段（带一个 id），
+# 内容要再调一次 ``get_forward_msg`` 才拿得到；个别实现直接塞 ``node`` 段。
+# 两种都要能读，否则模型只看到 ``[聊天记录]`` 四个字。
+
+#: 一次展开最多几条 / 多少字——聊天记录可以是几百条，不封顶会直接撑爆上下文
+FORWARD_LIMIT = 30
+FORWARD_CHARS = 2000
+
+
+def _node_sender(data: dict) -> str:
+    """取一条转发消息的发送者昵称（群名片 > 昵称 > QQ 号）。"""
+    sender = (data or {}).get("sender") or {}
+    if not isinstance(sender, dict):
+        return ""
+    for key in ("card", "nickname", "user_id"):
+        value = str(sender.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _node_segments(content) -> list:
+    """把 ``content`` / ``message`` 归一成消息段列表（可能是字符串，也可能带脏数据）。"""
+    if isinstance(content, str):
+        return [MessageSegment.text(content)]
+    out = []
+    for raw in content or []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            out.append(MessageSegment(str(raw.get("type") or "text"), raw.get("data") or {}))
+        except Exception:  # 脏段不该让整条聊天记录作废
+            continue
+    return out
+
+
+def _forward_nodes(payload) -> list[dict]:
+    """把 ``get_forward_msg`` 的返回摊平成 ``[{"who": …, "content": [...]}]``。
+
+    各家返回结构不统一（``messages`` / 直接数组 / 外面再包一层 ``node``），
+    所以这里全部容忍，认不出来就返回空——宁可少读，别抛异常。
+    """
+    if isinstance(payload, dict):
+        items = payload.get("messages") or payload.get("message") or []
+    elif isinstance(payload, list):
+        items = payload
+    else:
+        return []
+    nodes: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        data = item
+        if str(item.get("type") or "") == "node" and isinstance(item.get("data"), dict):
+            data = item["data"]
+        nodes.append(
+            {
+                "who": _node_sender(data),
+                "content": data.get("content", data.get("message", [])),
+            }
+        )
+    return nodes
+
+
+async def read_forward_nodes(bot: Bot, message: Message | list) -> list[dict]:
+    """读出消息里所有合并转发的内容（``forward`` 段需要再调一次接口）。
+
+    嵌套转发**只展开一层**：记录里的记录仍显示成 ``[聊天记录]``，
+    否则一条「转发了一堆转发」的消息能无限膨胀。
+    """
+    nodes: list[dict] = []
+    for seg in message:
+        kind = getattr(seg, "type", "")
+        data = getattr(seg, "data", None) or {}
+        if kind == "forward":
+            fid = str(data.get("id") or data.get("message_id") or "").strip()
+            if not fid:
+                continue
+            payload = None
+            last: Exception | None = None
+            for key in ("message_id", "id"):
+                try:
+                    payload = await bot.call_api("get_forward_msg", **{key: fid})
+                    break
+                except Exception as exc:  # noqa: BLE001 — 换一种参数名再试
+                    last = exc
+            if payload is None:
+                logger.warning(f"[llm] 读取聊天记录失败（id={fid[:20]}）: {last}")
+                continue
+            nodes.extend(_forward_nodes(payload))
+        elif kind == "node":
+            # 内联 node：客户端把内容直接塞在段里，不用再请求
+            nodes.append(
+                {
+                    "who": _node_sender({"sender": data.get("sender") or {}})
+                    or str(data.get("nickname") or "").strip(),
+                    "content": data.get("content", data.get("message", [])),
+                }
+            )
+    return nodes
+
+
+def render_forward(
+    nodes: list[dict], limit: int = FORWARD_LIMIT, max_chars: int = FORWARD_CHARS
+) -> str:
+    """把展开后的转发记录渲染成「昵称：内容」多行文本（超长自动收尾）。
+
+    被截断时补一句「还有 N 条未展开」：模型知道「记录不止这些」，才不会
+    把半段聊天当成全部、得出「他们没提过这事」这种结论。
+    """
+    if not nodes:
+        return ""
+    lines: list[str] = []
+    used = 0
+    for idx, node in enumerate(nodes):
+        if len(lines) >= max(1, limit):
+            lines.append(f"…（还有 {len(nodes) - idx} 条未展开）")
+            break
+        text, _ = read_message(_node_segments(node.get("content")))
+        text = text.strip()
+        who = (node.get("who") or "").strip()
+        line = f"{who}：{text}" if who else text
+        if not line.strip("： "):
+            continue
+        if max_chars > 0 and used + len(line) > max_chars:
+            # 半条也别硬塞：直接标出还剩多少条，让模型知道记录被截断了
+            lines.append(f"…（还有 {len(nodes) - idx} 条未展开）")
+            break
+        lines.append(line)
+        used += len(line)
+    return "\n".join(lines)
+
+
+async def describe_forward(
+    bot: Bot,
+    message: Message | list,
+    limit: int = FORWARD_LIMIT,
+    max_chars: int = FORWARD_CHARS,
+) -> str:
+    """消息里有合并转发就渲染成文本；没有返回空串。"""
+    nodes = await read_forward_nodes(bot, message)
+    if not nodes:
+        return ""
+    return render_forward(nodes, limit=limit, max_chars=max_chars)
+
+
 def quote_prefix_and_images(
     message: Message | str,
     who: str,
