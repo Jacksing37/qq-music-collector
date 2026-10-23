@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 
-from nonebot import get_driver, on_message, require
+from nonebot import get_driver, on_message, on_notice, require
 from nonebot.adapters import Event
 from nonebot.adapters.onebot.v11 import (
     GROUP_ADMIN,
@@ -17,6 +17,7 @@ from nonebot.adapters.onebot.v11 import (
     GroupMessageEvent,
     Message,
     MessageSegment,
+    PokeNotifyEvent,
 )
 from nonebot.log import logger
 from nonebot.permission import SUPERUSER
@@ -34,6 +35,12 @@ from .bot_utils import (  # noqa: E402
     split_text,
     trace_messages_enabled,
     trace_out,
+)
+from .detector import (  # noqa: E402
+    extract_from_card,
+    extract_from_text,
+    extract_from_xml,
+    extract_urls,
 )
 from .llm import disabled_reason as llm_disabled_reason  # noqa: E402
 from .llm import llm_bot  # noqa: E402
@@ -73,6 +80,43 @@ async def _looks_like_music(event: GroupMessageEvent) -> bool:
             return True
         if seg.type == "text" and "http" in str(seg.data.get("text", "")):
             return True
+    return False
+
+
+def _has_music_link(event: GroupMessageEvent) -> bool:
+    """消息里有没有**真正能识别的**音乐链接（本地正则判定，不联网）。
+
+    与 ``_looks_like_music`` 的分工：
+
+    - ``_looks_like_music`` 是**粗筛**——「带 http 就算」，只用来省掉全量解析，
+      拿它当「是不是音乐」用会把所有网页链接都误判成音乐；
+    - 这个函数是**准判**——交给 ``detector`` 的平台识别（QQ 音乐 / 网易云 /
+      酷狗…的域名与卡片结构）。
+
+    用途：@ 机器人时决定「交给收集流程还是交给大模型」，以及分享链接时决定
+    「这条是不是该让模型接话的非音乐链接」。
+    """
+    for seg in event.message:
+        if seg.type == "music":
+            return True
+        if seg.type == "json":
+            try:
+                if extract_from_card(seg.data.get("data")):
+                    return True
+            except Exception:  # 脏卡片不该让整条消息掉进异常
+                continue
+        elif seg.type == "xml":
+            try:
+                if extract_from_xml(str(seg.data.get("data") or "")):
+                    return True
+            except Exception:
+                continue
+        elif seg.type == "text":
+            try:
+                if extract_from_text(str(seg.data.get("text") or "")):
+                    return True
+            except Exception:
+                continue
     return False
 
 
@@ -182,29 +226,98 @@ def _llm_skip(event: GroupMessageEvent, reason: str, level: str = "debug") -> bo
     return False
 
 
+def _llm_gate(
+    event: object = None, *, group_id: int | None = None
+) -> tuple[object, str]:
+    """过三道门，返回 ``(llm_cfg, 原因)``；原因非空表示不该走大模型。
+
+    三道门分别是：``llm.enabled`` + 必填项 + ``llm.groups`` 群白名单（由
+    ``llm.disabled_reason`` 统一判定）、插件总开关、插件生效群号。
+
+    三个触发点（@ 机器人 / 被戳一戳 / 分享了非音乐链接）共用这一套门槛，
+    免得某个入口漏掉一个开关、变成「明明关了还在说话」。
+    """
+    gid = int(group_id if group_id is not None else getattr(event, "group_id", 0) or 0)
+    app_cfg = service.cfg(gid)
+    llm_cfg = app_cfg.llm
+    why = llm_disabled_reason(llm_cfg, gid)
+    if why:
+        return llm_cfg, why
+    if not app_cfg.enabled:
+        return llm_cfg, "插件总开关关闭"
+    if app_cfg.groups and gid not in app_cfg.groups:
+        return llm_cfg, "本群不在插件生效列表"
+    return llm_cfg, ""
+
+
+def _sender_nick(event: object) -> str:
+    """从事件里取一个能称呼的昵称（群名片 > 昵称 > QQ 号）。
+
+    戳一戳的 notify 事件**没有 sender 字段**，只能退回 QQ 号——所以这里用
+    ``getattr`` 而不是直接取属性，两种事件都能用。
+    """
+    sender = getattr(event, "sender", None)
+    if sender is not None:
+        nick = getattr(sender, "card", "") or getattr(sender, "nickname", "")
+        if nick:
+            return str(nick)
+    return str(getattr(event, "user_id", "") or "")
+
+
+async def _llm_answer(
+    bot: Bot,
+    event: object,
+    llm_cfg,
+    text: str,
+    images: list[str] | None = None,
+    quote: str = "",
+) -> tuple[bool, str]:
+    """让模型答一句并发到群里，返回 ``(是否已发出, 失败原因)``。
+
+    ``event`` 只需要有 ``group_id`` / ``user_id``（群消息事件与戳一戳事件都满足），
+    三个触发点的发送逻辑因此完全一致：@ 提问者（按配置）、超长自动分条。
+    """
+    group_id = int(getattr(event, "group_id", 0) or 0)
+    user_id = int(getattr(event, "user_id", 0) or 0)
+    reply, reason = await llm_bot.chat(
+        group_id,
+        user_id,
+        _sender_nick(event),
+        text,
+        llm_cfg,
+        images=list(images or []),
+        quote=quote,
+    )
+    if not reply:
+        return False, reason
+    parts = split_text(reply)
+    first = Message()
+    if llm_cfg.at_sender:
+        first += MessageSegment.at(user_id)
+    first += MessageSegment.text(" " + parts[0])
+    await safe_send_group(bot, group_id, first)
+    for extra in parts[1:]:
+        await safe_send_group(bot, group_id, Message(MessageSegment.text(extra)))
+    return True, ""
+
+
 async def _try_llm_reply(bot: Bot, event: GroupMessageEvent) -> bool:
     """用大模型回答「@机器人 + 一句话」。
 
     返回 ``True`` 表示这条消息已经处理完（含「冷却中故意静默」），上层不要再发
     自我介绍；返回 ``False`` 表示该走内置自我介绍。
 
-    门槛与自我介绍保持同一套（不抢命令、不抢音乐分享），另外多一道
-    ``llm.enabled`` + ``llm.groups`` 的群白名单。
+    门槛与自我介绍保持同一套（不抢命令、不抢**真的**音乐链接），另外多一道
+    ``llm.enabled`` + ``llm.groups`` 的群白名单。注意「带链接」本身不再是跳过
+    理由：@ 机器人 + 一个普通网页链接，现在是该模型答的。
     """
-    app_cfg = service.cfg(event.group_id)
-    llm_cfg = app_cfg.llm
-    why = llm_disabled_reason(llm_cfg, event.group_id)
+    llm_cfg, why = _llm_gate(event)
     if why:
         # 没启用是常态（回自我介绍，符合预期）；开了却走不通才是要排查的
         return _llm_skip(event, why, "debug" if not llm_cfg.enabled else "info")
-    # 插件总开关关掉时一律不吭声（与群内其它响应器保持一致）
-    if not app_cfg.enabled:
-        return _llm_skip(event, "插件总开关关闭", "info")
-    if app_cfg.groups and event.group_id not in app_cfg.groups:
-        return _llm_skip(event, "本群不在插件生效列表", "info")
     if _is_command_message(event):
         return _llm_skip(event, "是命令消息，交给 /music 处理")
-    if await _looks_like_music(event):
+    if _has_music_link(event):
         return _llm_skip(event, "是音乐分享，交给收集流程")
 
     # 把消息段全转成模型能读的：文本原样、图/表情/语音留方括号标记，图片链接单独带出。
@@ -240,25 +353,8 @@ async def _try_llm_reply(bot: Bot, event: GroupMessageEvent) -> bool:
         if url not in pics:
             pics.append(url)
 
-    nick = event.sender.card or event.sender.nickname or str(event.user_id)
-    reply, reason = await llm_bot.chat(
-        event.group_id,
-        event.user_id,
-        nick,
-        text,
-        llm_cfg,
-        images=pics,
-        quote=quote,
-    )
-    if reply:
-        parts = split_text(reply)
-        first = Message()
-        if llm_cfg.at_sender:
-            first += MessageSegment.at(event.user_id)
-        first += MessageSegment.text(" " + parts[0])
-        await safe_send_group(bot, event.group_id, first)
-        for extra in parts[1:]:
-            await safe_send_group(bot, event.group_id, Message(MessageSegment.text(extra)))
+    ok, reason = await _llm_answer(bot, event, llm_cfg, text, pics, quote)
+    if ok:
         return True
     if reason == "cooldown":
         # 冷却中保持安静，别再用自我介绍补一条（否则「限流」变「刷屏」）。
@@ -314,6 +410,45 @@ async def handle_at(bot: Bot, event: GroupMessageEvent) -> None:
     if await _try_llm_reply(bot, event):
         return
     await _reply_intro(bot, event)
+
+
+# ------------------------------------------------------------ 被戳一戳时回一句
+#
+# 群友「双击头像」= OneBot 的 notify/poke 事件：``user_id`` 是谁戳的，
+# ``target_id`` 是戳了谁。只有戳到机器人自己才接（戳别人跟它没关系），
+# 且只接群里的（上下文按群维护，私聊没有可聊的上下文）。
+
+
+async def _poked_me(bot: Bot, event: PokeNotifyEvent) -> bool:
+    """戳一戳的对象是不是机器人自己。"""
+    return str(event.target_id) == str(event.self_id)
+
+
+poke_listener = on_notice(rule=Rule(_poked_me), priority=5, block=False)
+
+
+@poke_listener.handle()
+async def handle_poke(bot: Bot, event: PokeNotifyEvent) -> None:
+    group_id = event.group_id
+    if group_id is None:
+        return
+    llm_cfg, why = _llm_gate(group_id=int(group_id))
+    if why:
+        # 没启用是常态，只留 DEBUG；开了却走不通时 llm.disabled_reason 的原因照样记下来
+        logger.debug(f"[llm] 群{group_id} 被戳了戳但没回复：{why}")
+        return
+    if not llm_cfg.poke_reply:
+        logger.debug(f"[llm] 群{group_id} 被戳了戳，但「戳一戳也回复」关着")
+        return
+
+    prompt = (llm_cfg.poke_prompt or "").strip() or "（戳了戳你）"
+    logger.info(
+        f"[llm] 群{group_id} {_sender_nick(event)}({event.user_id}) 戳了戳机器人 → 交给大模型"
+    )
+    # 冷却中 chat 会返回 cooldown 并静默，这里什么都不用补
+    ok, reason = await _llm_answer(bot, event, llm_cfg, prompt)
+    if not ok and reason not in ("cooldown", "empty"):
+        logger.debug(f"[llm] 群{group_id} 戳一戳回复失败：{reason}")
 
 
 def _format_accept(song: Song, index: int, unmatched_notice: str = "") -> str:
@@ -687,6 +822,39 @@ async def _sync_after_match(group_id: int, song: Song) -> None:
         logger.debug(f"[music] 回填匹配后同步歌单失败: {exc}")
 
 
+async def _reply_llm_link(bot: Bot, event: GroupMessageEvent) -> None:
+    """消息里的链接**不是音乐平台的**时，交给大模型接一句。
+
+    典型场景：群友甩一个网页 / 视频 / 文章的链接，机器人过去一声不吭。
+    现在只要 LLM 开着，就让模型顺着这条链接聊两句。
+
+    几道保险（缺一不可）：
+
+    - 消息里必须真有 http 链接——纯图片、纯卡片没有什么可聊的；
+    - **真·音乐链接一律不碰**（``_has_music_link``）：不在收集期时
+      ``handle_segments`` 会直接返回空结果，这里的判定才不会把歌当成普通链接；
+    - **@ 过机器人的不碰**：那条走 ``at_listener``（优先级更高），否则会回两遍；
+    - 命令不碰；``llm.reply_link`` 关着不碰；不在生效群 / 没填全接口，静默。
+    """
+    llm_cfg, why = _llm_gate(event)
+    if why or not llm_cfg.reply_link:
+        return
+    if await _at_bot(event) or _is_command_message(event):
+        return
+    if _has_music_link(event):
+        return
+    text, images = read_message(event.message, {str(event.self_id)})
+    if not extract_urls(text):
+        return  # 没有链接（或链接在卡片里读不出来）→ 没什么可接的
+    hint = (llm_cfg.link_hint or "").strip()
+    question = f"{text}\n{hint}" if hint else text
+    ok, reason = await _llm_answer(bot, event, llm_cfg, question, images)
+    if ok:
+        logger.info(f"[llm] 群{event.group_id} 非音乐链接 → 已交给大模型接话")
+    elif reason not in ("cooldown", "empty"):
+        logger.debug(f"[llm] 群{event.group_id} 非音乐链接接话失败：{reason}")
+
+
 @music_listener.handle()
 async def handle_music_share(bot: Bot, event: GroupMessageEvent) -> None:
     group_id = event.group_id
@@ -703,6 +871,9 @@ async def handle_music_share(bot: Bot, event: GroupMessageEvent) -> None:
         return
 
     if not result.any_music:
+        # 认不出音乐时过去是直接静默返回。带链接的普通网页进到这里，
+        # 让大模型接一句（真音乐链接、@ 过的、命令都由 _reply_llm_link 内部挡掉）。
+        await _reply_llm_link(bot, event)
         return
 
     logger.info(

@@ -41,6 +41,7 @@ from .config import (
 )
 from . import logbuffer
 from .llm import (
+    SYSTEM_CHAR_LIMIT,
     is_reasoning_model,
     llm_bot,
     normalize_endpoint,
@@ -417,6 +418,32 @@ FIELD_META["llm.fallback_intro"] = (
     "接口报错 / 超时 / 没配好时，退回内置自我介绍（关掉则静默，群里看不到任何回应）",
     False,
 )
+FIELD_META["llm.poke_reply"] = (
+    "戳一戳也回复",
+    "群友「双击头像 / 戳一戳」机器人时，让模型回一句（同样受开关、生效群与冷却限制）",
+    False,
+)
+FIELD_META["llm.poke_prompt"] = (
+    "戳一戳时说的话",
+    "送给模型的那句话，默认「（戳了戳你）」；模型会看到「昵称：这句话」",
+    False,
+)
+FIELD_META["llm.reply_link"] = (
+    "非音乐链接也接话",
+    "群友分享的链接不是音乐平台时，让模型顺口接一句。真·音乐链接不受影响，仍走收集流程",
+    False,
+)
+FIELD_META["llm.link_hint"] = (
+    "链接接话的说明",
+    "接非音乐链接时追加给模型的一句说明，免得它把网页链接当成点歌；留空 = 不加",
+    False,
+)
+
+#: 有**硬上限**的字段：值会被后端静默截断，所以表单里要在输入框下面显示
+#: 「已用 x / 上限 字」。数字统一取自真正生效的那个常量，避免两处各写一份。
+FIELD_LIMITS: dict[str, int] = {
+    "llm.system_prompt": SYSTEM_CHAR_LIMIT,
+}
 
 
 # -------------------------------------------------------------------- schema
@@ -477,6 +504,8 @@ def _field_desc(parent: str, fname: str, finfo, dotted_parent: str) -> dict:
         "label": label,
         "hint": hint,
         "multiline": multiline,
+        # 有硬上限的字段（目前只有系统提示词）带上上限，表单据此显示「已用 x / N 字」
+        "max_chars": FIELD_LIMITS.get(dotted, 0),
         # 密码 / cookie / api_key 类字段在表单里用 password 输入框，避免旁窥
         "secret": any(w in fname for w in ("password", "cookie", "api_key", "secret")),
         # 进程级唯一的项（日志 / 缓存 / 网易云账号 / 字体 / 生效群号…）不能按群覆盖，

@@ -87,6 +87,9 @@ pre.runs{margin:10px 0 0;font-size:12px;color:var(--muted);white-space:pre-wrap;
 .field:first-of-type{border-top:none}
 .flabel{font-size:14px}.flabel .hint{display:block;font-size:12px;color:var(--muted);margin-top:2px}
 .fctrl.dirty input,.fctrl.dirty select,.fctrl.dirty textarea{border-color:var(--accent2)}
+/* 有硬上限的输入框下面的字数统计：超了变红——超出的部分会被后端静默截断 */
+.fcount{margin-top:4px;font-size:12px;color:var(--muted);text-align:right;font-family:inherit;line-height:1.4}
+.fcount.over{color:var(--bad);font-weight:600}
 
 /* 收集管理表格 */
 /* overflow-x 是为了让过宽的表格在卡片内部横滚（.content 已不能当滚动容器用） */
@@ -1102,7 +1105,22 @@ function fieldControl(f, value, disabled, setter){
     inp.value=Array.isArray(value)?value.join(", "):(value??""); inp.placeholder="逗号分隔";
     if(!disabled) inp.oninput=()=>put(f.key,inp.value); wrap.appendChild(inp);
   } else {
-    if(f.multiline){ const ta=document.createElement("textarea"); ta.value=value??""; if(!disabled) ta.oninput=()=>put(f.key,ta.value); wrap.appendChild(ta); }
+    if(f.multiline){
+      const ta=document.createElement("textarea"); ta.value=value??"";
+      if(!disabled) ta.oninput=()=>put(f.key,ta.value);
+      wrap.appendChild(ta);
+      /* 有硬上限的字段（系统提示词）：实时显示「已用 x / N 字」。
+         超出的部分后端会**静默截断**，不摆在眼前就会变成「明明写了却没生效」 */
+      if(f.max_chars>0){
+        const cnt=document.createElement("div"); cnt.className="fcount";
+        const upd=()=>{
+          const n=(ta.value||"").length;
+          cnt.textContent=`已用 ${n} / ${f.max_chars} 字`;
+          cnt.classList.toggle("over", n>f.max_chars);
+        };
+        upd(); ta.addEventListener("input",upd); wrap.appendChild(cnt);
+      }
+    }
     else { const inp=document.createElement("input"); inp.type=f.secret?"password":"text"; inp.value=value??""; if(!disabled) inp.oninput=()=>put(f.key,inp.value); wrap.appendChild(inp); }
   }
   if(disabled) wrap.querySelectorAll("input,select,textarea").forEach(x=>x.disabled=true);
@@ -1367,6 +1385,10 @@ const BOT_GROUPS=[
    keys:["llm.read_reply","llm.reply_chars","llm.vision","llm.max_images"]},
   {title:"上下文与频率限制",
    keys:["llm.history_rounds","llm.history_chars","llm.cooldown","llm.max_input_chars","llm.max_reply_chars","llm.at_sender","llm.fallback_intro","llm.timeout"]},
+  {title:"附加触发",
+   note:"除了「@机器人」，还有两种该开口的场合：<b>被戳一戳</b>、<b>分享了不是音乐的链接</b>。<br>"
+      + "两者都仍然受上面的开关、生效群与冷却限制；真·音乐链接不会被截走，照常走收集流程。",
+   keys:["llm.poke_reply","llm.poke_prompt","llm.reply_link","llm.link_hint"]},
   {title:"高级",
    note:"厂商私有参数（top_k、repetition_penalty、chat_template_kwargs…）在这里用 JSON 直接塞进请求体，会覆盖上面同名项。",
    keys:["llm.extra_body","llm.stop","llm.seed"]}

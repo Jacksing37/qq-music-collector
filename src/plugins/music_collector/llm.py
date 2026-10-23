@@ -33,7 +33,9 @@ logger = logging.getLogger("music_collector.llm")
 _HISTORY_CHAR_LIMIT = 600
 
 #: 系统提示词字符上限。人设写得再长也不该吃掉半个上下文窗口。
-_SYSTEM_CHAR_LIMIT = 4000
+#: 公开常量（不带下划线）是有意的：网页端「机器人」页要按同一个数字显示
+#: 「已用 x / 4000 字」，两边各写一个魔法数字迟早会对不上。
+SYSTEM_CHAR_LIMIT = 4000
 
 #: 服务端报「超窗」时常见的措辞。命中就说明上下文真的爆炸了，
 #: 与其把错误抛给用户，不如丢掉历史重试一次。
@@ -165,12 +167,12 @@ def without_images(messages: list[dict], text: str) -> list[dict]:
 def system_text(cfg: LLMConfig) -> str:
     """带长度保护的系统提示词（人设再长也不会挤占上下文）。"""
     prompt = (cfg.system_prompt or "").strip()
-    if len(prompt) <= _SYSTEM_CHAR_LIMIT:
+    if len(prompt) <= SYSTEM_CHAR_LIMIT:
         return prompt
     logger.warning(
-        f"[llm] system_prompt 过长（{len(prompt)} 字），已截断到 {_SYSTEM_CHAR_LIMIT} 字"
+        f"[llm] system_prompt 过长（{len(prompt)} 字），已截断到 {SYSTEM_CHAR_LIMIT} 字"
     )
-    return prompt[:_SYSTEM_CHAR_LIMIT]
+    return prompt[:SYSTEM_CHAR_LIMIT]
 
 
 def is_reasoning_model(model: str) -> bool:
