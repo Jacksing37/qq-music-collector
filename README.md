@@ -334,9 +334,9 @@ netease:
 | `llm.max_tokens` | `512` | 单次生成上限。⚠️ **思考 token 也算在这里**，开了思考要留余量 |
 | `llm.stop` | 空 | 停止词，逗号分隔；群聊一般用不到 |
 | `llm.seed` | `-1` | `-1` = 不发送（每次随机）；填固定值后相同提问更易得到相同回复，调试用 |
-| `llm.thinking` | `auto` | 思考档位：`auto` 不干预 / `off` 尽量关 / `low` 快而省 / `medium` 平衡 / `high` 慢而深 |
-| `llm.thinking_style` | `auto` | 思考参数写法：`auto` 按接口+模型名猜；也可固定成 `reasoning_effort`（OpenAI）/ `enable_thinking`（通义）/ `thinking_object`（GLM、Claude）/ `none` |
-| `llm.thinking_budget` | `0` | 思考 token 预算，`0` = 按档位默认（低 1024 / 中 4096 / 高 12000）；超过 `max_tokens-256` 会被自动压下 |
+| `llm.thinking` | `auto` | 思考档位：`auto` 不干预 / `off` 尽量关 / `low` 快而省 / `medium` 平衡 / `high` 慢而深 / `max` 最慢（仅部分厂商） |
+| `llm.thinking_style` | `auto` | 思考参数写法：`auto` 按接口+模型名猜；也可固定成 `reasoning_effort`（OpenAI）/ `enable_thinking`（通义）/ `thinking_object`（GLM、Claude）/ `deepseek`（thinking 开关 + reasoning_effort）/ `none` |
+| `llm.thinking_budget` | `0` | 思考 token 预算，`0` = 按档位默认（低 1024 / 中 4096 / 高 12000）；超过 `max_tokens-256` 会被自动压下；DeepSeek 不收这个参数 |
 | `llm.extra_body` | 空 | 原样合并进请求体的 JSON，如 `{"top_k": 20}`；厂商私有参数与「识别不准的思考参数」都塞这里，会覆盖上面同名项 |
 | `llm.timeout` | `30` | 请求超时（秒） |
 | `llm.history_rounds` | `3` | 携带最近几轮对话（最多 200 轮）；`0` = 全新对话。**上下文只在内存里**，重启即清空 |
@@ -379,7 +379,19 @@ netease:
 > 🧠 **思考模式怎么选**：默认 `thinking: auto` 就是「不管，用模型自己的默认行为」，绝大多数情况够用。
 > 需要更省更快就选 `low`，要它想清楚点选 `high`。写法由 `thinking_style: auto` 自动判断：
 > 通义 / 百炼 → `enable_thinking` + `thinking_budget`；GLM / Claude / OpenRouter → `thinking: {type, budget_tokens}`；
-> OpenAI 官方与 Azure → `reasoning_effort`；DeepSeek / Moonshot 这类靠模型名区分思考的 → 不发参数。
+> OpenAI 官方与 Azure → `reasoning_effort`；DeepSeek → `thinking` 开关 + `reasoning_effort`；
+> Moonshot 这类靠模型名区分思考的 → 不发参数。
+>
+> ⚠️ **DeepSeek 的自动识别在「中转 / 本机地址」下会失效**（域名里没有 deepseek），
+> 只能靠模型名。所以用中转时请把 `thinking_style` 显式写成 `deepseek`，
+> 否则档位不会下发——网页状态区会提示「当前写法不发思考参数，档位不会生效」。
+> DeepSeek 侧的档位映射：`low`→low、`medium`→high、`high`→high、`max`→max（它只认这三档），
+> 并且**不接收 `thinking_budget`**（那是 Anthropic 风格的参数，发过去也没用）。
+>
+> ⚠️ **思考模式开启时，`temperature` / `presence_penalty` / `frequency_penalty` 不生效**
+> （官方说明：不报错、也不生效）；`top_p` 对 `deepseek-flash` 只在思考模式下有效，且范围是 `0.95~1.0`。
+> 想靠调温度改变说话风格，得先把思考关掉（`thinking: off`）。
+>
 > 猜错就在 `extra_body` 里手写，例如 `{"enable_thinking": true}` 或 `{"reasoning_effort": "high"}`。
 >
 > ⚠️ **开了思考必须同步调大 `max_tokens`**：思考的 token 与正文共用这个额度，`max_tokens: 512` 配上

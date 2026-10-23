@@ -45,6 +45,7 @@ from music_collector.config import (  # noqa: E402
 from music_collector.llm import (  # noqa: E402
     LLMBot,
     build_payload,
+    deepseek_effort,
     disabled_reason,
     enabled_for,
     extract_reply,
@@ -339,11 +340,16 @@ def test_sampling_and_thinking() -> None:
         ("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-plus", "enable_thinking"),
         ("https://api.openai.com/v1", "gpt-4o-mini", "reasoning_effort"),
         ("https://open.bigmodel.cn/api/paas/v4", "glm-4-plus", "thinking_object"),
-        ("https://api.deepseek.com/v1", "deepseek-chat", "none"),
+        # DeepSeek 官方文档：thinking 对象管开关、reasoning_effort 管强度，两件事分开
+        ("https://api.deepseek.com/v1", "deepseek-chat", "deepseek"),
+        ("https://api.deepseek.com/v1", "deepseek-v4.1-flash", "deepseek"),
+        ("https://my-proxy.example.com/v1", "deepseek-chat", "deepseek"),
         ("https://my-proxy.example.com/v1", "o1-mini", "reasoning_effort"),
+        # 本机中转域名里看不出厂商 → 只能靠模型名；模型名也没有就退回 none
+        ("http://127.0.0.1:8790/v1", "some-model", "none"),
     ):
         got = resolve_thinking_style(LLMConfig(base_url=url, model=model))
-        check(f"{model} 推断为 {want}", got == want, got)
+        check(f"{model} @ {url} 推断为 {want}", got == want, got)
     check("手选写法时不再推断",
           resolve_thinking_style(LLMConfig(thinking_style="none", model="qwen-plus")) == "none")
 
@@ -386,6 +392,30 @@ def test_sampling_and_thinking() -> None:
     p = build_payload(msgs, LLMConfig(thinking="medium", thinking_style="none"))
     check("style=none 一律不发思考参数",
           not ({"reasoning_effort", "enable_thinking", "thinking"} & set(p)), str(p))
+
+    # (g2) DeepSeek 写法：thinking 对象管开关、reasoning_effort 管强度（官方「思考模式」文档）
+    ds = {"thinking_style": "deepseek", "model": "deepseek-v4.1-flash"}
+    p = build_payload(msgs, LLMConfig(**ds, thinking="high"))
+    check("deepseek: thinking 打开 + reasoning_effort=high",
+          p.get("thinking") == {"type": "enabled"} and p.get("reasoning_effort") == "high", str(p))
+    p = build_payload(msgs, LLMConfig(**ds, thinking="off"))
+    check("deepseek: off 用 thinking.disabled 关（reasoning_effort 没有「关」这个值）",
+          p.get("thinking") == {"type": "disabled"} and "reasoning_effort" not in p, str(p))
+    p = build_payload(msgs, LLMConfig(**ds, thinking="auto"))
+    check("deepseek: auto 什么都不发（官方默认就是「开 + high」）",
+          "thinking" not in p and "reasoning_effort" not in p, str(p))
+    p = build_payload(msgs, LLMConfig(**ds, thinking="high"))
+    check("deepseek: 不发 budget_tokens（它没有这个参数，别混 Anthropic 写法）",
+          "budget_tokens" not in (p.get("thinking") or {}), str(p.get("thinking")))
+    for mode, want in (("low", "low"), ("medium", "high"), ("high", "high"), ("max", "max")):
+        check(f"deepseek 档位 {mode} → {want}（官方映射表）",
+              deepseek_effort(mode) == want
+              and build_payload(msgs, LLMConfig(**ds, thinking=mode)).get("reasoning_effort") == want)
+    check("deepseek 不给 token 预算（预算是 Anthropic 系的事）",
+          thinking_budget(LLMConfig(**ds, thinking="high", max_tokens=32000)) == 0)
+    check("其它写法仍按档位给预算（没被 deepseek 分支带偏）",
+          thinking_budget(LLMConfig(thinking="high", max_tokens=32000,
+                                    thinking_style="thinking_object")) == 12000)
 
     # (h) extra_body 兜底：能覆盖同名项，也能塞任意私有参数
     p = build_payload(msgs, LLMConfig(extra_body='{"temperature": 0.11, "top_k": 5}'))
@@ -440,9 +470,13 @@ def test_sampling_and_thinking() -> None:
                 "llm.extra_body"):
         check(f"表单含 {key}", key in KEY_INDEX)
     th = KEY_INDEX["llm.thinking"]
-    check("思考模式是下拉框且含 5 档",
-          th["type"] == "enum" and set(th["enum"] or []) == {"auto", "off", "low", "medium", "high"},
+    check("思考模式是下拉框且含 6 档（max 是 DeepSeek 专有）",
+          th["type"] == "enum"
+          and set(th["enum"] or []) == {"auto", "off", "low", "medium", "high", "max"},
           str(th))
+    ts = KEY_INDEX["llm.thinking_style"]
+    check("思考写法可选 deepseek",
+          ts["type"] == "enum" and "deepseek" in (ts["enum"] or []), str(ts))
     check("extra_body 是多行输入", KEY_INDEX["llm.extra_body"]["multiline"] is True)
     check("extra_body 不当成密码框", KEY_INDEX["llm.extra_body"]["secret"] is False)
     check("思考预算不被 token 误伤", _mask_value("llm.thinking_budget", 4096) == "4096")

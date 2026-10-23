@@ -42,6 +42,7 @@ from .config import (
 from . import logbuffer
 from .llm import (
     SYSTEM_CHAR_LIMIT,
+    deepseek_effort,
     is_reasoning_model,
     llm_bot,
     normalize_endpoint,
@@ -294,12 +295,14 @@ FIELD_META["llm.system_prompt"] = (
 )
 FIELD_META["llm.temperature"] = (
     "温度",
-    "0 最稳、2 最飘。闲聊建议 0.7~0.9。推理模型（o1/o3/gpt-5/reasoner）不认这个参数，会自动省掉",
+    "0 最稳、2 最飘。闲聊建议 0.7~0.9。推理模型（o1/o3/gpt-5/reasoner）不认这个参数，会自动省掉；"
+    "DeepSeek 等厂商在**思考模式下也会忽略它**（不报错、不生效）",
     False,
 )
 FIELD_META["llm.top_p"] = (
     "核采样 top_p",
-    "只从累计概率最高的这部分词里挑，1.0 = 不启用。一般只调温度或只调 top_p，两个一起调会互相打架",
+    "只从累计概率最高的这部分词里挑，1.0 = 不启用。一般只调温度或只调 top_p，两个一起调会互相打架。"
+    "注意 DeepSeek 的 deepseek-flash 只在思考模式下认它，且有效范围是 0.95~1.0，填更低会按 0.95 处理",
     False,
 )
 FIELD_META["llm.presence_penalty"] = (
@@ -324,14 +327,16 @@ FIELD_META["llm.seed"] = (
 )
 FIELD_META["llm.thinking"] = (
     "思考模式",
-    "推理模型的“想多久”：自动 = 不干预、用模型默认；关闭 = 尽量关掉思考；低/中/高 = 开思考并给强度。"
-    "非推理模型选什么都不起作用",
+    "推理模型的“想多久”：自动 = 不干预、用模型默认；关闭 = 尽量关掉思考；低/中/高/最高 = 开思考并给强度。"
+    "非推理模型选什么都不起作用。DeepSeek 侧的映射：低→low、中→high、高→high、最高→max",
     False,
 )
 FIELD_META["llm.thinking_style"] = (
     "思考参数写法",
     "各家 API 不统一：自动 = 按接口地址和模型名猜（通义→enable_thinking、GLM/Claude→thinking 对象、"
-    "OpenAI→reasoning_effort、DeepSeek→不发）。猜错了就在下面「额外请求参数」里手动覆盖",
+    "OpenAI→reasoning_effort、DeepSeek→thinking 开关 + reasoning_effort）。"
+    "**用中转 / 本机地址时自动识别看不出厂商，要手动选 deepseek**，否则档位不生效。"
+    "猜错了也可以在下面「额外请求参数」里手动覆盖",
     False,
 )
 FIELD_META["llm.thinking_budget"] = (
@@ -1341,6 +1346,26 @@ async def _api_logs(request: Request):
 
 # -------------------------------------------------------------------- 机器人（大模型）
 
+
+def _thinking_status(cfg) -> dict:
+    """思考设置的实际生效情况（网页端状态区与排查都用这一份）。
+
+    抽出来是因为「档位」和「真正发出去的参数」不是一回事：DeepSeek 发送的是
+    强度（low/high/max）而不是 token 预算，界面不该显示一个根本不存在的预算。
+    """
+    mode = (cfg.thinking or "auto").strip()
+    style = resolve_thinking_style(cfg)
+    return {
+        "mode": mode,
+        "style": style,
+        "effort": (
+            deepseek_effort(mode) if style == "deepseek" and mode not in ("auto", "off") else ""
+        ),
+        "budget": thinking_budget(cfg),
+        "reasoning_model": is_reasoning_model(cfg.model),
+    }
+
+
 async def _api_bot(request: Request):
     """「机器人」页数据：llm 段的字段 + 当前值 + 运行状态。
 
@@ -1371,13 +1396,8 @@ async def _api_bot(request: Request):
             "history_stats": {str(g): v for g, v in llm_bot.history_stats().items()},
             "history_chars_limit": cfg.history_chars,
             "last_error": llm_bot.last_error,
-            # 思考模式：档位 + 实际采用的写法 + 真实预算（可能被 max_tokens 压过）
-            "thinking": {
-                "mode": cfg.thinking,
-                "style": resolve_thinking_style(cfg),
-                "budget": thinking_budget(cfg),
-                "reasoning_model": is_reasoning_model(cfg.model),
-            },
+            # 思考模式：档位 + 实际采用的写法 + 真实强度/预算（可能被 max_tokens 压过）
+            "thinking": _thinking_status(cfg),
             # 「实际发出去的参数」预览：让「思考模式到底有没有生效」一眼可见
             "payload": payload_preview(cfg),
         },

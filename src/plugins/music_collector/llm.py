@@ -57,6 +57,11 @@ _CONTEXT_OVERFLOW_MARKS = (
 #: 最小预算限制（<1024 会被拒）；``high`` 不给太大，免得一次回复烧掉太多钱。
 _THINK_BUDGET = {"low": 1024, "medium": 4096, "high": 12000}
 
+#: DeepSeek 的思考强度只认 ``low`` / ``high`` / ``max`` 三档（见官方「思考模式」文档的
+#: 映射表：minimal→low、low→low、medium→high、high→high、xhigh→high、max→max、ultra→max）。
+#: 所以本地档位要压到这三个值上——直接把 ``medium`` 发过去是没定义的写法。
+_DEEPSEEK_EFFORT = {"low": "low", "medium": "high", "high": "high", "max": "max"}
+
 #: 这些模型对 temperature / top_p / penalty **要么拒绝要么忽略**，发出去只会换来
 #: 400 或者「参数不生效的困惑」，所以按模型名直接省掉。
 _REASONING_PREFIXES = ("o1", "o3", "o4", "gpt-5")
@@ -205,13 +210,21 @@ def guess_thinking_style(cfg: LLMConfig) -> str:
     # 智谱 GLM / 硅基流动 / OpenRouter：也用 thinking 对象
     if any(h in host for h in ("bigmodel", "zhipu", "siliconflow", "openrouter")):
         return "thinking_object"
+    # DeepSeek：开关用 thinking 对象、强度用 reasoning_effort（两件事分开表达，见官方文档）
+    if "deepseek" in host or "deepseek" in model:
+        return "deepseek"
     # OpenAI 官方与 Azure：reasoning_effort
     if "openai.com" in host or "openai.azure.com" in host:
         return "reasoning_effort"
     if model.startswith(_REASONING_PREFIXES):
         return "reasoning_effort"
-    # DeepSeek / Moonshot 等：靠模型名区分思考，没有额外参数可发
+    # 认不出的中转站：靠模型名区分思考，没有额外参数可发
     return "none"
+
+
+def deepseek_effort(mode: str) -> str:
+    """把本地档位映射成 DeepSeek 认的强度值（``medium`` 在那边等价于 ``high``）。"""
+    return _DEEPSEEK_EFFORT.get((mode or "").strip(), "high")
 
 
 def resolve_thinking_style(cfg: LLMConfig) -> str:
@@ -228,8 +241,13 @@ def thinking_budget(cfg: LLMConfig) -> int:
     两条约束：① ``0`` = 按档位取默认；② 预算不能吃掉全部 ``max_tokens``，
     否则模型思考完就没配额输出正文（表现为「返回空内容」），所以上限压到
     ``max_tokens`` 减 256。想真正高强度思考，得同时把最大回复 token 调大。
+
+    DeepSeek 不接收 token 预算（只认 low/high/max 三档），这里返回 0，
+    免得网页端显示一个「根本不存在的预算」。
     """
     if cfg.thinking in ("auto", "off"):
+        return 0
+    if resolve_thinking_style(cfg) == "deepseek":
         return 0
     budget = int(cfg.thinking_budget) or _THINK_BUDGET.get(cfg.thinking, 0)
     if budget <= 0:
@@ -255,6 +273,14 @@ def thinking_params(cfg: LLMConfig) -> dict:
         if budget:
             params["thinking_budget"] = budget
         return params
+    if style == "deepseek":
+        # 官方默认就是「开 + high」，所以「自动」什么都不发（前面已返回）。
+        # 关：只有 thinking 对象能表达关闭，reasoning_effort 没有「关」这个值。
+        if mode == "off":
+            return {"thinking": {"type": "disabled"}}
+        # 开：显式打开 + 给强度。**不带 budget_tokens**，DeepSeek 没有这个参数，
+        # 只有 Anthropic 系才用（预算在这边由档位表达）。
+        return {"thinking": {"type": "enabled"}, "reasoning_effort": deepseek_effort(mode)}
     # thinking_object（Claude / GLM / 部分中转）
     if mode == "off":
         return {"thinking": {"type": "disabled"}}

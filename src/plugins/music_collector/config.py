@@ -473,13 +473,21 @@ class LLMConfig(BaseModel):
     seed: int = -1
 
     # ---- 思考模式（推理模型的“想多久”）----
-    #: 思考档位：auto=不干预（用模型默认） off=尽量关掉 low/medium/high=开思考并给强度
-    thinking: Literal["auto", "off", "low", "medium", "high"] = "auto"
-    #: 思考参数的写法（各家 API 不统一）：auto=按接口地址与模型名自动判断
+    #: 思考档位：auto=不干预（用模型默认） off=尽量关掉 low/medium/high/max=开思考并给强度。
+    #: ``max`` 只有 DeepSeek 这类把强度分到 max 的厂商才有意义（其余写法按 high 处理）。
+    thinking: Literal["auto", "off", "low", "medium", "high", "max"] = "auto"
+    #: 思考参数的写法（各家 API 不统一）：auto=按接口地址与模型名自动判断；
+    #: deepseek = thinking 对象开关 + reasoning_effort 强度（官方文档的 OpenAI 格式）
     thinking_style: Literal[
-        "auto", "reasoning_effort", "enable_thinking", "thinking_object", "none"
+        "auto",
+        "reasoning_effort",
+        "enable_thinking",
+        "thinking_object",
+        "deepseek",
+        "none",
     ] = "auto"
-    #: 思考 token 预算，0 = 按档位取默认（low 512 / medium 2048 / high 8192）
+    #: 思考 token 预算，0 = 按档位取默认（low 1024 / medium 4096 / high 12000）。
+    #: DeepSeek 不接收预算（只认 low/high/max），该写法下这个值会被忽略
     thinking_budget: int = Field(0, ge=0, le=64000)
     #: 原样追加到请求体的 JSON（高级兜底：任意厂商私有参数都塞这里）
     extra_body: str = ""

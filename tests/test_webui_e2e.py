@@ -109,6 +109,26 @@ def test_endpoints():
         assert "history_stats" in b3["status"] and b3["status"]["history_chars_limit"] == 3000, \
             b3["status"]
 
+        # DeepSeek 写法：状态里要给出「实际强度」而不是一个不存在的预算
+        p5 = client.patch("/api/music-admin/config", headers=H, json={"values": {
+            "llm.model": "deepseek-v4.1-flash",
+            "llm.thinking": "max",
+            "llm.thinking_style": "deepseek",
+        }})
+        assert p5.status_code == 200 and p5.json()["ok"] is True, p5.text
+        b4 = client.get("/api/music-admin/bot", headers=H).json()
+        th4 = b4["status"]["thinking"]
+        assert th4["style"] == "deepseek" and th4["mode"] == "max", th4
+        assert th4["effort"] == "max", th4
+        assert th4["budget"] == 0, th4
+        pl4 = b4["status"]["payload"]
+        assert pl4["thinking"] == {"type": "enabled"} and pl4["reasoning_effort"] == "max", pl4
+        # 关闭：只发 thinking.disabled，不能留 reasoning_effort（它没有「关」这个值）
+        client.patch("/api/music-admin/config", headers=H,
+                     json={"values": {"llm.thinking": "off"}})
+        pl5 = client.get("/api/music-admin/bot", headers=H).json()["status"]["payload"]
+        assert pl5["thinking"] == {"type": "disabled"} and "reasoning_effort" not in pl5, pl5
+
         # 非法 extra_body 在保存时就被拦住（而不是等群里 @ 才发现）
         bad = client.patch("/api/music-admin/config", headers=H,
                            json={"values": {"llm.extra_body": "{oops"}})
@@ -118,6 +138,7 @@ def test_endpoints():
         client.patch("/api/music-admin/config", headers=H, json={"values": {
             "llm.thinking": "auto", "llm.thinking_style": "auto", "llm.thinking_budget": 0,
             "llm.top_p": 1.0, "llm.extra_body": "", "llm.enabled": False,
+            "llm.model": "smoke-model",
         }})
 
         # 清空上下文（内存态，随便调）

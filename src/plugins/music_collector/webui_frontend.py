@@ -1077,9 +1077,10 @@ window.addEventListener("resize", ()=>{ syncStickyOffsets(); if($("#cfgGroupSel"
 /* 枚举值的中文标签：schema 里传的是英文字面量，直接显示 off/low/high 太生硬，
    这里只给需要解释的键做映射，没登记的照旧显示原值 */
 const ENUM_LABELS={
-  "llm.thinking":{auto:"自动（用模型默认）",off:"关闭思考",low:"低 · 快而省",medium:"中 · 平衡",high:"高 · 慢而深"},
+  "llm.thinking":{auto:"自动（用模型默认）",off:"关闭思考",low:"低 · 快而省",medium:"中 · 平衡",high:"高 · 慢而深",max:"最高 · 最慢（仅部分厂商）"},
   "llm.thinking_style":{auto:"自动识别接口",reasoning_effort:"reasoning_effort（OpenAI 系）",
     enable_thinking:"enable_thinking（通义 / 百炼）",thinking_object:"thinking 对象（GLM / Claude / moonshot）",
+    deepseek:"DeepSeek（thinking 开关 + reasoning_effort）",
     none:"不发送任何思考参数"}
 };
 function enumLabel(key,val){ const m=ENUM_LABELS[key]; return (m&&m[val])||val; }
@@ -1374,9 +1375,10 @@ const BOT_GROUPS=[
    note:"控制“怎么选词”。<b>温度和 top_p 一般只动一个</b>；两项惩罚 0 = 不干预。推理模型会自动跳过这些参数。",
    keys:["llm.temperature","llm.top_p","llm.presence_penalty","llm.frequency_penalty","llm.max_tokens"]},
   {title:"思考模式",
-   note:"推理模型的“想多久”。<b>自动</b> = 不干预用模型默认；<b>关闭</b> = 尽量不发思考；<b>低/中/高</b> = 打开思考并给强度。<br>"
-      + "不同厂商的参数名不一样（OpenAI 叫 reasoning_effort、通义叫 enable_thinking、GLM/Claude 用 thinking 对象），"
-      + "默认按接口地址和模型名自动识别，识别不准可手动指定写法。",
+   note:"推理模型的“想多久”。<b>自动</b> = 不干预用模型默认；<b>关闭</b> = 尽量不发思考；<b>低/中/高/最高</b> = 打开思考并给强度。<br>"
+      + "不同厂商的参数名不一样（OpenAI 叫 reasoning_effort、通义叫 enable_thinking、GLM/Claude 用 thinking 对象、"
+      + "<b>DeepSeek 是 thinking 开关 + reasoning_effort</b>），默认按接口地址和模型名自动识别。"
+      + "<b>走中转或本机地址时自动识别看不出厂商</b>，请手动选 <code>DeepSeek</code>，否则档位不会生效。",
    keys:["llm.thinking","llm.thinking_style","llm.thinking_budget"]},
   {title:"消息读取",
    note:"群友不只是打字：会发图、发语音、引用上一条再问。这里决定模型能读到哪些内容。<br>"
@@ -1423,9 +1425,9 @@ function renderBotForm(schema, values){
   if(rest.length) cardOut("其它", "", rest);
   refreshBotDirty();
 }
-const THINK_MODE_LABEL={auto:"自动（用模型默认）",off:"关闭思考",low:"低",medium:"中",high:"高"};
+const THINK_MODE_LABEL={auto:"自动（用模型默认）",off:"关闭思考",low:"低",medium:"中",high:"高",max:"最高"};
 const THINK_STYLE_LABEL={reasoning_effort:"reasoning_effort",enable_thinking:"enable_thinking",
-  thinking_object:"thinking 对象",none:"不发送参数"};
+  thinking_object:"thinking 对象",deepseek:"DeepSeek（thinking + reasoning_effort）",none:"不发送参数"};
 function renderBotStatus(st){
   const box=$("#botStatus"); if(!box) return;
   BOT_STATUS = st||{};
@@ -1441,14 +1443,18 @@ function renderBotStatus(st){
   if(th.mode && th.mode!=="auto"){
     const styleName = THINK_STYLE_LABEL[th.style] || th.style || "—";
     let line = `思考：<b>${THINK_MODE_LABEL[th.mode]||esc(th.mode)}</b>　写法：<code>${esc(styleName)}</code>`;
+    /* DeepSeek 发出去的是强度而不是 token 预算，别在界面上显示一个不存在的数字 */
+    if(th.effort) line += `　实际强度：<b>${esc(th.effort)}</b>`;
     if(th.budget) line += `　预算：<b>${th.budget}</b> token`;
-    if(th.style==="none") line += ` <span style="color:var(--warn,#b45309)">（该接口/模型不需要思考参数，档位不会生效）</span>`;
+    if(th.style==="none") line += ` <span style="color:var(--warn,#b45309)">（当前写法不发思考参数，档位不会生效；用 DeepSeek 请把写法选成 deepseek）</span>`;
     else if(th.mode==="off" && th.style==="reasoning_effort") line += ` <span style="color:var(--warn,#b45309)">（OpenAI 系没有“关闭”，只能是默认思考）</span>`;
+    else if(th.mode==="off" && th.style==="deepseek") line += ` <span class="muted">（已显式关闭思考，温度等采样参数重新生效）</span>`;
     parts.push(line);
   } else {
     parts.push(`思考：<b>自动</b>（不干预，用模型默认）`);
   }
   if(th.reasoning_model) parts.push(`<span class="muted">该模型自带思考，温度 / top_p / 惩罚项不会随请求发送</span>`);
+  else if(th.style==="deepseek" && th.mode!=="off") parts.push(`<span class="muted">DeepSeek 思考模式开启时，温度与两项惩罚会被上游忽略（不报错也不生效）；top_p 仅在 0.95~1.0 内有效</span>`);
   const hs=st.history||{}, keys=Object.keys(hs), hstat=st.history_stats||{};
   const lim=st.history_chars_limit;
   if(keys.length){
