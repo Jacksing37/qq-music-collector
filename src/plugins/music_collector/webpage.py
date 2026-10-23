@@ -22,8 +22,10 @@ from urllib.parse import urlsplit
 import httpx
 from nonebot.log import logger
 
-#: 单页最多下载这么多字节（防超大页面把内存和带宽吃光）
-MAX_BYTES = 512 * 1024
+#: 单页最多下载这么多字节（防超大页面把内存和带宽吃光）。
+#: 别调回 512KB：百度首页这类内联 CSS/JS 极多的页面正文在 500KB 之后，
+#: 截断点落在 <style> 里既会漏 CSS、又会让正文一个字不剩（线上实测）。
+MAX_BYTES = 1024 * 1024
 #: 正文短于这个长度就当没抓到——多半是登录墙、JS 渲染的空壳或错误页
 MIN_CHARS = 40
 #: 最多跟几跳重定向（每跳都要重新做一次公网校验）
@@ -39,6 +41,10 @@ _HEADERS = {
 }
 
 _RE_SCRIPT = re.compile(r"<(script|style|noscript|svg|iframe)[^>]*>.*?</\1>", re.I | re.S)
+#: 「有开无闭」的残块：页面被体积上限截断时最后一个 <style>/<script> 往往没有
+#: 闭合标签，上面那对成对剥离会**整体失配**，于是 CSS / JS 原封不动漏进正文。
+#: 截断点之后本来也没有正文可读，直接连同残余内容一起砍掉最干净。
+_RE_ORPHAN = re.compile(r"<(script|style|noscript|svg|iframe)\b[^>]*>.*\Z", re.I | re.S)
 _RE_TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
 _RE_OG = re.compile(
     r'<meta[^>]+(?:property|name)=["\']og:(title|description)["\'][^>]*content=["\'](.*?)["\']',
@@ -117,12 +123,14 @@ def html_to_text(raw: str, max_chars: int = 1500) -> tuple[str, str]:
 
     body = _RE_COMMENT.sub(" ", raw)
     body = _RE_SCRIPT.sub(" ", body)
+    body = _RE_ORPHAN.sub(" ", body)
     body = _RE_BLOCK.sub("\n", body)
     body = _RE_TAG.sub(" ", body)
     body = html_lib.unescape(body)
     # 二次清理：不少站点把整段 HTML **转义**后塞进 JSON / 属性里（百度就这样），
     # 反转义之后才会「长出」<style>/<div>，一轮剥离清不掉，得再来一遍。
     body = _RE_SCRIPT.sub(" ", body)
+    body = _RE_ORPHAN.sub(" ", body)
     body = _RE_BLOCK.sub("\n", body)
     body = _RE_TAG.sub(" ", body)
     body = html_lib.unescape(body)

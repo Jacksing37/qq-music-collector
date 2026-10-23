@@ -166,6 +166,14 @@ def test_html_to_text() -> None:
           "<style" not in txt and "color:red" not in txt, txt)
     check("正文没被误删", "正文开始" in txt and "正文结尾" in txt, txt)
 
+    # 真实踩过的坑（线上复现）：页面超过 512KB 被截断，截断点正好落在 <style> 里
+    # → 没有 </style>，成对剥离整体失配，CSS 原封不动漏进正文
+    truncated = ("<p>正文开头</p><style type=\"text/css\">"
+                 ".s-skin-hasbg{background:0 0;_zoom:1}#head .x{top:32px}")
+    _, txt = html_to_text(truncated)
+    check("截断的 <style> 不漏 CSS", "s-skin-hasbg" not in txt and "_zoom" not in txt, txt)
+    check("截断前已有正文仍保留", "正文开头" in txt, txt)
+
 
 def test_ssrf_guard() -> None:
     print("\n[2] SSRF 防护：只放行公网地址")
