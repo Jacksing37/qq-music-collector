@@ -962,16 +962,18 @@ async def _sync_after_match(group_id: int, song: Song) -> None:
 async def _reply_llm_link(bot: Bot, event: GroupMessageEvent) -> None:
     """消息里的链接**不是音乐平台的**时，交给大模型接一句。
 
-    典型场景：群友甩一个网页 / 视频 / 文章的链接，机器人过去一声不吭。
-    现在只要 LLM 开着，就让模型顺着这条链接聊两句。
+    ⚠️ **默认关闭**（``llm.reply_link=False``）：群里甩网页 / 视频 / 文章链接时，
+    没 @ 机器人就一声不吭——这是群友反馈「收集窗口期间乱插话」后改的默认值。
+    想要「任何链接都主动接一句」的老行为，把 ``llm.reply_link`` 打开。
 
     几道保险（缺一不可）：
 
+    - ``llm.reply_link`` 关着就直接返回（默认如此）；
     - 消息里必须真有 http 链接——纯图片、纯卡片没有什么可聊的；
     - **真·音乐链接一律不碰**（``_has_music_link``）：不在收集期时
       ``handle_segments`` 会直接返回空结果，这里的判定才不会把歌当成普通链接；
     - **@ 过机器人的不碰**：那条走 ``at_listener``（优先级更高），否则会回两遍；
-    - 命令不碰；``llm.reply_link`` 关着不碰；不在生效群 / 没填全接口，静默。
+    - 命令不碰；不在生效群 / 没填全接口，静默。
     """
     llm_cfg, why = _llm_gate(event)
     if why or not llm_cfg.reply_link:

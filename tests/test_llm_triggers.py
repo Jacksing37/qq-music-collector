@@ -279,7 +279,16 @@ async def test_at_with_plain_link() -> None:
 
 
 async def test_plain_link_share() -> None:
-    print("\n[4] 群里分享普通链接：收集流程静默后交给模型")
+    print("\n[4] 普通链接：默认静默；显式打开 reply_link 才交给模型")
+    # ① 默认配置（真实出厂状态）→ 没 @ 就必须一声不吭
+    reset_llm(reply_link=False)
+    stub = Stubbed("不该被调用").install()
+    bot = StubBot()
+    await handle_music_share(bot, make_event([seg("text", text=PLAIN_URL)], user_id=4100))
+    check("默认关闭时不调模型", stub.calls == [], str(stub.calls))
+    check("默认关闭时不发消息", bot.sent == [], str(bot.sent))
+
+    # ② 显式打开 → 才会主动接一句（老行为，保留成可选能力）
     reset_llm()
     stub = Stubbed("这链接是个菜谱").install()
 
@@ -411,8 +420,13 @@ def test_config_and_form() -> None:
     cfg = LLMConfig()
     check("poke_reply 默认开", cfg.poke_reply is True)
     check("poke_prompt 默认有内容", bool(cfg.poke_prompt.strip()))
-    check("reply_link 默认开", cfg.reply_link is True)
+    check("reply_link 默认**关**（没 @ 就一声不吭，别在群里抢话）", cfg.reply_link is False)
     check("link_hint 默认有内容", "点歌" in cfg.link_hint)
+
+    # 回归：默认配置下，非 @ 的普通链接必须完全静默（曾经默认开 → 群里没 @ 也回）
+    example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+    check("示例配置里 reply_link 也是关的", "reply_link: false" in example,
+          "示例配置与代码默认值不一致")
 
     for key in ("llm.poke_reply", "llm.poke_prompt", "llm.reply_link", "llm.link_hint"):
         desc = KEY_INDEX.get(key)
