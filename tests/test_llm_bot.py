@@ -947,15 +947,37 @@ async def test_background() -> None:
         check("带时间戳与昵称", "张三(1)" in bg and "[" in bg, bg[:80])
         check("带了「不是在跟你说话」的说明", "不是在跟你说话" in bg, bg[:40])
 
-        # 机器人说话了 → 之前的闲聊就不该再当背景
+        # 机器人刚说完话、界限之后还没人开口 → 往前补一小段，避免"刚答完就失忆"
         await store.append_chat(gid, 0, "", "assistant", "哈哈确实", kind="chat")
         after = await _llm_background(_Ev(), cfg)
-        check("说过话之后，之前那批不再带", after == "", after)
+        check("刚说完话没人接 → 往前补到下限", "锅贴真不错" in after, after)
+        check("补的量不超过下限（不会把整段历史拖进来）",
+              after.count("\n") <= cfg.bg_chat_min_rows, after)
+
+        # 补足开关关掉 → 退回旧行为（只看界限之后）
+        no_fill = cfg.model_copy(update={"bg_chat_min_rows": 0})
+        check("bg_chat_min_rows=0 → 界限之后为空就不带",
+              await _llm_background(_Ev(), no_fill) == "", "（不该有内容）")
 
         await store.append_chat(gid, 3, "王五", "user", "周末去看海吗", kind="listen")
         bg3 = await _llm_background(_Ev(), cfg)
-        check("只取上次说话之后的那条", "周末去看海吗" in bg3, bg3)
-        check("之前那两句不再混进来", "锅贴真不错" not in bg3, bg3)
+        check("界限之后那条一定带", "周末去看海吗" in bg3, bg3)
+        check("不足下限时把前面那两句也补进来", "锅贴真不错" in bg3, bg3)
+        bg3_old = await _llm_background(_Ev(), no_fill)
+        check("关掉补足后，之前那两句不混进来",
+              "周末去看海吗" in bg3_old and "锅贴真不错" not in bg3_old, bg3_old)
+
+        # 当前这句提问会被「旁听 + 问答」各记一次，不能出现在背景里
+        class _Ev2:
+            group_id = gid
+            user_id = 7
+
+        await store.append_chat(gid, 7, "钱七", "user", "你能看到最早那条吗", kind="listen")
+        bg_self = await _llm_background(_Ev2(), cfg, "你能看到最早那条吗")
+        check("背景里剔掉当前提问本身", "你能看到最早那条吗" not in bg_self, bg_self)
+        bg_other = await _llm_background(_Ev2(), cfg, "跟这句无关的话")
+        check("只剔除一字不差的那句（别人的话照带）",
+              "你能看到最早那条吗" in bg_other, bg_other)
 
         check("关掉开关 → 空",
               await _llm_background(_Ev(), cfg.model_copy(update={"bg_chat": False})) == "")

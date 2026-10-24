@@ -1604,7 +1604,8 @@ const BOT_GROUPS=[
       + "它就能接上前文（比如知道「他们刚才在争哪家锅贴好吃」）。<br>"
       + "这段走参考资料传，<b>不进对话历史</b>，也不占「上下文总字符上限」的预算；"
       + "代价是每次 @ 多花约 1000 token。",
-   keys:["llm.bg_chat","llm.bg_chat_max","llm.bg_chat_chars","llm.bg_chat_minutes"]},
+   keys:["llm.bg_chat","llm.bg_chat_max","llm.bg_chat_chars","llm.bg_chat_minutes",
+         "llm.bg_chat_min_rows"]},
   {title:"工具与技能",
    note:"模型可以<b>自己决定</b>调工具：需要看网页就抓网页，遇到不熟的任务就看有没有对应技能。<br>"
       + "和「自动抓取」不同——抓不抓、抓哪个由模型判断，不会每条消息都去抓，也不会把无关页面塞进上下文。<br>"

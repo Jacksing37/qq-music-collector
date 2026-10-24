@@ -401,12 +401,39 @@ async def _llm_context(bot: Bot, event: object, llm_cfg, text: str) -> str:
 _BG_CHAR_LIMIT = 2500
 
 
-async def _llm_background(event: object, llm_cfg) -> str:
+def _drop_pending_question(rows: list[dict], event: object, text: str) -> list[dict]:
+    """把「当前这条提问」从背景里剔掉。
+
+    群里 @ 它的话会被记两遍：旁听器落一条 ``listen``（背景取的就是这张表），
+    ``chat()`` 又落一条 ``chat``。于是背景里会冒出和提问一字不差的一句，而背景
+    开头明确写着「不是在跟你说话」——同一句既是「别人的闲聊」又是「问你的」，
+    模型只能挑一个信，答出来就前后不搭。
+
+    只按「同一个人 + 正文完全相同」剔除，宁可漏也别误删别人的话。
+    """
+    want = (text or "").strip()
+    uid = int(getattr(event, "user_id", 0) or 0)
+    if not want or not uid:
+        return rows
+    return [
+        r
+        for r in rows
+        if not (
+            int(r.get("user_id") or 0) == uid
+            and str(r.get("content") or "").strip() == want
+        )
+    ]
+
+
+async def _llm_background(event: object, llm_cfg, text: str = "") -> str:
     """机器人上次说话之后、群里聊的那一段（它没参与过的那截）。
 
     **为什么需要它**：群友闲聊存进 ``kind='listen'``，而问答历史是
     ``kind='chat'``，两条通道分开。所以单纯 @ 它一句「刚才在聊啥」，它其实
     一无所知——问出这种「答不上来」的根源在这里，不是模型不行。
+
+    ``text`` 是当前这条提问的正文，用来把它自己从背景里剔掉（见
+    :func:`_drop_pending_question`）。
 
     只查库、不发请求；任何异常都当「没有背景」，绝不能让 @ 的回复卡住。
     """
@@ -415,14 +442,31 @@ async def _llm_background(event: object, llm_cfg) -> str:
     gid = int(getattr(event, "group_id", 0) or 0)
     if not gid:
         return ""
+    max_rows = max(1, int(llm_cfg.bg_chat_max))
     try:
         last = await service.store.last_bot_chat(gid)
         rows = await service.store.recent_chat(
             gid,
             after_id=int((last or {}).get("id") or 0),
-            limit=int(llm_cfg.bg_chat_max),
+            limit=max_rows,
             max_chars=int(llm_cfg.bg_chat_chars),
         )
+        rows = _drop_pending_question(rows, event, text)
+        # 界限之后不够看就往前补。刚回完一句又被 @ 时，界限之后只剩这句提问
+        # 本身（剔除后为空），模型于是完全接不上前面在聊什么——群里看到的就是
+        # 「上一句还答得好好的，下一句突然问我在说什么」。
+        need = min(int(llm_cfg.bg_chat_min_rows), max_rows)
+        if need > 0 and len(rows) < need:
+            tail = await service.store.recent_chat(
+                gid, after_id=0, limit=max_rows,
+                max_chars=int(llm_cfg.bg_chat_chars),
+            )
+            tail = _drop_pending_question(tail, event, text)
+            # 只往前补，别把界限之后那些重复一遍
+            first_id = int(rows[0]["id"]) if rows else 0
+            older = [r for r in tail if not first_id or int(r["id"]) < first_id]
+            if older:
+                rows = older[-(need - len(rows)):] + rows
     except Exception as exc:  # noqa: BLE001 — 背景拿不到也要正常回答
         logger.debug(f"[llm] 群{gid} 取群聊背景失败: {exc}")
         return ""
@@ -470,8 +514,9 @@ async def _llm_answer(
     """
     group_id = int(getattr(event, "group_id", 0) or 0)
     user_id = int(getattr(event, "user_id", 0) or 0)
-    # 群友闲聊不进问答历史，这里把那一段补上（走 context，不进历史、不占历史预算）
-    background = await _llm_background(event, llm_cfg)
+    # 群友闲聊不进问答历史，这里把那一段补上（走 context，不进历史、不占历史预算）。
+    # 传 text 是让它把「当前这句提问」从背景里剔掉——那句会被旁听和问答各记一次
+    background = await _llm_background(event, llm_cfg, text)
     if background:
         context = f"{background}\n\n{context}" if context else background
     reply, reason = await llm_bot.chat(
