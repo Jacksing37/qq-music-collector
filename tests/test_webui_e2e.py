@@ -96,6 +96,34 @@ def test_endpoints():
         # 未带 token -> 401
         assert client.get("/api/music-admin/bot").status_code == 401
 
+        # ---- 上下文用量接口（机器人页那张卡的数据源）----
+        cx = client.get("/api/music-admin/context", headers=H)
+        assert cx.status_code == 200
+        cj = cx.json()
+        assert cj["ok"] is True and cj["window"] > 0
+        assert [s["key"] for s in cj["segments"]] == [
+            "system", "memory", "rules", "tools", "history"
+        ]
+        assert cj["used"] == sum(s["tokens"] for s in cj["segments"])
+        assert 0 <= cj["percent"] < 100
+        # 指定群号：回显该群；非法群号退回 0 而不是 500（网页下拉可能是空字符串）
+        assert client.get("/api/music-admin/context?group_id=999000111",
+                          headers=H).json()["group_id"] == 999000111
+        bad = client.get("/api/music-admin/context?group_id=abc", headers=H)
+        assert bad.status_code == 200 and bad.json()["group_id"] == 0
+        assert client.get("/api/music-admin/context").status_code == 401
+
+        # ---- 仪表盘页面本身：新卡片与手机适配规则要真的出现在 HTML 里 ----
+        page = client.get("/music-admin", headers=H)
+        assert page.status_code == 200
+        html = page.text
+        for marker in ("ctxGroup", "ctxBar", "ctxList", "上下文用量", "botNav"):
+            assert marker in html, f"页面里少了 {marker}"
+        # 断点与「跳转栏横向滑」这类关键规则，删掉会立刻在小屏上表现成挤成一团
+        for rule in ("max-width:900px", "max-width:640px", "max-width:560px",
+                     "flex-wrap:nowrap"):
+            assert rule in html, f"CSS 里少了 {rule}"
+
         # 没填 Key 时「测试连接」应给出可读失败（而不是 500、也不会真发请求）。
         # 先把 api_key 清空，保证这条断言不依赖上一个测试留下的配置、也不会真联网
         client.patch("/api/music-admin/config", headers=H,

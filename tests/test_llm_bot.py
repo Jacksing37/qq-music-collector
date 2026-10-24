@@ -52,6 +52,7 @@ from music_collector.llm import (  # noqa: E402
     guess_thinking_style,
     is_context_overflow,
     is_reasoning_model,
+    estimate_tokens,
     normalize_endpoint,
     parse_extra_body,
     payload_preview,
@@ -782,6 +783,88 @@ async def test_diagnostic_logs() -> None:
 # ---------------------------------------------------------------- 13. 分流
 
 
+async def test_context_breakdown() -> None:
+    """网页「上下文用量」那条卡的数据源：分段对不对、和窗口的关系对不对。
+
+    这张卡最容易犯的错是「算出来跟真正发出去的请求不是一回事」，所以这里
+    特意对照 ``_history_within`` 的裁剪结果来断言。
+    """
+    print("\n[13] 上下文用量分解")
+    from music_collector.config import MemoryConfig
+
+    # (a) token 估算：只求量级对，不做精确断言
+    check("空串 0 token", estimate_tokens("") == 0)
+    cjk = estimate_tokens("啊" * 1000)
+    check("1000 汉字 ≈ 500 token", 480 <= cjk <= 520, str(cjk))
+    ascii_tok = estimate_tokens("a" * 1000)
+    check("1000 个英文字符 ≈ 286 token", 270 <= ascii_tok <= 300, str(ascii_tok))
+
+    # (b) 空会话基线：只算人设 + 规则 + 工具，历史必须是 0
+    bot = LLMBot()
+    gid = 8301
+    base = dict(
+        enabled=True, base_url="http://x/v1", api_key="k", model="m",
+        system_prompt="你是测试机器人", history_rounds=5, context_window=1048576,
+        max_tokens=800, history_chars=0,
+    )
+    cfg = LLMConfig(tools=False, **base)
+    mem = MemoryConfig(enabled=False)
+
+    d = bot.context_breakdown(gid, cfg, mem)
+    segs = {s["key"]: s for s in d["segments"]}
+    check("分段齐全且顺序固定",
+          [s["key"] for s in d["segments"]] == ["system", "memory", "rules", "tools", "history"],
+          str([s["key"] for s in d["segments"]]))
+    check("窗口取自 context_window", d["window"] == 1048576, str(d["window"]))
+    check("人设段字数对得上", segs["system"]["chars"] == len("你是测试机器人"),
+          str(segs["system"]["chars"]))
+    check("记忆关着 → 0", segs["memory"]["chars"] == 0)
+    check("工具关着 → 0", segs["tools"]["chars"] == 0)
+    check("没有历史 → 0（别因为 +1 冒出个假占用）",
+          segs["history"]["chars"] == 0 and segs["history"]["tokens"] == 0, str(segs["history"]))
+    check("used = 各段之和", d["used"] == sum(s["tokens"] for s in d["segments"]), str(d["used"]))
+    check("百分比与 used/window 一致",
+          abs(d["percent"] - d["used"] * 100.0 / d["window"]) < 0.02, str(d["percent"]))
+    check("回复预留 = max_tokens", d["reserve"] == 800, str(d["reserve"]))
+    check("空会话占比很小（<1%）", d["percent"] < 1, str(d["percent"]))
+
+    # (c) 有历史：历史段要涨；预算卡死后要报出「丢了几条」
+    dq = bot._history.setdefault(gid, deque())
+    for _ in range(10):
+        dq.append({"role": "user", "content": "问" * 500})
+        dq.append({"role": "assistant", "content": "答" * 500})
+    d2 = bot.context_breakdown(gid, cfg, mem)
+    s2 = {s["key"]: s for s in d2["segments"]}
+    check("历史段涨起来了", s2["history"]["tokens"] > 0, str(s2["history"]))
+    check("history_chars=0 → 全部历史都算进来", s2["history"]["chars"] == 10000,
+          str(s2["history"]["chars"]))
+    check("没超预算就不报丢弃", d2["history"]["dropped_msgs"] == 0, str(d2["history"]))
+
+    cfg_tight = cfg.model_copy(update={"history_chars": 2000})
+    d3 = bot.context_breakdown(gid, cfg_tight, mem)
+    s3 = {s["key"]: s for s in d3["segments"]}
+    check("预算卡死后只算留下来的", s3["history"]["chars"] <= 2000, str(s3["history"]["chars"]))
+    check("报出了丢掉几条", d3["history"]["dropped_msgs"] > 0, str(d3["history"]["dropped_msgs"]))
+    check("丢掉的字数也报了", d3["history"]["dropped_chars"] > 0,
+          str(d3["history"]["dropped_chars"]))
+
+    # (d) 工具开着时 schema 要算进来（用另一个空群，免得被上一段的历史干扰）
+    gid2 = 8302
+    cfg_tools = cfg.model_copy(update={"tools": True})
+    d4 = bot.context_breakdown(gid2, cfg_tools, mem)
+    s4 = {s["key"]: s for s in d4["segments"]}
+    check("工具段有内容", s4["tools"]["chars"] > 100, str(s4["tools"]["chars"]))
+    check("工具段列出了挂上的工具名", len(d4["tools"]) > 0, str(d4["tools"]))
+    check("开工具后总量变大", d4["used"] > d["used"], f'{d4["used"]} vs {d["used"]}')
+
+    # (e) 分母真的在用 context_window
+    cfg_small = cfg.model_copy(update={"context_window": 2000})
+    d5 = bot.context_breakdown(gid, cfg_small, mem)
+    check("窗口调小后百分比变大", d5["percent"] > d2["percent"],
+          f'{d5["percent"]} vs {d2["percent"]}')
+    check("改了窗口不影响 used", d5["used"] == d2["used"], f'{d5["used"]} vs {d2["used"]}')
+
+
 async def test_handle_at_routing() -> None:
     print("\n[13] handle_at 分流：大模型优先，兜底自我介绍")
     import music_collector as mc
@@ -872,6 +955,7 @@ async def main() -> None:
     test_config_and_schema()
     test_sampling_and_thinking()
     await test_context_budget()
+    await test_context_breakdown()
     await test_diagnostic_logs()
     await test_handle_at_routing()
     print("\n====================================================")

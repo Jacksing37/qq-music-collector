@@ -201,6 +201,30 @@ def message_chars(message: dict) -> int:
     return total + len(str(reasoning))
 
 
+#: 中文实测约 **2 字/token**（200 万汉字 ≈ 947K token，见 ``config.history_chars``
+#: 的注释）；英文 / JSON / 代码密一些，按 3.5 字符/token 估。
+#:
+#: 这两个数字**只用来在网页上画「上下文用量」那条进度条**，不参与请求、不参与裁剪，
+#: 所以「大致准」就够了——为它引一个真的 tokenizer 不值得（得多带几十 MB 词表，
+#: 而且不同厂商的分词器还不一样）。
+_CJK_PER_TOKEN = 2.0
+_ASCII_PER_TOKEN = 3.5
+
+
+def estimate_tokens(text: str) -> int:
+    """粗估一段文本占多少 token（CJK 按 2 字/token、其余按 3.5 字符/token）。"""
+    if not text:
+        return 0
+    text = str(text)
+    cjk = 0
+    for ch in text:
+        # 汉字 + 中文标点 + 全角字符都按「一个汉字」的量级算
+        if "\u4e00" <= ch <= "\u9fff" or "\u3000" <= ch <= "\u303f" or "\uff00" <= ch <= "\uffef":
+            cjk += 1
+    other = len(text) - cjk
+    return int(cjk / _CJK_PER_TOKEN + other / _ASCII_PER_TOKEN) + 1
+
+
 def as_message(raw) -> dict:
     """把 ``_post_chat`` 的返回值归一化成 message dict。
 
@@ -666,6 +690,97 @@ class LLMBot:
             if msgs:
                 total -= message_chars(msgs.pop(0))
         return msgs
+
+    def context_breakdown(
+        self,
+        group_id: int,
+        cfg: LLMConfig,
+        mem: Optional[MemoryConfig] = None,
+    ) -> dict:
+        """这次请求的上下文**由谁撑着**——网页「上下文用量」条形图的数据源。
+
+        复刻 :meth:`chat` 拼 messages 的那几步（人设截断 → 记忆 → 硬规则 → 工具 →
+        历史裁剪），所以这里的数字和真正发出去的请求一致，不是另算一套。
+
+        只统计**输入**：即将发出的那句提问无法预知（谁会问多长），单独在 ``note``
+        里说明。``reserve`` 是 ``max_tokens``，也就是「回复最多再占多少」。
+        """
+        memory_cfg = mem if mem is not None else MemoryConfig()
+
+        prompt = (cfg.system_prompt or "").strip()
+        if len(prompt) > SYSTEM_CHAR_LIMIT:
+            prompt = prompt[:SYSTEM_CHAR_LIMIT]
+
+        memory_text = ""
+        if memory_cfg.enabled:
+            try:
+                memory_text = memory_mod.render_for_prompt(memory_cfg, group_id)
+            except Exception as exc:  # noqa: BLE001 — 读档案失败不该让整页 500
+                logger.warning(f"[llm] 群{group_id} 统计记忆占用失败: {exc}")
+
+        rules = tools_mod.TOOL_RULES if cfg.tools else ""
+
+        tool_chars = 0
+        tool_json = ""
+        tool_names: list[str] = []
+        if cfg.tools and cfg.tool_rounds > 0:
+            try:
+                tool_list, _ = tools_mod.build(cfg, group_id, 0, "", memory_cfg)
+                tool_names = [t.name for t in tool_list]
+                # 工具占的是「JSON 的字符数」而不是纯文本：schema 里全是英文键名，
+                # 用纯文本口径会把它估小一半
+                tool_json = json.dumps(tools_mod.schemas(tool_list), ensure_ascii=False)
+                tool_chars = len(tool_json)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[llm] 统计工具 schema 失败: {exc}")
+
+        raw = self.history(group_id)
+        hist = self._history_within(group_id, cfg.history_chars) if cfg.history_rounds > 0 else []
+        hist_chars = sum(message_chars(m) for m in hist)
+        raw_chars = sum(message_chars(m) for m in raw)
+
+        window = max(1000, int(cfg.context_window or 1048576))
+        parts = [
+            ("system", "系统提示词（人设）", len(prompt), estimate_tokens(prompt)),
+            ("memory", "群记忆档案", len(memory_text), estimate_tokens(memory_text)),
+            ("rules", "能力边界规则", len(rules), estimate_tokens(rules)),
+            ("tools", "工具与技能", tool_chars, estimate_tokens(tool_json)),
+            # 历史拿不到「拼好的整段文本」（content 可能是多模态 list），
+            # 只能按字符数折算；群聊以中文为主，用 2 字/token。空历史必须是 0，
+            # 不能因为 +1 而让「空会话」也显示出占用
+            ("history", "对话消息", hist_chars,
+             (int(hist_chars / _CJK_PER_TOKEN) + 1) if hist_chars else 0),
+        ]
+        segments = [
+            {
+                "key": key,
+                "label": label,
+                "chars": chars,
+                "tokens": tokens,
+                "percent": round(tokens * 100.0 / window, 2),
+            }
+            for key, label, chars, tokens in parts
+        ]
+
+        used = sum(s["tokens"] for s in segments)
+        return {
+            "group_id": int(group_id) if group_id else 0,
+            "window": window,
+            "used": used,
+            "percent": round(used * 100.0 / window, 2),
+            "reserve": int(cfg.max_tokens),
+            "segments": segments,
+            "tools": tool_names,
+            "history": {
+                "msgs": len(hist),
+                "chars": hist_chars,
+                "dropped_msgs": max(0, len(raw) - len(hist)),
+                "dropped_chars": max(0, raw_chars - hist_chars),
+                "chars_limit": int(cfg.history_chars),
+            },
+            "note": "只统计输入；即将发出的那句提问未计入（通常几十字）。"
+                    f"回复另占至多 {int(cfg.max_tokens)} token。",
+        }
 
     def clear_history(self, group_id: Optional[int] = None) -> int:
         """清空上下文（内存 + 库）：传群号只清该群，不传清全部。返回清掉的群数。

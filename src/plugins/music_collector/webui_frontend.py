@@ -221,6 +221,23 @@ button:disabled{opacity:.5;cursor:not-allowed}
 #page-bot .cfg-sec{scroll-margin-top:calc(var(--cfg-stick) + 72px)}
 
 /* ---- 群记忆 ---- */
+/* ---- 上下文用量（机器人页） ---- */
+.ctx-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:14px 0 0}
+.ctx-pct{font-size:32px;font-weight:700;letter-spacing:-.5px;line-height:1}
+.ctx-sub{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
+/* 条形图：宽度按「窗口」算而不是按「已用量」算——条的长短本身就代表进度 */
+.ctx-bar{display:flex;height:12px;border-radius:999px;overflow:hidden;background:var(--input);
+  border:1px solid var(--card-bd);margin:14px 0 16px}
+.ctx-bar .sg{height:100%;transition:width .25s ease}
+.ctx-bar .sg:first-child{border-radius:999px 0 0 999px}
+.ctx-bar .sg:last-child{border-radius:0 999px 999px 0}
+.ctx-list{display:grid;gap:9px}
+.ctx-row{display:grid;grid-template-columns:10px 1fr auto 62px;gap:10px;align-items:center;font-size:13px}
+.ctx-dot{width:9px;height:9px;border-radius:50%;flex:none}
+.ctx-name{color:var(--txt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ctx-tok{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums;text-align:right}
+.ctx-p{color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}
+
 .mem-layout{display:grid;grid-template-columns:300px 1fr;gap:14px;align-items:start}
 @media(max-width:860px){.mem-layout{grid-template-columns:1fr}}
 .mem-side{min-height:340px}
@@ -281,6 +298,16 @@ button:disabled{opacity:.5;cursor:not-allowed}
   .cfg-bar select{min-width:120px}
   .cfg-nav{padding:9px 10px;gap:6px}
   .cfg-nav-btn{padding:5px 10px;font-size:12px}
+  /* 跳转栏：手机上十几个分组会堆成好几行、还吸顶，把屏幕吃掉一半。
+     改成单行横向滑（和顶部导航条一致），按钮不换行 */
+  .cfg-nav{flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;
+    -webkit-overflow-scrolling:touch;scrollbar-width:none}
+  .cfg-nav::-webkit-scrollbar{display:none}
+  .cfg-nav .cn-title{display:none}
+  .cfg-nav-btn{flex:0 0 auto;white-space:nowrap}
+  /* 跳转栏改成单行后矮了一截，锚点就不用再让出那么多空白 */
+  .cfg-sec{scroll-margin-top:calc(var(--cfg-stick) + var(--cfg-bar-h) + 56px)}
+  #page-bot .cfg-sec{scroll-margin-top:calc(var(--cfg-stick) + 56px)}
   .stat-grid{grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}
   /* 表格：窄屏把列撑开，横向滚动交给 .gcard 的通用规则 */
   .gtbl{min-width:600px}
@@ -290,6 +317,36 @@ button:disabled{opacity:.5;cursor:not-allowed}
   .footbar{left:0;padding:10px 12px}
   .toast{top:auto;bottom:12px;transform:translateX(-50%) translateY(12px)}
   .toast.show{transform:translateX(-50%) translateY(0)}
+  /* 用量卡：手机上字号收一档，百分比仍然要醒目 */
+  .ctx-pct{font-size:28px}
+  .ctx-bar{height:10px}
+}
+/* 手机竖屏（常见 375~430px）：一行里塞多个控件必然溢出，统一改成「一行一个」。
+   注意要 !important —— 那些输入框的 min-width 是写在 style 里的，普通规则压不住 */
+@media (max-width:640px){
+  .row{gap:8px}
+  .row > input,.row > select,.row > textarea{flex:1 1 100%!important;min-width:0!important}
+  .row > label{flex:1 1 100%;min-width:0}
+  .row > button{flex:0 0 auto}
+  /* 换行布局下 spacer 会白占一整行 */
+  .spacer{display:none}
+  button{padding:9px 12px}          /* 手指点得准一点 */
+  .card{padding:12px 12px;border-radius:14px}
+  .card h2{font-size:14px}
+  .card p{font-size:12.5px}
+  /* 长 URL / 长链接不撑破卡片 */
+  code,a{overflow-wrap:anywhere}
+  /* 表格保持最小宽度、交给卡片横向滚，而不是把列挤成一团 */
+  .gtbl{min-width:480px;font-size:12px}
+  .ctx-row{grid-template-columns:9px 1fr auto 54px;gap:6px;font-size:12px}
+  .ctx-tok{font-size:11px}
+  .mem-body{min-height:220px}
+  /* 记忆页：QQ 号与昵称各占一半，比各占一整行省地方 */
+  #memUid,#memNick{flex:1 1 0!important}
+  /* 日志工具栏：来源 / 级别各占一行，select 撑满才好点 */
+  .log-toolbar > label{flex:1 1 100%}
+  .log-toolbar > label select{width:100%}
+  .log-toolbar > label.chk{flex:1 1 100%}
 }
 @media (max-width:560px){
   .topbar h1{font-size:15px}
@@ -297,12 +354,17 @@ button:disabled{opacity:.5;cursor:not-allowed}
   .status-pill{display:none}         /* 超窄屏先舍掉状态胶囊，给标题和按钮腾地方 */
   .content{padding:12px 10px 120px}
   .stat-grid{grid-template-columns:1fr 1fr}
-  .gtbl{min-width:0;font-size:12px}
+  /* 别把表格挤扁：保持最小宽度，让 .gcard 横向滚（原来是 min-width:0，五列会缩成一条） */
+  .gtbl{min-width:440px;font-size:12px}
   .gtbl .date{display:none}          /* 小屏先舍掉日期列，表格才放得下 */
   .gtbl th,.gtbl td{padding:6px 5px}
   .gtitle{font-size:14px}
   .pv-drawer{width:100vw}
   .pv-body{padding:14px 14px 26px}
+  /* 手机上两栏已经叠成一列，固定 340px 的最小高度只会留下一大片空白 */
+  .mem-side{min-height:0}
+  .ctx-row{grid-template-columns:9px 1fr auto 48px}
+  .ctx-pct{font-size:25px}
 }
 </style>
 </head>
@@ -436,6 +498,25 @@ button:disabled{opacity:.5;cursor:not-allowed}
           <button id="botClearHist" title="清空内存里缓存的对话上下文（重启也会清空）">🧹 清空上下文</button>
         </div>
       </div>
+
+      <!-- 上下文用量：一次请求的窗口都被谁占了（按群统计，历史每个群各一份） -->
+      <div class="card">
+        <h2><span class="dot"></span>上下文用量</h2>
+        <div class="row">
+          <label class="muted">群：<select id="ctxGroup" title="历史消息是每个群各存一份，所以要按群看"></select></label>
+          <button id="ctxReload" title="重新统计（改完人设 / 工具 / 记忆后点一下）">↻ 刷新</button>
+          <div class="spacer"></div>
+          <span class="muted" id="ctxHint">加载中…</span>
+        </div>
+        <div class="ctx-head">
+          <span class="ctx-pct" id="ctxPct">—</span>
+          <span class="ctx-sub" id="ctxSub"></span>
+        </div>
+        <div class="ctx-bar" id="ctxBar"></div>
+        <div class="ctx-list" id="ctxList"></div>
+        <p class="muted" id="ctxNote" style="margin:12px 0 0"></p>
+      </div>
+
       <div id="botForm"></div>
       <div class="card">
         <div class="row end">
@@ -680,7 +761,7 @@ function switchPage(name){
   if(name==="collect") loadCollect();
   if(name==="master") loadMaster();
   if(name==="config") loadConfig();
-  if(name==="bot"){ loadBot(); syncBotNav(); }
+  if(name==="bot"){ loadBot(); syncBotNav(); loadContext(CTXU.gid||0); }
   if(name==="memory") loadMemory();
   if(name==="aliases") loadAliases();
   if(name==="admin") loadAdmin();
@@ -1674,6 +1755,8 @@ async function saveBot(){
     if(!j.ok){ const msgs=Object.entries(j.errors||{}).map(([k,v])=>`${k}: ${v}`).join("；"); botMsg("保存失败 — "+msgs,"bad"); return; }
     botMsg("已保存 ✓","ok"); toast("机器人设置已保存","ok");
     await loadBot();
+    /* 人设 / 工具 / 记忆开关都可能改了，用量条要跟着重算 */
+    await loadContext(CTXU.gid||0);
   }catch(e){ botMsg("保存失败: "+e.message,"bad"); }
 }
 async function testBot(){
@@ -1690,12 +1773,108 @@ async function clearBotHist(){
     const j=await (await api("/api/music-admin/bot/history",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})})).json();
     toast(j.message||"已清空", j.ok?"ok":"bad");
     await loadBot();
+    await loadContext(CTXU.gid||0);
   }catch(e){ toast("清空失败: "+e.message,"bad"); }
 }
 $("#botSave").onclick=saveBot;
 $("#botTest").onclick=testBot;
 $("#botClearHist").onclick=clearBotHist;
 $("#botReset").onclick=()=>{ BOT_DIRTY={}; renderBotForm(BOT_SCHEMA, BOT_ORIG); botMsg("已重置本地改动"); };
+
+/* ---- 上下文用量（机器人页） ---- */
+/* 颜色按段固定：改顺序会让人以为「绿色那块变大了」，所以写死成 key→色 而非按索引 */
+const CTX_COLORS={system:"#6ea8fe",memory:"#34d399",rules:"#fbbf24",tools:"#a78bfa",history:"#f472b6"};
+const CTX_FALLBACK=["#6ea8fe","#34d399","#fbbf24","#a78bfa","#f472b6","#22d3ee"];
+let CTXU={gid:0,groups:[],data:null,loaded:false};
+
+function fmtTok(n){
+  n=Math.max(0,Math.round(Number(n)||0));
+  if(n>=1000000) return (n/1000000).toFixed(2)+"M";
+  if(n>=1000) return (n/1000).toFixed(1)+"K";
+  return String(n);
+}
+function fmtPct(v){
+  v=Number(v)||0;
+  if(v>0 && v<0.01) return "<0.01%";
+  return (v>=10? v.toFixed(0) : v.toFixed(2))+"%";
+}
+
+async function loadContext(gid){
+  try{
+    let want;
+    if(!CTXU.loaded){
+      /* 第一次不知道有哪些群：先拉一次（不传群号）拿群列表。
+         群列表只在这一次填——之后切换靠 select 的值，重建会让下拉收起来 */
+      const j0=await (await api("/api/music-admin/context")).json();
+      if(!j0.ok){ $("#ctxHint").textContent="统计失败："+(j0.error||"未知原因"); return; }
+      CTXU.groups=j0.groups||[];
+      const sel=$("#ctxGroup"); sel.innerHTML="";
+      const op0=document.createElement("option");
+      op0.value="0"; op0.textContent="（不选群 · 空会话基线）"; sel.appendChild(op0);
+      CTXU.groups.forEach(g=>{
+        const op=document.createElement("option");
+        op.value=String(g); op.textContent="群 "+g; sel.appendChild(op);
+      });
+      /* 默认看第一个真实群（这才是「我的机器人现在占多少」）；
+         想看「什么都不带时的基线」就手动切到第一项 */
+      if(CTXU.groups.length) sel.value=String(CTXU.groups[0]);
+      CTXU.loaded=true;
+      want=parseInt(sel.value||"0",10)||0;
+      if(want===0){ CTXU.gid=0; CTXU.data=j0; renderContext(j0); return; }
+    } else {
+      want=(gid===undefined||gid===null)?CTXU.gid:gid;
+      $("#ctxGroup").value=String(want);
+    }
+    const q=want?("?group_id="+encodeURIComponent(want)):"";
+    const j=await (await api("/api/music-admin/context"+q)).json();
+    if(!j.ok){ $("#ctxHint").textContent="统计失败："+(j.error||"未知原因"); return; }
+    CTXU.gid=want;
+    CTXU.data=j;
+    renderContext(j);
+  }catch(e){
+    if(e.message!=="unauthorized") $("#ctxHint").textContent="统计失败："+e.message;
+  }
+}
+
+function renderContext(d){
+  const win=Math.max(1,Number(d.window)||1);
+  const used=Number(d.used)||0;
+  $("#ctxPct").textContent=(Number(d.percent)||0).toFixed(1)+"%";
+  $("#ctxSub").textContent="已使用 "+fmtTok(used)+" / "+fmtTok(win)+" token";
+  $("#ctxHint").textContent="窗口 "+fmtTok(win)+" · 回复预留 "+fmtTok(d.reserve);
+
+  const bar=$("#ctxBar"); bar.innerHTML="";
+  const list=$("#ctxList"); list.innerHTML="";
+  (d.segments||[]).forEach((s,i)=>{
+    const color=CTX_COLORS[s.key]||CTX_FALLBACK[i%CTX_FALLBACK.length];
+    if(s.tokens>0){
+      const el=document.createElement("div");
+      el.className="sg";
+      /* 按窗口算宽度（这才是「占了多少」），并给 0.4% 下限——
+         否则人设那几百 token 在 1M 窗口下会细到看不见 */
+      el.style.width=Math.max(0.4, s.tokens*100/win)+"%";
+      el.style.background=color;
+      el.title=`${s.label}：${fmtTok(s.tokens)} token / ${Number(s.chars)||0} 字`;
+      bar.appendChild(el);
+    }
+    const row=document.createElement("div"); row.className="ctx-row";
+    row.innerHTML=`<span class="ctx-dot" style="background:${color}"></span>`
+      +`<span class="ctx-name">${esc(s.label)}</span>`
+      +`<span class="ctx-tok">${fmtTok(s.tokens)} token</span>`
+      +`<span class="ctx-p">${fmtPct(s.tokens*100/win)}</span>`;
+    list.appendChild(row);
+  });
+
+  const h=d.history||{};
+  const bits=[];
+  if(h.msgs) bits.push(`历史 ${h.msgs} 条 / ${fmtTok(h.chars)} 字`);
+  if(h.dropped_msgs) bits.push(`已按 ${fmtTok(h.chars_limit)} 字预算丢掉最旧的 ${h.dropped_msgs} 条`);
+  $("#ctxNote").textContent=(d.note||"")+(bits.length?("　·　"+bits.join("；")):"");
+}
+
+$("#ctxReload").onclick=()=>loadContext(parseInt($("#ctxGroup").value||"0",10)||0);
+$("#ctxGroup").onchange=()=>loadContext(parseInt($("#ctxGroup").value||"0",10)||0);
+
 
 /* ---- 群记忆 ---- */
 let MEM = {groups:[], people:[], gid:0, uid:"", noteChars:8000, loaded:false};

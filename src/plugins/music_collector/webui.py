@@ -378,8 +378,15 @@ FIELD_META["llm.history_rounds"] = (
 FIELD_META["llm.history_chars"] = (
     "上下文总字符上限",
     "真正决定「一次请求带多少历史」的旋钮：超过这个总字数就从最旧的成对丢弃；0 = 不限（不推荐）。"
-    "参考：中文约 0.6~1 token/字，3000 字 ≈ 2000~3000 token；模型窗口 64k 的放到 20000~30000 仍安全，"
-    "8k/16k 的建议 2000~4000。真超窗了程序也会自动丢历史重试一次",
+    "参考：中文实测约 2 字/token（即 0.5 token/字），3000 字 ≈ 1500 token；"
+    "模型窗口 64k 的放到 20000~30000 仍安全，8k/16k 的建议 2000~4000。"
+    "真超窗了程序也会自动丢历史重试一次",
+    False,
+)
+FIELD_META["llm.context_window"] = (
+    "上下文窗口(token)",
+    "只用于「上下文用量」那条进度条的**分母**，不参与请求、不影响裁剪（裁剪看上面的字符上限）。"
+    "实测当前中转 1,048,576；换成小窗口模型（8k/32k/128k）时记得改小，否则百分比会显得过于乐观",
     False,
 )
 FIELD_META["llm.cooldown"] = (
@@ -1801,6 +1808,30 @@ def _fmt_when(value: object) -> str:
         return ""
 
 
+async def _api_context(request: Request):
+    """某个群「一次请求的上下文都花在哪儿」——网页那条用量条的数据源。
+
+    ``group_id`` 缺省或为 0 时给的是**空会话基线**（没有任何历史时一条请求有多大），
+    用来回答「机器人平时到底占多少」这个问题。
+    """
+    if not _token_ok(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    raw = str(request.query_params.get("group_id") or "").strip()
+    try:
+        gid = int(raw) if raw else 0
+    except (TypeError, ValueError):
+        gid = 0
+    app_cfg = effective_config(None)
+    try:
+        data = llm_bot.context_breakdown(gid, app_cfg.llm, app_cfg.memory)
+    except Exception as exc:  # noqa: BLE001 — 统计失败不该让整页 500
+        logger.warning(f"[music] 统计上下文用量失败: {exc}")
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+    data["ok"] = True
+    data["groups"] = await service.known_groups()
+    return JSONResponse(data)
+
+
 async def _api_bot_test(request: Request):
     """「测试连接」：按当前配置发一条最小请求，返回结果与耗时。"""
     if not _token_ok(request):
@@ -1864,6 +1895,7 @@ def register_webui() -> None:
     app.add_api_route("/api/music-admin/schema", _api_schema, methods=["GET"])
     app.add_api_route("/api/music-admin/config", _api_config, methods=["GET"])
     app.add_api_route("/api/music-admin/bot", _api_bot, methods=["GET"])
+    app.add_api_route("/api/music-admin/context", _api_context, methods=["GET"])
     app.add_api_route("/api/music-admin/bot/test", _api_bot_test, methods=["POST"])
     app.add_api_route("/api/music-admin/bot/history", _api_bot_history, methods=["POST"])
     app.add_api_route("/api/music-admin/config", _api_patch, methods=["PATCH"])
