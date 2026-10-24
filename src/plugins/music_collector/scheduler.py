@@ -306,7 +306,13 @@ def _schedule_banter_next() -> None:
     if not cfg.banter:
         return
     try:
-        when = banter_mod.next_run_at(cfg, datetime.now(service.resolver.tz))
+        now = datetime.now(service.resolver.tz)
+        when = banter_mod.next_run_at(cfg, now)
+        # 某个群刚被 @ 过、计时重算过：就排到它解禁那一刻，别提前空跑一轮
+        # （提前跑也只会因为冷却被跳过，日志里白白多一句「跳过」）
+        gate = banter_mod.next_gate_at(now)
+        if gate is not None and gate > when:
+            when = gate
         scheduler.add_job(
             job_banter, "date", run_date=when,
             id=JOB_PREFIX + "banter", replace_existing=True, misfire_grace_time=300,
@@ -314,6 +320,11 @@ def _schedule_banter_next() -> None:
         logger.info(f"[banter] 下次主动搭话 {when:%m-%d %H:%M}")
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"[banter] 排下一次失败（本轮节奏中断）: {exc}")
+
+
+def reschedule_banter() -> None:
+    """把主动搭话的计时重新排一次（被动回复完之后调，见 ``banter.note_reply``）。"""
+    _schedule_banter_next()
 
 
 _JOB_FUNCS = {

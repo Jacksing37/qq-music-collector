@@ -9,6 +9,7 @@
 import asyncio
 import sys
 import tempfile
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -322,6 +323,20 @@ def test_run(tmp: Path) -> None:
         res = asyncio.run(bt.run_banter())
         check("达到每日上限后不再发", res["sent"] == 0 and len(fake.sent) == before, f"{res}")
 
+        # ---- 刚被动回复过 → 这一轮先不插嘴 ----
+        cfg.banter_daily_max = 0
+        bt.reset_quota()
+        bt.reset_cursor()
+        asyncio.run(store.append_chat(GID, 47, "小华", "user", "刚答完话之后的素材", kind="listen"))
+        bt.note_reply(GID)          # 模拟刚才被 @ 完、已经回过话
+        before = len(fake.sent)
+        res = asyncio.run(bt.run_banter())
+        check("刚被动回复过 → 本轮不搭话",
+              res["sent"] == 0 and len(fake.sent) == before, f"{res}")
+        bt.reset_schedule()
+        res = asyncio.run(bt.run_banter())
+        check("计时过了 → 照常搭话", res["sent"] == 1, f"{res}")
+
         # ---- 消息太旧 ----
         cfg.banter_daily_max = 0
         bt.reset_quota()
@@ -483,6 +498,56 @@ def test_store_latest(tmp: Path) -> None:
 # ---------------------------------------------------------------- 7. 配置默认值
 
 
+def test_reset_on_reply() -> None:
+    section("11. 被动回复后重新计时（免得刚答完又自己冒泡）")
+    cfg = config_manager.config.llm
+    saved = (cfg.banter, cfg.banter_minutes, cfg.banter_reset_on_reply)
+    bt.reset_schedule()
+    gid = 9401
+    try:
+        cfg.banter = True
+        cfg.banter_minutes = "30-60"
+        cfg.banter_reset_on_reply = True
+
+        check("一开始没有冷却", not bt.waiting(gid))
+        check("没有冷却时 next_gate_at 返回 None", bt.next_gate_at() is None)
+
+        bt.note_reply(gid)
+        check("回复完就进入冷却", bt.waiting(gid) is True)
+        gate = bt.next_gate_at()
+        gap = ((gate.timestamp() - time.time()) / 60) if gate else -1
+        check("解禁时间落在 30~60 分钟后", 29 <= gap <= 61, f"{gap:.1f} 分钟")
+        check("冷却只影响这个群（别的群照常）", not bt.waiting(gid + 1))
+        check("到期之后自动放行", not bt.waiting(gid, now=time.time() + 3600))
+
+        # 重复回复：以**最后一次**为准，从那一刻重新数一个间隔
+        bt.note_reply(gid)
+        again = bt.next_gate_at()
+        gap2 = ((again.timestamp() - time.time()) / 60) if again else -1
+        check("再回一句 → 从这一刻重新数（仍是 30~60 分钟后）",
+              29 <= gap2 <= 61, f"{gap2:.1f} 分钟")
+
+        # 开关关掉 / 总开关关着 → 不设冷却
+        bt.reset_schedule()
+        cfg.banter_reset_on_reply = False
+        bt.note_reply(gid)
+        check("「回复后重新计时」关掉 → 不设冷却",
+              not bt.waiting(gid) and bt.next_gate_at() is None)
+
+        cfg.banter_reset_on_reply = True
+        cfg.banter = False
+        bt.note_reply(gid)
+        check("搭话总开关关着 → 不设冷却", not bt.waiting(gid))
+
+        # 没群号（私聊戳一戳之类）不该炸
+        cfg.banter = True
+        bt.note_reply(0)
+        check("群号为 0 → 安静返回", not bt._NEXT_AT)
+    finally:
+        bt.reset_schedule()
+        (cfg.banter, cfg.banter_minutes, cfg.banter_reset_on_reply) = saved
+
+
 def test_defaults() -> None:
     section("10. 配置默认值（改默认值时要同步改这里）")
     cfg = LLMConfig()
@@ -492,6 +557,7 @@ def test_defaults() -> None:
     check("默认不限群", cfg.banter_groups == [])
     check("默认不限次数", cfg.banter_daily_max == 0)
     check("默认 20 分钟内的才接", cfg.banter_fresh_minutes == 20.0)
+    check("默认被动回复后重新计时", cfg.banter_reset_on_reply is True)
     check("默认一批最多 40 条", cfg.banter_batch_max == 40)
     check("默认一批最多 6000 字", cfg.banter_batch_chars == 6000)
     check("默认开判官（识相是默认行为）", cfg.banter_judge is True)
@@ -556,6 +622,7 @@ def main() -> None:
     test_verdict()
     test_clip_and_format()
     test_store_recent(tmp)
+    test_reset_on_reply()
     test_defaults()
     test_reload_trigger()
     print(f"\n通过 {PASSED} 项，失败 {FAILED} 项")

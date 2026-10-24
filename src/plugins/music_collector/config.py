@@ -633,6 +633,10 @@ class LLMConfig(BaseModel):
     banter_judge_hint: str = ""
     #: 判官最多看多少字。它不需要看全量，看个大概就够判断气氛
     banter_judge_chars: int = Field(2000, ge=200, le=10000)
+    #: 被动回复完（@ / 戳一戳 / 非音乐链接）把搭话计时**重新起算**。
+    #: 不开的话，它刚答完人还能被排到的那一轮捞起来自己冒泡，群里看着像抢话；
+    #: 间隔仍取 ``banter_minutes``——是「从现在起再等一个间隔」，不是提前
+    banter_reset_on_reply: bool = True
 
 
 class MemoryConfig(BaseModel):

@@ -1632,10 +1632,13 @@ const BOT_GROUPS=[
       + "把群里<b>上次搭话之后</b>聊的那一段接过去，<b>不 @ 人、不引用</b>。<br>"
       + "素材取自「群记忆」的旁听记录，所以<b>旁听也要开着</b>，否则没有可接的话。<br>"
       + "想安静就两个地方下手：把<b>间隔</b>拉长（90-180），或把<b>每天上限</b>压小（比如 4）。"
-      + "间隔决定节奏，上限决定总量——后者更好控制。",
+      + "间隔决定节奏，上限决定总量——后者更好控制。<br>"
+      + "另外，它<b>每次被动回完话</b>都会把计时重算：刚答完人不会紧接着又自己冒泡，"
+      + "最下面那个开关可以关掉这个行为。",
    keys:["llm.banter","llm.banter_minutes","llm.banter_quiet","llm.banter_groups",
          "llm.banter_daily_max","llm.banter_fresh_minutes",
-         "llm.banter_batch_max","llm.banter_batch_chars"]},
+         "llm.banter_batch_max","llm.banter_batch_chars",
+         "llm.banter_reset_on_reply"]},
   {title:"主动搭话 · 判官",
    note:"插嘴之前先问一句「此刻说这话自然吗」。<b>这一组决定它识不识相</b>："
       + "吵架、严肃话题、别人正在对话、对话已经收尾……判官说不该，它就闭嘴不冒泡。<br>"

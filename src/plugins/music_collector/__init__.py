@@ -46,6 +46,7 @@ from .detector import (  # noqa: E402
 )
 from .llm import disabled_reason as llm_disabled_reason  # noqa: E402
 from .llm import clip_tail, llm_bot  # noqa: E402
+from . import banter as banter_mod  # noqa: E402  被动回复后要重排搭话计时
 from . import memory as memory_mod  # noqa: E402
 from .models import PLATFORM_NAMES, Song  # noqa: E402
 from .naming import build_context, render_template, resolve_alias  # noqa: E402
@@ -541,6 +542,9 @@ async def _llm_answer(
     await safe_send_group(bot, group_id, first)
     for extra in parts[1:]:
         await safe_send_group(bot, group_id, Message(MessageSegment.text(extra)))
+    # 它刚在群里说过话 → 主动搭话的计时重新起算。否则排到的那一轮可能紧接着
+    # 就自己冒泡，群里看着像抢话；而且刚说完这一两句，可接的素材也还没跟上
+    banter_mod.note_reply(group_id)
     return True, ""
 
 
@@ -648,6 +652,8 @@ async def _reply_intro(bot: Bot, event: GroupMessageEvent) -> None:
         message += MessageSegment.at(event.user_id)
     message += MessageSegment.text(text)
     await safe_send_group(bot, event.group_id, message)
+    # 兜底的自我介绍也算「它刚说过话」，同样把搭话计时重算
+    banter_mod.note_reply(event.group_id)
 
 
 @at_listener.handle()

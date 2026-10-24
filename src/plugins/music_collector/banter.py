@@ -104,6 +104,13 @@ MAX_GROUPS_PER_ROUND = 3
 #: 不值得为它建表。
 _DAILY: dict[tuple[int, str], int] = {}
 
+#: 群号 -> 这一刻之前不许再主动搭话（epoch 秒）。
+#:
+#: **为什么需要**：它刚被 @ 完、在群里答了一句，紧接着又自己冒个泡，看着像抢话；
+#: 而且它刚说完那么一两句，可接的素材也还没跟上。所以被动回复完就把这个群的
+#: 计时**重新起算**（见 :func:`note_reply`），间隔仍取 ``banter_minutes`` 那一段。
+_NEXT_AT: dict[int, float] = {}
+
 
 # ---------------------------------------------------------------- 配置解析
 
@@ -351,6 +358,67 @@ def reset_quota() -> None:
     _DAILY.clear()
 
 
+# ---------------------------------------------------------------- 计时
+
+def _gap_minutes(cfg: LLMConfig) -> float:
+    """一次随机间隔（分钟）。和 :func:`next_run_at` 取同一段区间。"""
+    lo, hi = parse_range(cfg.banter_minutes)
+    return random.uniform(lo, hi)
+
+
+def _set_gate(group_id: int, minutes: float) -> None:
+    _NEXT_AT[int(group_id)] = time.time() + max(0.0, minutes) * 60.0
+
+
+def note_reply(group_id: int) -> None:
+    """被动回复完，把这个群的搭话计时**重新起算**，并把定时任务挪到那之后。
+
+    三个被动入口（@ / 戳一戳 / 非音乐链接）都走 ``_llm_answer``，所以调用点只
+    需要那一处。间隔仍取 ``banter_minutes``——「重新计算」的意思是「从现在起再等
+    一个间隔」，不是把下一次提前。
+
+    不这样做的话：它 22:00 刚答完人，22:01 又被排到的那一轮捞起来自己冒泡，
+    群里看着就是「抢话」；而且它刚说完那一两句，可接的素材也还没跟上。
+    """
+    gid = int(group_id or 0)
+    if not gid:
+        return
+    cfg = service.config.llm
+    if not cfg.banter or not getattr(cfg, "banter_reset_on_reply", True):
+        return
+    gap = _gap_minutes(cfg)
+    _set_gate(gid, gap)
+    logger.debug(f"[banter] 群{gid} 被动回复完，搭话计时重新起算（{gap:.0f} 分钟后）")
+    # 定时任务得跟着挪：它原本可能几分钟后就响，那时这个群还在冷却里，会白跑一轮
+    try:
+        from .scheduler import reschedule_banter  # 延迟导入：scheduler 模块级依赖本模块
+
+        reschedule_banter()
+    except Exception as exc:  # noqa: BLE001 — 排不上最多晚一轮，绝不能影响回复
+        logger.warning(f"[banter] 重新排期失败: {exc}")
+
+
+def next_gate_at(now: Optional[datetime] = None) -> Optional[datetime]:
+    """最早一个「解禁」的时刻；没有任何群在冷却里就返回 ``None``。"""
+    tz = service.resolver.tz
+    now = now or datetime.now(tz)
+    future = [v for v in _NEXT_AT.values() if v > now.timestamp()]
+    if not future:
+        return None
+    return datetime.fromtimestamp(min(future), tz)
+
+
+def waiting(group_id: int, now: Optional[float] = None) -> bool:
+    """这个群是不是还在「刚回过话」的冷却里。"""
+    due = _NEXT_AT.get(int(group_id or 0))
+    return bool(due and (time.time() if now is None else now) < due)
+
+
+def reset_schedule() -> None:
+    """清空计时（网页端改配置 / 测试用）。"""
+    _NEXT_AT.clear()
+
+
 # ---------------------------------------------------------------- 主流程
 
 
@@ -411,6 +479,10 @@ async def run_banter() -> dict:
     fresh = max(60.0, llm_cfg.banter_fresh_minutes * 60.0)
     for gid in groups:
         if not _quota_left(gid, day, llm_cfg.banter_daily_max):
+            skipped += 1
+            continue
+        # 刚在群里回过话，这一轮先不插嘴——计时已按被动回复那一刻重算过
+        if waiting(gid):
             skipped += 1
             continue
 

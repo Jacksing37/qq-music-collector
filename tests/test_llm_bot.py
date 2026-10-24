@@ -1047,6 +1047,47 @@ async def test_background_incident() -> None:
         service.store = old_store
 
 
+async def test_reply_resets_banter() -> None:
+    """被动回复完 → 主动搭话计时重算（接线检查）。
+
+    只测「接线」：``_llm_answer`` 成功发出后必须调 ``banter.note_reply``。计时逻辑
+    本身在 test_banter 里覆盖。
+    """
+    print("\n[15c] 被动回复后重排搭话计时")
+    import music_collector as mc
+    from music_collector import banter as bt
+
+    cfg = config_manager.config.llm
+    saved = (cfg.banter, cfg.banter_minutes, cfg.banter_reset_on_reply, cfg.at_sender)
+    old_chat = mc.llm_bot.chat
+    bt.reset_schedule()
+
+    async def fake_chat(*a, **k):
+        return "好的", ""
+
+    try:
+        cfg.banter = True
+        cfg.banter_minutes = "30-60"
+        cfg.banter_reset_on_reply = True
+        cfg.at_sender = False
+        mc.llm_bot.chat = fake_chat  # type: ignore[assignment]
+
+        bot = StubBot()
+        ok, why = await mc._llm_answer(bot, make_event("在吗"), cfg, "在吗")
+        check("_llm_answer 正常发出", ok and bool(bot.sent), f"{ok} {why}")
+        check("回复后该群进入搭话冷却", bt.waiting(GID) is True, str(bt._NEXT_AT))
+
+        bt.reset_schedule()
+        cfg.banter_reset_on_reply = False
+        ok, why = await mc._llm_answer(bot, make_event("在吗"), cfg, "在吗")
+        check("关掉开关 → 不设冷却",
+              ok and not bt.waiting(GID), f"{ok} {why} {bt._NEXT_AT}")
+    finally:
+        mc.llm_bot.chat = old_chat
+        bt.reset_schedule()
+        (cfg.banter, cfg.banter_minutes, cfg.banter_reset_on_reply, cfg.at_sender) = saved
+
+
 async def test_handle_at_routing() -> None:
     print("\n[13] handle_at 分流：大模型优先，兜底自我介绍")
     import music_collector as mc
@@ -1155,6 +1196,7 @@ async def main() -> None:
     await test_trace_wired()
     await test_background()
     await test_background_incident()
+    await test_reply_resets_banter()
     await test_diagnostic_logs()
     await test_handle_at_routing()
     print("\n====================================================")
