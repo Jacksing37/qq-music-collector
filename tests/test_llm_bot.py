@@ -999,6 +999,54 @@ async def test_background() -> None:
         service.store = old_store
 
 
+async def test_background_incident() -> None:
+    """线上事故复现（2026-10-24 21:57，群 1053096807）。
+
+    现场：机器人刚答完「个人制作的」，紧接着被人 @ 一句「你能不能做一个出来」，
+    它却回「做什么啊，你倒是说清楚要我弄啥」。原因是背景里只有这句提问本身
+    （线上记 62 字），而真正的话题「真的假的 → 个人制作的」只活在上一次请求的
+    ``context`` 里——背景不落库、不进历史，用完就没了，于是「做一个」没了指代。
+    """
+    print("\n[15b] 线上「前言不搭后语」复现")
+    from music_collector import _llm_background
+    from music_collector.store import Store
+
+    tmp = Path(tempfile.mkdtemp(prefix="bg_inc_"))
+    store = Store(tmp / "inc.db")
+    await store.init()
+    old_store = service.store
+    gid, uid = 9302, 2598983895
+    cfg = LLMConfig(bg_chat=True, bg_chat_max=30, bg_chat_chars=2000,
+                    bg_chat_minutes=120, bg_chat_min_rows=6)
+
+    class _Ev:
+        group_id = gid
+        user_id = uid
+
+    try:
+        service.store = store
+        # 真实时序（来自线上 chat_log 422/423/425/426）
+        await store.append_chat(gid, 1016359170, "豊川祥子", "user", "真的假的", kind="listen")
+        await store.append_chat(gid, uid, "誓死捍卫逢缘奇演", "user", "个人制作的", kind="listen")
+        await store.append_chat(gid, 0, "", "assistant",
+                                "个人制作的话那还真有点东西", kind="chat")
+        # 当前提问：旁听 + 问答各记一次，线上就是这么存的
+        await store.append_chat(gid, uid, "誓死捍卫逢缘奇演", "user",
+                                "你能不能做一个出来", kind="listen")
+
+        bg = await _llm_background(_Ev(), cfg, "你能不能做一个出来")
+        check("补上了上一轮的话题（真的假的）", "真的假的" in bg, bg)
+        check("补上了「个人制作的」这个指代", "个人制作的" in bg, bg)
+        check("不再把当前提问当背景重喂一遍", "你能不能做一个出来" not in bg, bg)
+
+        off = await _llm_background(
+            _Ev(), cfg.model_copy(update={"bg_chat_min_rows": 0}), "你能不能做一个出来"
+        )
+        check("关掉补足就退回事故现场（空背景）", off == "", off)
+    finally:
+        service.store = old_store
+
+
 async def test_handle_at_routing() -> None:
     print("\n[13] handle_at 分流：大模型优先，兜底自我介绍")
     import music_collector as mc
@@ -1106,6 +1154,7 @@ async def main() -> None:
     await test_context_breakdown()
     await test_trace_wired()
     await test_background()
+    await test_background_incident()
     await test_diagnostic_logs()
     await test_handle_at_routing()
     print("\n====================================================")
