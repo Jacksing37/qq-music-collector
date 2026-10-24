@@ -581,6 +581,18 @@ class LLMBot:
         """注入持久化后端。**不注入就退化成纯内存**（测试、离线场景）。"""
         self._store = store
 
+    async def ensure_history(self, group_id: int, cfg: LLMConfig) -> None:
+        """把该群历史从库里预热进内存（每群只读一次，重复调用无副作用）。
+
+        真正发请求时 ``chat`` 自己也会走这一步。网页统计前单独调一次，是为了让
+        「对话消息」那一格显示**下一条提问实际会带多少**——不调的话，刚重启时
+        它永远是 0，看着像「没有历史」，实际库里躺着几十万字。
+        """
+        try:
+            await self._sync_history(group_id, cfg)
+        except Exception as exc:  # noqa: BLE001 — 预热带不动不该让统计失败
+            logger.warning(f"[llm] 群{group_id} 预热历史失败（本次按内存现状统计）: {exc}")
+
     async def _sync_history(self, group_id: int, cfg: LLMConfig) -> None:
         """把该群的历史从库里预热到内存；顺带执行「用户要求的清空」。
 

@@ -325,6 +325,29 @@ def test_llm_persistence() -> None:
     asyncio.run(small_bot._sync_history(79, LLMConfig(history_rounds=3000, history_chars=0)))
     check("history_chars=0 时不按字数砍（3000 轮=6000 条）", seen.get("limit") == 6000, str(seen))
 
+    # ensure_history 是给网页统计用的公开入口：调用后「对话消息」段才不是 0
+    stat_bot = LLMBot()
+    stat_bot.set_store(store)
+
+    async def seed2():
+        await store.append_chat(88, 1, "李四", "user", "统计用的问题" * 20)
+        await store.append_chat(88, 0, "", "assistant", "统计用的回答" * 20)
+
+    asyncio.run(seed2())
+    before = stat_bot.context_breakdown(88, cfg)
+    check("没预热时历史段是 0（重启后的真实状态）",
+          {s["key"]: s for s in before["segments"]}["history"]["tokens"] == 0,
+          str(before["segments"]))
+    asyncio.run(stat_bot.ensure_history(88, cfg))
+    after = stat_bot.context_breakdown(88, cfg)
+    check("预热后历史段有值",
+          {s["key"]: s for s in after["segments"]}["history"]["tokens"] > 0,
+          str(after["segments"]))
+    check("预热后总量变大", after["used"] > before["used"], f'{after["used"]} vs {before["used"]}')
+    # 幂等：再调一次不会把历史翻倍
+    asyncio.run(stat_bot.ensure_history(88, cfg))
+    check("重复调用不会重复加载", len(stat_bot.history(88)) == 2, str(len(stat_bot.history(88))))
+
 
 def test_system_text() -> None:
     print("\n[9] 系统提示词顺序：人设 → 记忆 → 硬规则")

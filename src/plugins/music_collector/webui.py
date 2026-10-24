@@ -1823,6 +1823,9 @@ async def _api_context(request: Request):
         gid = 0
     app_cfg = effective_config(None)
     try:
+        # 先把历史从库里预热进内存，否则刚重启时「对话消息」永远是 0
+        if gid:
+            await llm_bot.ensure_history(gid, app_cfg.llm)
         data = llm_bot.context_breakdown(gid, app_cfg.llm, app_cfg.memory)
     except Exception as exc:  # noqa: BLE001 — 统计失败不该让整页 500
         logger.warning(f"[music] 统计上下文用量失败: {exc}")
