@@ -1142,6 +1142,92 @@ async def test_trace_has_background() -> None:
          cfg.bg_chat_minutes, cfg.bg_chat_min_rows, cfg.groups, cfg.at_sender) = saved
 
 
+async def test_tool_mark_leak() -> None:
+    print("\n[15e] 模型把手写的工具调用语法漏进正文（必须剥掉）")
+    from music_collector.llm import LLMBot, strip_tool_marks
+
+    # 线上真实事故里那 6 行（2026-10-25 01:15，群 1053096807）
+    leaked = (
+        "<｜｜DSML｜｜ calls>\n"
+        '<｜｜DSML｜｜ invoke name="web_search">\n'
+        '<｜｜DSML｜｜ parameter name="query" string="true">'
+        "尊界V800 刹车踏板支架断裂 后续 升级 11月</｜｜DSML｜｜ parameter>\n"
+        "</｜｜DSML｜｜ invoke>\n"
+        "</｜｜DSML｜｜ calls>"
+    )
+
+    body, dropped = strip_tool_marks(leaked)
+    check("纯标记块 → 剥成空", body == "", repr(body))
+    check("整块的行全部算被丢掉", dropped == len(leaked.splitlines()), str(dropped))
+
+    # 标记块后面跟着正文：不能连着正文一起吞（开闭写在同一行时最容易踩）
+    tail = leaked + "\n这段话在标记之后，必须留下。"
+    body_tail, _ = strip_tool_marks(tail)
+    check("标记块之后的正文要留下", body_tail == "这段话在标记之后，必须留下。", repr(body_tail))
+
+    mixed = "查了一下，支架确实断过，官方 10 月出了检测说明。\n" + leaked
+    body2, _ = strip_tool_marks(mixed)
+    check("正文留下、标记块丢掉", body2 == "查了一下，支架确实断过，官方 10 月出了检测说明。", repr(body2))
+
+    inline = '结论如上<|tool_calls|>{"q": 1}</|tool_calls|>'
+    body3, _ = strip_tool_marks(inline)
+    check("写在同一行里的标记也能删", "tool_calls" not in body3, repr(body3))
+    check("同一行的正文不丢", body3.startswith("结论如上"), repr(body3))
+
+    plain = "我用 web_search 搜了一下，没找到靠谱的。"
+    check("正常文本原样返回", strip_tool_marks(plain) == (plain, 0), str(strip_tool_marks(plain)))
+
+    unclosed = '先说一句\n<｜｜DSML｜｜ invoke name="x">\n后面的都算块内'
+    body4, _ = strip_tool_marks(unclosed)
+    check("没有闭合时后面全丢（宁可少发也不发半截）", body4 == "先说一句", repr(body4))
+
+    # ---- 端到端①：最后一轮「正文 + 标记」，剥完还有正文就不再多请求
+    calls: list[dict] = []
+
+    async def leak_with_text(messages, cfg, tools=None):
+        calls.append({"tools": tools})
+        return {"role": "assistant", "content": "支架断裂，官方 10 月出了检测说明。\n" + leaked}
+
+    bot = LLMBot()
+    bot._post_chat = leak_with_text  # type: ignore[method-assign]
+    reply, reason = await bot.chat(
+        9101, 1, "张三", "那个刹车事件后续呢", LLMConfig(cooldown=0, tool_rounds=0)
+    )
+    check("剥完还有正文 → 就用它", bool(reply) and "支架断裂" in str(reply), str(reply))
+    check("发出去的回复里没有 DSML", "DSML" not in str(reply), str(reply))
+    check("有正文时不额外请求", len(calls) == 1, str(len(calls)))
+
+    # ---- 端到端②：只剩标记 → 再要一次正文，且这次不带 tools
+    calls2: list[dict] = []
+
+    async def only_marks(messages, cfg, tools=None):
+        calls2.append({"tools": tools, "tail": messages[-1].get("content")})
+        if len(calls2) == 1:
+            return {"role": "assistant", "content": leaked}
+        return {"role": "assistant", "content": "我搜到的信息不足以确认这件事，别乱猜。"}
+
+    bot2 = LLMBot()
+    bot2._post_chat = only_marks  # type: ignore[method-assign]
+    reply2, _ = await bot2.chat(9102, 1, "李四", "后续呢", LLMConfig(cooldown=0, tool_rounds=0))
+    check("只有标记 → 再要一次正文", len(calls2) == 2, str(len(calls2)))
+    check("重试请求不带 tools", calls2[1]["tools"] is None, str(calls2[1]["tools"]))
+    check("重试时明确禁止再调工具", "不要" in str(calls2[1]["tail"]), str(calls2[1]["tail"])[:80])
+    check("拿到第二次的干净回复", reply2 == "我搜到的信息不足以确认这件事，别乱猜。", str(reply2))
+
+    # ---- 端到端③：两次都是纯标记 → 按「没生成」处理，绝不发乱码
+    calls3: list[dict] = []
+
+    async def always_marks(messages, cfg, tools=None):
+        calls3.append({"tools": tools})
+        return {"role": "assistant", "content": leaked}
+
+    bot3 = LLMBot()
+    bot3._post_chat = always_marks  # type: ignore[method-assign]
+    reply3, reason3 = await bot3.chat(9103, 1, "王五", "后续呢", LLMConfig(cooldown=0, tool_rounds=0))
+    check("两次都只有标记 → 不返回乱码", reply3 is None, str(reply3))
+    check("明确报「没有给出正文」", "没有给出正文" in str(reason3), str(reason3))
+
+
 async def test_handle_at_routing() -> None:
     print("\n[13] handle_at 分流：大模型优先，兜底自我介绍")
     import music_collector as mc
@@ -1252,6 +1338,7 @@ async def main() -> None:
     await test_background_incident()
     await test_reply_resets_banter()
     await test_trace_has_background()
+    await test_tool_mark_leak()
     await test_diagnostic_logs()
     await test_handle_at_routing()
     print("\n====================================================")

@@ -192,7 +192,7 @@ def test_endpoints():
         # 工具与技能：状态里要能看出「真的挂上了什么」
         tw = b3["status"]["tools"]
         assert tw["enabled"] is True and "fetch_url" in tw["names"], tw
-        assert tw["rounds"] == 3 and tw["scripts"] is False, tw
+        assert tw["rounds"] == 5 and tw["scripts"] is False, tw
         assert isinstance(tw["skills"], list) and tw["skills_dir"], tw
         # 关掉总闸后请求体里就不该再有 tools
         client.patch("/api/music-admin/config", headers=H,

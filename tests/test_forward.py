@@ -254,7 +254,7 @@ def test_form_and_docs() -> None:
     check("脚本执行默认关闭", cfg.llm.skill_scripts is False)
     check("默认上限符合约定",
           cfg.llm.forward_limit == 30 and cfg.llm.forward_chars == 2000
-          and cfg.llm.tool_rounds == 3,
+          and cfg.llm.tool_rounds == 5,
           str((cfg.llm.forward_limit, cfg.llm.forward_chars, cfg.llm.tool_rounds)))
 
     sample = (ROOT / "config.example.yaml").read_text(encoding="utf-8")

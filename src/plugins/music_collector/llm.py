@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections import deque
 from typing import Optional
@@ -276,6 +277,50 @@ def message_text(message: dict) -> str:
             "把「最大回复 token」调大，或把思考档位调低）"
         )
     raise RuntimeError("模型返回了空内容")
+
+
+#: 单个工具调用标记。**带一个「是否闭合」的捕获组**——靠它数行内嵌套深度，
+#: 所以不能只判断「行首是不是标记」：模型经常把开闭写在同一行
+#: （``<｜｜DSML｜｜ parameter ...>值</｜｜DSML｜｜ parameter>``），只看行首会把这一行
+#: 当成「开了没闭」，后面的正文全被吞掉。
+#: ⚠️ 真实案例里的竖线是全角 ``｜``，不是 ASCII ``|``——只写 ``[|]`` 抓不到
+_MARK_TAG = re.compile(
+    r"<\s*(/?)\s*[|｜]{1,2}\s*(?:DSML|tool_calls?|function_calls?|invoke|parameter)\b[^>]*>",
+    re.I,
+)
+
+
+def strip_tool_marks(text: str) -> tuple[str, int]:
+    """剥掉模型**手写**的工具调用标记，返回 ``(正文, 丢掉的行数)``。
+
+    为什么需要这一步：最后一轮请求不带 ``tools``（见 ``_run_turns``），模型如果还想
+    调工具，就会把 ``<｜｜DSML｜｜ invoke ...>`` 这种「给 API 看的语法」当正文写出来。
+    那不是回答，是一堆乱码——发到群里就是一次事故。
+
+    做法是**逐行 + 行内深度计数**：开标记 ``+1``、闭标记 ``-1``，深度 >0 时整行丢弃
+    （那多半是参数值）；深度回到 0 且剥完还有文字，就把那段文字留下——标记块后面
+    跟着正文的情况确实存在，不能连正文一起吞。
+    """
+    kept: list[str] = []
+    depth = 0
+    dropped = 0
+    for line in (text or "").splitlines():
+        tags = list(_MARK_TAG.finditer(line))
+        if not tags:
+            if depth > 0:
+                dropped += 1  # 标记块内部的内容（参数值之类）
+                continue
+            kept.append(line)
+            continue
+
+        for tag in tags:
+            depth = max(0, depth - 1) if tag.group(1) == "/" else depth + 1
+        dropped += 1
+        residual = _MARK_TAG.sub("", line).strip()
+        # 块已闭合、且这一行剥完还有话 → 是正文，留着
+        if residual and depth == 0:
+            kept.append(residual)
+    return "\n".join(kept).strip(), dropped
 
 
 def parse_tool_arguments(raw) -> dict:
@@ -922,7 +967,54 @@ class LLMBot:
             msg = as_message(raw)
             calls = msg.get("tool_calls") or []
             if last or not calls:
-                return message_text(msg), str(msg.get("reasoning_content") or ""), used
+                text = message_text(msg)
+                clean, marks = strip_tool_marks(text)
+                if not marks:
+                    return clean, str(msg.get("reasoning_content") or ""), used
+
+                # 走到这里说明模型**手写了工具调用语法**（而不是走结构化通道）。
+                # 常见于最后一轮：没给它 tools，它还想搜，就把 `<｜｜DSML｜｜ invoke>`
+                # 当正文写了出来。那不是回答，发到群里就是乱码。
+                logger.warning(
+                    f"[llm] 群{group_id} 模型手写了工具调用标记（{marks} 行）→ 已剥离"
+                )
+                if trace is not None:
+                    llmtrace_mod.step(trace, f"⚠️ 模型手写工具调用标记 {marks} 行（已剥离）")
+                if clean:
+                    return clean, str(msg.get("reasoning_content") or ""), used
+
+                # 剥完什么都不剩：这不是「说得短」，是它压根没回答。
+                # 再要一次正文——**仍然不带 tools**，并明确禁止写调用语法。
+                # 只追加到本次请求的 working，不会进持久历史。
+                retry_raw = await self._post_chat(
+                    [
+                        *working,
+                        {
+                            "role": "user",
+                            "content": (
+                                "（不要再调用任何工具，也不要写工具调用的语法。"
+                                "用普通文字直接回答上面那个问题。）"
+                            ),
+                        },
+                    ],
+                    cfg,
+                    None,
+                )
+                retry_msg = as_message(retry_raw)
+                try:
+                    retry_text = message_text(retry_msg)
+                except Exception:  # noqa: BLE001 — 第二次还是空就按「没生成」处理
+                    retry_text = ""
+                retry_clean, retry_marks = strip_tool_marks(retry_text)
+                if retry_marks:
+                    logger.warning(
+                        f"[llm] 群{group_id} 再要一次正文，仍然只有工具标记（{retry_marks} 行）"
+                    )
+                    if trace is not None:
+                        llmtrace_mod.step(
+                            trace, f"⚠️ 再要一次正文仍是工具标记（{retry_marks} 行）"
+                        )
+                return retry_clean, str(retry_msg.get("reasoning_content") or ""), used
 
             assistant: dict = {"role": "assistant", "content": msg.get("content") or ""}
             reasoning = msg.get("reasoning_content")
@@ -1027,6 +1119,15 @@ class LLMBot:
             思考内容显式传参而不是闭包捕获——冷却 / 空消息那两条路径上，
             ``reasoning`` 还没被赋值，闭包会直接抛 NameError。
             """
+            # 出口兜底：`_run_turns` 已处理过「模型手写工具调用」，但那是**一条**
+            # 路径。发群前最后一道闸：不管内容从哪来，带标记的一律剥掉。
+            if reply_text:
+                cleaned, marks = strip_tool_marks(reply_text)
+                if marks:
+                    logger.warning(
+                        f"[llm] 群{group_id} 回复里残留工具调用标记（{marks} 行）→ 已剥离"
+                    )
+                reply_text = cleaned
             llmtrace_mod.finish(
                 trace,
                 reply=reply_text or "",

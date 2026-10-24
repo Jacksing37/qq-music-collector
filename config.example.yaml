@@ -337,7 +337,7 @@ llm:
   bg_chat_min_rows: 6         # 上次说话之后不够这么多条就往前补（0 = 不补）
   # ---- 工具与技能（模型自己能调的能力）----
   tools: true                 # 工具总闸；关掉后模型只能纯聊天
-  tool_rounds: 3              # 一次回复最多调几轮工具；0=不许调
+  tool_rounds: 5              # 一次回复最多调几轮工具；0=不许调（3 轮常差一口气，见 README）
   tool_chars: 2000            # 单次工具结果最多回填多少字
   web_tool: true              # 提供 fetch_url（模型需要时自己抓网页正文）
   fetch_chars: 2000           # fetch_url 返回的正文最多多少字
