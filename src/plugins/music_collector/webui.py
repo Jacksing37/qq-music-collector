@@ -58,7 +58,7 @@ from .llm import (
 from .models import PLATFORM_NAMES
 from .store import MASTER_KEY
 from .naming import resolve_alias
-from .scheduler import next_runs, reload_jobs
+from .scheduler import next_run_of, next_runs, reload_jobs
 from .service import service
 from .digest import digest_group
 
@@ -588,6 +588,39 @@ FIELD_META["llm.link_hint"] = (
     "上面开关打开后，接非音乐链接时追加给模型的一句说明，免得它把网页链接当成点歌；留空 = 不加",
     False,
 )
+FIELD_META["llm.banter"] = (
+    "主动搭话",
+    "没人 @ 它时也自己冒个泡：每隔一段随机时间，把群里最近的一句话接过去。"
+    "素材来自「群记忆」的旁听记录，所以那边也要开着旁听；不 @ 人、不引用",
+    False,
+)
+FIELD_META["llm.banter_minutes"] = (
+    "搭话间隔（分钟）",
+    "写法 30-60：每次都在这个区间里重新随机取一个时间点。想更安静就写 90-180",
+    False,
+)
+FIELD_META["llm.banter_quiet"] = (
+    "勿扰时段",
+    "几段都行，用逗号分隔，每段写法 00:00-08:00、12:00-14:00（支持跨午夜 23:00-08:00）。"
+    "落在这些时段里的那次会顺延到结束后再随机几分钟",
+    False,
+)
+FIELD_META["llm.banter_groups"] = (
+    "只在哪些群搭话",
+    "留空 = 跟上面的「生效群」一致；再留空 = 所有有旁听记录的群",
+    False,
+)
+FIELD_META["llm.banter_daily_max"] = (
+    "每群每天上限",
+    "控制吵不吵最直接的旋钮：0 = 不限（一天约 20 次），填 6 就一天最多 6 次。"
+    "间隔决定节奏，这个决定总量",
+    False,
+)
+FIELD_META["llm.banter_fresh_minutes"] = (
+    "消息超过多久就不接",
+    "最近一条消息超过这么多分钟，这轮就空过——半夜突然接一句两小时前的话很突兀",
+    False,
+)
 
 #: 有**硬上限**的字段：值会被后端静默截断，所以表单里要在输入框下面显示
 #: 「已用 x / 上限 字」。数字统一取自真正生效的那个常量，避免两处各写一份。
@@ -821,8 +854,9 @@ def apply_updates(
             logger.warning(f"[music] 按群配置回滚写盘失败: {exc}")
         return False, errors
 
-    # 时间窗口（全局的或某个群单独的）改了都要重建定时任务，否则新时刻不生效
-    if any(k.startswith("window") for k in values):
+    # 时间窗口（全局的或某个群单独的）改了都要重建定时任务，否则新时刻不生效。
+    # 主动搭话开关同理：它是「注册了才有任务」的，光改配置不重建，得等到下次重启
+    if any(k.startswith("window") for k in values) or "llm.banter" in values:
         try:
             reload_jobs()
         except Exception as exc:  # noqa: BLE001
@@ -1727,8 +1761,26 @@ async def _api_bot(request: Request):
             },
             # 「实际发出去的参数」预览：让「思考模式到底有没有生效」一眼可见
             "payload": payload_preview(cfg),
+            # 主动搭话：自己排自己，``next`` 是已经排好的下一次（排查「开了没动静」用）
+            "banter": {
+                "enabled": bool(cfg.banter),
+                "minutes": cfg.banter_minutes,
+                "quiet": list(cfg.banter_quiet),
+                "daily_max": int(cfg.banter_daily_max),
+                "fresh_minutes": float(cfg.banter_fresh_minutes),
+                "groups": list(cfg.banter_groups),
+                "next": _fmt_when(next_run_of("banter")),
+            },
         },
     })
+
+
+def _fmt_when(value: object) -> str:
+    """把 APScheduler 的 ``next_run_time`` 渲染成 ``10-25 05:31``；没有就空串。"""
+    try:
+        return f"{value:%m-%d %H:%M}" if value else ""
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 async def _api_bot_test(request: Request):

@@ -216,6 +216,9 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .cfg-nav-btn.active{color:var(--txt);font-weight:600;border-color:var(--accent);
   background:linear-gradient(135deg,rgba(110,168,254,.22),rgba(167,139,250,.22))}
 .cfg-sec{scroll-margin-top:calc(var(--cfg-stick) + var(--cfg-bar-h) + 72px)}
+/* 机器人页没有「配置对象」条，跳转栏直接贴在顶栏下面；跳过去的落点也少让 8px */
+#botNav{top:var(--cfg-stick)}
+#page-bot .cfg-sec{scroll-margin-top:calc(var(--cfg-stick) + 72px)}
 
 /* ---- 群记忆 ---- */
 .mem-layout{display:grid;grid-template-columns:300px 1fr;gap:14px;align-items:start}
@@ -422,6 +425,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
 
     <!-- 机器人（大模型回复） -->
     <section id="page-bot" class="page hidden">
+      <nav id="botNav" class="cfg-nav hidden" aria-label="机器人设置分组跳转"></nav>
       <div class="card">
         <h2><span class="dot"></span>机器人设置 · 大模型回复</h2>
         <p class="muted">群里 <b>@机器人 说一句话</b>（既不是音乐分享、也不是 <code>/music</code> 命令）时，用下面配置的大模型接口生成回复。未开启或调用失败时，仍然回原来的内置自我介绍。</p>
@@ -676,7 +680,7 @@ function switchPage(name){
   if(name==="collect") loadCollect();
   if(name==="master") loadMaster();
   if(name==="config") loadConfig();
-  if(name==="bot") loadBot();
+  if(name==="bot"){ loadBot(); syncBotNav(); }
   if(name==="memory") loadMemory();
   if(name==="aliases") loadAliases();
   if(name==="admin") loadAdmin();
@@ -1137,7 +1141,7 @@ function syncStickyOffsets(){
   const h = bar && !bar.classList.contains("hidden") ? bar.offsetHeight : 0;
   root.setProperty("--cfg-bar-h", (h+8)+"px");
 }
-window.addEventListener("resize", ()=>{ syncStickyOffsets(); if($("#cfgGroupSel")) buildGroupSelOptions(); });
+window.addEventListener("resize", ()=>{ syncStickyOffsets(); syncBotNav(); if($("#cfgGroupSel")) buildGroupSelOptions(); });
 
 /* 枚举值的中文标签：schema 里传的是英文字面量，直接显示 off/low/high 太生硬，
    这里只给需要解释的键做映射，没登记的照旧显示原值 */
@@ -1341,7 +1345,20 @@ function syncCfgNav(){
   CFG_NAV.forEach((it,i)=>{ if(it.card.getBoundingClientRect().top<=line) active=i; });
   CFG_NAV.forEach((it,i)=>it.btn.classList.toggle("active", i===active));
 }
-window.addEventListener("scroll",()=>{ if(!$("#page-config").classList.contains("hidden")) syncCfgNav(); },{passive:true});
+/* 机器人页的跳转栏：少一层「配置对象」条，判定线只加 --cfg-stick */
+let BOT_NAV=[];
+function syncBotNav(){
+  if(!BOT_NAV.length) return;
+  const cs=getComputedStyle(document.documentElement);
+  const line=(parseFloat(cs.getPropertyValue("--cfg-stick"))||0)+78;
+  let active=0;
+  BOT_NAV.forEach((it,i)=>{ if(it.card.getBoundingClientRect().top<=line) active=i; });
+  BOT_NAV.forEach((it,i)=>it.btn.classList.toggle("active", i===active));
+}
+window.addEventListener("scroll",()=>{
+  if(!$("#page-config").classList.contains("hidden")) syncCfgNav();
+  else if(!$("#page-bot").classList.contains("hidden")) syncBotNav();
+},{passive:true});
 
 function cfgQuery(){ return CFG_GID===null ? "" : "?group_id="+encodeURIComponent(CFG_GID); }
 async function loadConfig(){
@@ -1473,9 +1490,17 @@ const BOT_GROUPS=[
   {title:"上下文与频率限制",
    keys:["llm.history_rounds","llm.history_chars","llm.cooldown","llm.max_input_chars","llm.max_reply_chars","llm.at_sender","llm.fallback_intro","llm.timeout"]},
   {title:"附加触发",
-   note:"除了「@机器人」，还有两种该开口的场合：<b>被戳一戳</b>、<b>分享了不是音乐的链接</b>。<br>"
+   note:"除了「@机器人」，还有两种<b>有事发生才开口</b>的场合：被戳一戳、分享了不是音乐的链接。<br>"
       + "两者都仍然受上面的开关、生效群与冷却限制；真·音乐链接不会被截走，照常走收集流程。",
    keys:["llm.poke_reply","llm.poke_prompt","llm.reply_link","llm.link_hint"]},
+  {title:"主动搭话",
+   note:"上面那些都是「有人叫它」才回，这一组是<b>没人叫也自己说</b>：非勿扰时段里每隔一段随机时间，"
+      + "把群里最近的一句话接过去，<b>不 @ 人、不引用</b>。<br>"
+      + "素材取自「群记忆」的旁听记录，所以<b>旁听也要开着</b>，否则没有可接的话。<br>"
+      + "想安静就两个地方下手：把<b>间隔</b>拉长（90-180），或把<b>每天上限</b>压小（比如 4）。"
+      + "间隔决定节奏，上限决定总量——后者更好控制。",
+   keys:["llm.banter","llm.banter_minutes","llm.banter_quiet",
+         "llm.banter_groups","llm.banter_daily_max","llm.banter_fresh_minutes"]},
   {title:"高级",
    note:"厂商私有参数（top_k、repetition_penalty、chat_template_kwargs…）在这里用 JSON 直接塞进请求体，会覆盖上面同名项。",
    keys:["llm.extra_body","llm.stop","llm.seed"]}
@@ -1485,6 +1510,8 @@ const BOT_GROUPS=[
 function renderBotForm(schema, values){
   BOT_ORIG=Object.assign({},values||{}); BOT_DIRTY={};
   const form=$("#botForm"); if(!form) return; form.innerHTML="";
+  const nav=$("#botNav"); if(nav) nav.innerHTML="";
+  const navItems=[];
   const fields={};
   (schema||[]).forEach(sec=>(sec.fields||[]).forEach(f=>{ if(f.type!=="map") fields[f.key]=f; }));
   const drawn=new Set();
@@ -1504,11 +1531,28 @@ function renderBotForm(schema, values){
       fr.appendChild(lab); fr.appendChild(row); card.appendChild(fr);
     });
     form.appendChild(card);
+    /* 与「配置」页同一套跳转栏：分组多、页面长，点一下直接滚到对应分组 */
+    if(nav){
+      const btn=document.createElement("button");
+      btn.type="button"; btn.className="cfg-nav-btn"; btn.textContent=title;
+      btn.title="跳到「"+title+"」";
+      btn.onclick=()=>card.scrollIntoView({behavior:"smooth",block:"start"});
+      nav.appendChild(btn); navItems.push({btn,card});
+    }
   };
   BOT_GROUPS.forEach(g=>cardOut(g.title, g.note, g.keys));
   const rest=Object.keys(fields).filter(k=>!drawn.has(k));
   if(rest.length) cardOut("其它", "", rest);
+  if(nav){
+    if(navItems.length>1){
+      const tip=document.createElement("span"); tip.className="cn-title"; tip.textContent="跳转";
+      nav.insertBefore(tip, nav.firstChild);
+    }
+    nav.classList.toggle("hidden", navItems.length<2);
+  }
+  BOT_NAV=navItems;
   refreshBotDirty();
+  syncBotNav();
 }
 const THINK_MODE_LABEL={auto:"自动（用模型默认）",off:"关闭思考",low:"低",medium:"中",high:"高",max:"最高"};
 const THINK_STYLE_LABEL={reasoning_effort:"reasoning_effort",enable_thinking:"enable_thinking",
@@ -1523,6 +1567,16 @@ function renderBotStatus(st){
   else parts.push(`<span class="badge ok">已启用</span>`);
   if(st.ready) parts.push(`模型：<b>${esc(st.model||"")}</b>　接口：<code>${esc(st.endpoint||"")}</code>`);
   parts.push(`生效群：${esc((st.groups||[]).length ? st.groups.join("、") : "所有群")}`);
+  /* 主动搭话：开了却一直没动静时，先看这里排的下次时刻对不对 */
+  const bant=st.banter||{};
+  if(bant.enabled){
+    const quiet=(bant.quiet||[]).join("、")||"无";
+    const cap=bant.daily_max>0?`每天最多 ${bant.daily_max} 次`:"每天不限";
+    parts.push(`主动搭话：<b>每 ${esc(bant.minutes||"30-60")} 分钟</b>　勿扰：<code>${esc(quiet)}</code>　`
+      + `${esc(cap)}　下次：<b>${esc(bant.next||"待排期")}</b>`);
+  } else {
+    parts.push(`主动搭话：<span class="muted">关（打开后没人叫它也自己冒泡）</span>`);
+  }
   /* 思考模式：把「档位 → 实际写法 → 真实预算」摆出来，避免选了「高」却发现没生效 */
   const th=st.thinking||{};
   if(th.mode && th.mode!=="auto"){

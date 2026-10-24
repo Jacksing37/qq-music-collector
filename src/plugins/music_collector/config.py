@@ -575,6 +575,25 @@ class LLMConfig(BaseModel):
     #: 不说明的话模型容易把它当成点歌请求，回一句「这首我帮你收录了」
     link_hint: str = "（这不是音乐平台的歌曲链接，顺口接一句就行，不用当成点歌）"
 
+    # ---- 主动搭话（没人叫它，自己找话说）----
+    #: 总开关。**默认关**：打开后机器人会在非勿扰时段里自己冒泡，
+    #: 每隔 ``banter_minutes`` 随机挑一个时间点，把群里最近的一句话接过去。
+    #: 素材来自旁听记录，所以还需要 ``memory.listen`` 开着。
+    banter: bool = False
+    #: 两次搭话的间隔区间（分钟），写法 ``"30-60"``。每次从这个区间里随机取一个点
+    banter_minutes: str = "30-60"
+    #: 勿扰时段，**可配多段**（网页上逗号分隔），每段写法 ``00:00-08:00``。
+    #: 支持跨午夜（``23:00-08:00``）。落在勿扰段里的那次会顺延到该段结束后
+    banter_quiet: list[str] = Field(default_factory=lambda: ["00:00-08:00"])
+    #: 只在哪些群主动搭话；留空 = 跟 ``llm.groups``（再留空 = 所有旁听过的群）
+    banter_groups: list[int] = Field(default_factory=list)
+    #: 每群每天最多搭几次；``0`` = 不限。这是控制「吵不吵」最直接的旋钮，
+    #: 比调间隔管用：间隔决定节奏，上限决定总量
+    banter_daily_max: int = Field(0, ge=0, le=200)
+    #: 最近一条消息超过这么多分钟就不接了。半夜三点突然回一句两小时前的话，
+    #: 比不说话还怪，所以宁可这轮空过
+    banter_fresh_minutes: float = Field(20.0, ge=1, le=720)
+
 
 class MemoryConfig(BaseModel):
     """群成员长期记忆（谁是谁、喜欢什么、说过什么）。

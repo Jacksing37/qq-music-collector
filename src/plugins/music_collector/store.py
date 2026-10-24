@@ -1119,6 +1119,32 @@ class Store:
                     total -= size(msgs.pop(0))
         return msgs
 
+    async def latest_chat(
+        self, group_id: int, *, max_age: float = 0.0
+    ) -> Optional[dict]:
+        """取这群**最近一条群友消息**（旁听记录），给「主动搭话」当引子。
+
+        只认 ``kind='listen'``：那才是群友平时闲聊的原话，格式干净（纯文本）；
+        ``kind='chat'`` 里存的是「昵称(QQ号)：提问」，拿去当引子会多一层前缀。
+
+        ``max_age``（秒）非零时只看这段时间内的消息——两小时前的话现在接起来
+        很突兀，宁可这轮空过。
+        """
+        sql = (
+            "SELECT id, user_id, nick, content, created_at FROM chat_log "
+            "WHERE group_id=? AND kind='listen' AND role='user'"
+        )
+        params: list[object] = [int(group_id)]
+        if max_age > 0:
+            sql += " AND created_at>=?"
+            params.append(float(time.time()) - float(max_age))
+        sql += " ORDER BY id DESC LIMIT 1"
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, params) as cur:
+                row = await cur.fetchone()
+        return dict(row) if row else None
+
     async def pending_digest(
         self, group_id: int, *, limit: int = 300, since: float = 0.0
     ) -> list[dict]:
