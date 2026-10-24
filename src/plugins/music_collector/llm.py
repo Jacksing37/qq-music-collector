@@ -226,6 +226,21 @@ def estimate_tokens(text: str) -> int:
     return int(cjk / _CJK_PER_TOKEN + other / _ASCII_PER_TOKEN) + 1
 
 
+def clip_tail(text: str, limit: int) -> str:
+    """从**末尾**往回截（保留最近的内容），尽量从整行开始。
+
+    和 :func:`with_context` 的「保留开头」正好相反，两种场合要的也不一样：
+    参考资料该留开头（网页正文从标题读起），而群聊素材该留结尾（**现在**在聊
+    什么才是重点）。放在这里而不是 ``banter``，是因为被动回答也要用它——
+    而 ``banter`` 依赖 ``llm``，反向 import 会绕成环。
+    """
+    if limit <= 0 or len(text) <= limit:
+        return text
+    cut = text[-limit:]
+    nl = cut.find("\n")
+    return cut[nl + 1:] if 0 <= nl < 80 else cut
+
+
 def as_message(raw) -> dict:
     """把 ``_post_chat`` 的返回值归一化成 message dict。
 

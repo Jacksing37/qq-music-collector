@@ -21,6 +21,7 @@ import sys
 import tempfile
 import time
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -915,6 +916,67 @@ async def test_trace_wired() -> None:
     lt.clear()
 
 
+async def test_background() -> None:
+    """被动回答的「群聊背景」：只取它**上次说话之后**的那段，且不越界。
+
+    这条链路存在的唯一理由是：群友闲聊（listen）和问答历史（chat）是两条通道，
+    不加背景它根本答不上「刚才聊啥」。
+    """
+    print("\n[15] 群聊背景（被动回答时补的那一段）")
+    from music_collector import _llm_background
+    from music_collector.store import Store
+
+    tmp = Path(tempfile.mkdtemp(prefix="bg_"))
+    store = Store(tmp / "bg.db")
+    await store.init()
+    old_store = service.store
+    cfg = LLMConfig(bg_chat=True, bg_chat_max=30, bg_chat_chars=2000, bg_chat_minutes=120)
+    gid = 9301
+
+    class _Ev:
+        group_id = gid
+
+    try:
+        service.store = store
+        check("没有群号 → 不查也不报错", await _llm_background(object(), cfg) == "")
+
+        await store.append_chat(gid, 1, "张三", "user", "锅贴真不错", kind="listen")
+        await store.append_chat(gid, 2, "李四", "user", "我上周连吃三天", kind="listen")
+        bg = await _llm_background(_Ev(), cfg)
+        check("它从没说过话 → 回退到最近窗口也能取到", "锅贴真不错" in bg, bg[:80])
+        check("带时间戳与昵称", "张三(1)" in bg and "[" in bg, bg[:80])
+        check("带了「不是在跟你说话」的说明", "不是在跟你说话" in bg, bg[:40])
+
+        # 机器人说话了 → 之前的闲聊就不该再当背景
+        await store.append_chat(gid, 0, "", "assistant", "哈哈确实", kind="chat")
+        after = await _llm_background(_Ev(), cfg)
+        check("说过话之后，之前那批不再带", after == "", after)
+
+        await store.append_chat(gid, 3, "王五", "user", "周末去看海吗", kind="listen")
+        bg3 = await _llm_background(_Ev(), cfg)
+        check("只取上次说话之后的那条", "周末去看海吗" in bg3, bg3)
+        check("之前那两句不再混进来", "锅贴真不错" not in bg3, bg3)
+
+        check("关掉开关 → 空",
+              await _llm_background(_Ev(), cfg.model_copy(update={"bg_chat": False})) == "")
+
+        await store.append_chat(gid, 4, "李四", "user", "一小时前的旧话", kind="listen",
+                                created_at=datetime.now().timestamp() - 3600)
+        old_cfg = cfg.model_copy(update={"bg_chat_minutes": 1})
+        bg4 = await _llm_background(_Ev(), old_cfg)
+        check("超过时间窗的不带", "一小时前的旧话" not in bg4, bg4)
+
+        small = cfg.model_copy(update={"bg_chat_chars": 60})
+        for i in range(10):
+            await store.append_chat(gid, 5, "赵六", "user",
+                                    f"第{i}条比较长的闲聊内容，用来把字数撑上去", kind="listen")
+        bg5 = await _llm_background(_Ev(), small)
+        check("超字数时保留最近的（不是最旧的）", "第9条" in bg5, bg5)
+        check("最旧的被丢掉", "第0条" not in bg5, bg5)
+    finally:
+        service.store = old_store
+
+
 async def test_handle_at_routing() -> None:
     print("\n[13] handle_at 分流：大模型优先，兜底自我介绍")
     import music_collector as mc
@@ -992,6 +1054,20 @@ async def test_handle_at_routing() -> None:
     check("空文本 → 自我介绍", len(bot.sent) == 1 and "群音乐收集助手" in bot.sent[0],
           str(bot.sent))
 
+    # (i) 群聊背景：群友闲聊（listen）也要拼进这次请求，否则它答不上「刚才聊啥」
+    reset_llm()
+    calls: list = []
+    mc.llm_bot = make_bot("好的", calls=calls)
+    await service.store.append_chat(GID, 2001, "路人甲", "user",
+                                    "刚才在聊哪家锅贴最好吃", kind="listen")
+    await handle_at(StubBot(), make_event("刚才聊啥呢", user_id=2009))
+    payload = calls[-1] if calls else []
+    last_user = str(payload[-1].get("content") or "") if payload else ""
+    check("背景拼进了这次请求", "刚才在聊哪家锅贴最好吃" in last_user, last_user[:120])
+    check("背景带「不是在跟你说话」的说明", "不是在跟你说话" in last_user, last_user[:80])
+    check("背景排在提问前面", last_user.find("刚才在聊哪家锅贴") < last_user.find("刚才聊啥呢"),
+          last_user[:160])
+
 
 async def main() -> None:
     test_normalize_endpoint()
@@ -1007,6 +1083,7 @@ async def main() -> None:
     await test_context_budget()
     await test_context_breakdown()
     await test_trace_wired()
+    await test_background()
     await test_diagnostic_logs()
     await test_handle_at_routing()
     print("\n====================================================")

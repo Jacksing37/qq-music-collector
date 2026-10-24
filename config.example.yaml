@@ -330,6 +330,10 @@ llm:
   read_forward: true          # 展开「转发的聊天记录」给模型看
   forward_limit: 30           # 一次最多展开几条转发消息
   forward_chars: 2000         # 转发内容总字数上限，超出标出还剩几条
+  bg_chat: true               # 被动回答时带上「上次说话之后」的群聊（不然不知道大家在聊啥）
+  bg_chat_max: 30             # 背景最多几条
+  bg_chat_chars: 2000         # 背景最多多少字（约 1000 token）
+  bg_chat_minutes: 120        # 背景只认这么久以内的群聊
   # ---- 工具与技能（模型自己能调的能力）----
   tools: true                 # 工具总闸；关掉后模型只能纯聊天
   tool_rounds: 3              # 一次回复最多调几轮工具；0=不许调

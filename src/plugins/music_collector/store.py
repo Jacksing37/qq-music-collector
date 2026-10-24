@@ -1148,6 +1148,27 @@ class Store:
                 row = await cur.fetchone()
         return dict(row) if row else None
 
+    async def last_bot_chat(self, group_id: int) -> Optional[dict]:
+        """该群机器人**最后一次说话**的位置（``id`` + ``created_at``）。
+
+        给「被动回答时补一段群聊背景」用：从这条之后，群里聊的那些它都没参与过，
+        正好是它「不知道」的部分。找不到（这个群它从没说过话）返回 ``None``，
+        调用方回退到「最近 N 分钟」。
+
+        主动搭话的回复也是走 ``chat()`` 落库的（``kind='chat'``），所以同样算
+        「说过话」——这正合适：它接完话之后群里继续聊的内容，才需要补给它。
+        """
+        sql = (
+            "SELECT id, created_at FROM chat_log "
+            "WHERE group_id=? AND kind='chat' AND role='assistant' "
+            "ORDER BY id DESC LIMIT 1"
+        )
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, (int(group_id),)) as cur:
+                row = await cur.fetchone()
+        return dict(row) if row else None
+
     async def recent_chat(
         self,
         group_id: int,

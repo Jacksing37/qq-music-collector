@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
 
 from nonebot import get_driver, on_message, on_notice, require
 from nonebot.adapters import Event
@@ -44,7 +45,7 @@ from .detector import (  # noqa: E402
     extract_urls,
 )
 from .llm import disabled_reason as llm_disabled_reason  # noqa: E402
-from .llm import llm_bot  # noqa: E402
+from .llm import clip_tail, llm_bot  # noqa: E402
 from . import memory as memory_mod  # noqa: E402
 from .models import PLATFORM_NAMES, Song  # noqa: E402
 from .naming import build_context, render_template, resolve_alias  # noqa: E402
@@ -394,6 +395,65 @@ async def _llm_context(bot: Bot, event: object, llm_cfg, text: str) -> str:
     return "\n\n".join(blocks)
 
 
+#: 背景的**硬上限**。``with_context`` 总共只放 4000 字且超了截**开头**，
+#: 而背景是正序（最旧在前）——靠它裁会把最新那几句扔掉，所以背景自己先截好。
+#: 取 2500 是给「转发记录 / 网页正文」留出空间；``bg_chat_chars`` 配得更大也只给这么多。
+_BG_CHAR_LIMIT = 2500
+
+
+async def _llm_background(event: object, llm_cfg) -> str:
+    """机器人上次说话之后、群里聊的那一段（它没参与过的那截）。
+
+    **为什么需要它**：群友闲聊存进 ``kind='listen'``，而问答历史是
+    ``kind='chat'``，两条通道分开。所以单纯 @ 它一句「刚才在聊啥」，它其实
+    一无所知——问出这种「答不上来」的根源在这里，不是模型不行。
+
+    只查库、不发请求；任何异常都当「没有背景」，绝不能让 @ 的回复卡住。
+    """
+    if not getattr(llm_cfg, "bg_chat", False):
+        return ""
+    gid = int(getattr(event, "group_id", 0) or 0)
+    if not gid:
+        return ""
+    try:
+        last = await service.store.last_bot_chat(gid)
+        rows = await service.store.recent_chat(
+            gid,
+            after_id=int((last or {}).get("id") or 0),
+            limit=int(llm_cfg.bg_chat_max),
+            max_chars=int(llm_cfg.bg_chat_chars),
+        )
+    except Exception as exc:  # noqa: BLE001 — 背景拿不到也要正常回答
+        logger.debug(f"[llm] 群{gid} 取群聊背景失败: {exc}")
+        return ""
+    if not rows:
+        return ""
+
+    # 太久以前的不算「刚才在聊」：它可能几小时没说话，中间的全捞进来也没用
+    cutoff = time.time() - float(llm_cfg.bg_chat_minutes) * 60
+    rows = [r for r in rows if float(r.get("created_at") or 0) >= cutoff]
+    if not rows:
+        return ""
+
+    tz = service.resolver.tz
+    lines: list[str] = []
+    for row in rows:
+        try:
+            hm = datetime.fromtimestamp(float(row["created_at"]), tz).strftime("%H:%M")
+        except (KeyError, TypeError, ValueError, OSError):
+            hm = "--:--"
+        body = str(row.get("content") or "").strip().replace("\n", " ")
+        lines.append(f'[{hm}] {row.get("nick") or "群友"}({row.get("user_id") or 0})：{body}')
+
+    # 尊重用户的 bg_chat_chars，但不超过硬上限（超了会把真正的提问挤出 context）
+    budget = max(200, min(int(llm_cfg.bg_chat_chars), _BG_CHAR_LIMIT))
+    text = clip_tail("\n".join(lines), budget)
+    logger.debug(f"[llm] 群{gid} 附带群聊背景 {len(rows)} 条 / {len(text)} 字")
+    # 这句说明不能省：不写的话模型会以为有人在跟它说「这家锅贴真不错」，
+    # 或者以为自己该接话
+    return "【群里刚才在聊的，不是在跟你说话，判断语境用】\n" + text
+
+
 async def _llm_answer(
     bot: Bot,
     event: object,
@@ -410,6 +470,10 @@ async def _llm_answer(
     """
     group_id = int(getattr(event, "group_id", 0) or 0)
     user_id = int(getattr(event, "user_id", 0) or 0)
+    # 群友闲聊不进问答历史，这里把那一段补上（走 context，不进历史、不占历史预算）
+    background = await _llm_background(event, llm_cfg)
+    if background:
+        context = f"{background}\n\n{context}" if context else background
     reply, reason = await llm_bot.chat(
         group_id,
         user_id,

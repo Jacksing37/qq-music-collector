@@ -42,7 +42,7 @@ from nonebot.log import logger
 from .bot_utils import safe_send_group
 from .config import LLMConfig
 from . import llmtrace as llmtrace_mod
-from .llm import llm_bot
+from .llm import clip_tail, llm_bot
 from .service import service
 
 #: 主动搭话能带多少字的历史。**不跟 ``llm.history_chars`` 走**：
@@ -233,19 +233,6 @@ def format_batch(rows: list[dict], tz) -> str:
         body = str(row.get("content") or "").strip().replace("\n", " ")
         lines.append(f"[{ts}] {nick}({uid})：{body}")
     return "\n".join(lines)
-
-
-def clip_tail(text: str, limit: int) -> str:
-    """从**末尾**往回截（保留最近的内容），尽量从整行开始。
-
-    和 ``llm.with_context`` 的「保留开头」正好相反：参考资料该留开头（网页正文
-    从标题读起），群聊素材该留结尾（现在在聊什么才是重点）。
-    """
-    if limit <= 0 or len(text) <= limit:
-        return text
-    cut = text[-limit:]
-    nl = cut.find("\n")
-    return cut[nl + 1:] if 0 <= nl < 80 else cut
 
 
 def _advance(group_id: int, last_id: int) -> None:
