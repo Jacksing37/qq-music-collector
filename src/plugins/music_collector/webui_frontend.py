@@ -1609,6 +1609,9 @@ const BOT_GROUPS=[
   {title:"工具与技能",
    note:"模型可以<b>自己决定</b>调工具：需要看网页就抓网页，遇到不熟的任务就看有没有对应技能。<br>"
       + "和「自动抓取」不同——抓不抓、抓哪个由模型判断，不会每条消息都去抓，也不会把无关页面塞进上下文。<br>"
+      + "<b>搜网页</b>：打开后模型多一个 web_search，问新闻 / 价格 / 比分这类会过时效的东西时先搜再答。"
+      + "走 Bing 的公开页面、不用 API Key，但<b>搜密了会被要求验证码</b>，所以默认关；"
+      + "日志里频繁出现「搜索失败」就先关掉。<br>"
       + "<b>技能</b>：技能目录下每个子目录放一个 <code>SKILL.md</code>（开头写 name / description，正文写步骤），"
       + "模型先看简介、需要时才读全文。加技能不用改代码。<br>"
       + "🔒 <b>QQ 聊天中禁止安装任何技能</b>（代码硬规则、没有开关）：模型没有装技能的工具，"
@@ -1619,6 +1622,8 @@ const BOT_GROUPS=[
       + "⚠️ <b>允许执行技能脚本</b>等于「模型能让你服务器上跑代码」，只在完全信任技能来源时打开。",
    keys:["llm.tools","llm.tool_rounds","llm.tool_chars",
          "llm.web_tool","llm.fetch_chars","llm.fetch_timeout",
+         "llm.web_search","llm.search_max","llm.search_snippet_chars",
+         "llm.search_timeout","llm.search_interval",
          "llm.skills","llm.skills_dir","llm.skill_body_chars","llm.skill_file_chars",
          "llm.skill_scripts","llm.skill_timeout"]},
   {title:"上下文与频率限制",

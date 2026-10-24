@@ -342,6 +342,11 @@ llm:
   web_tool: true              # 提供 fetch_url（模型需要时自己抓网页正文）
   fetch_chars: 2000           # fetch_url 返回的正文最多多少字
   fetch_timeout: 15.0         # fetch_url 超时秒数
+  web_search: false           # 提供 web_search（模型自己搜网页）；走 Bing 公开页面，搜密了会被要验证码
+  search_max: 5               # 一次搜几条（1~8）
+  search_snippet_chars: 200   # 每条摘要上限，0=不截
+  search_timeout: 20.0        # 搜索超时秒数
+  search_interval: 1.0        # 两次搜索最小间隔（秒），防反爬；0=不限
   skills: true                # 启用技能包（扫 data/skills/*/SKILL.md）
   skills_dir: ''              # 技能目录，留空=data/skills；相对路径按 data/ 解析
   skill_body_chars: 3000      # use_skill 返回的技能正文上限

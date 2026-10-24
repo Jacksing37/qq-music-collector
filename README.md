@@ -488,6 +488,11 @@ netease:
 > | `llm.web_tool` | 开 | 提供 `fetch_url` |
 > | `llm.fetch_chars` | `2000` | `fetch_url` 返回正文上限 |
 > | `llm.fetch_timeout` | `15` | `fetch_url` 超时秒数 |
+> | `llm.web_search` | 关 | 提供 `web_search`（模型自己搜网页） |
+> | `llm.search_max` | `5` | 一次搜几条（1~8） |
+> | `llm.search_snippet_chars` | `200` | 每条摘要上限，`0` = 不截 |
+> | `llm.search_timeout` | `20` | 搜索超时秒数 |
+> | `llm.search_interval` | `1` | 两次搜索最小间隔（秒），`0` = 不限 |
 > | `llm.skills` | 开 | 启用技能包（扫 `data/skills`） |
 > | `llm.skills_dir` | 空 | 技能目录，留空 = `data/skills` |
 > | `llm.skill_body_chars` | `3000` | `use_skill` 返回的技能正文上限 |
@@ -502,6 +507,7 @@ netease:
 | 工具 | 干什么 | 什么时候用 |
 |---|---|---|
 | `fetch_url` | 抓网页正文并抽成纯文本 | 有人发了链接、它需要知道里面写了什么 |
+| `web_search` | 搜网页，返回几条「标题 — 摘要（网址）」（默认关闭） | 问的是新闻、价格、比分、谁的现任职位、软件最新版本这类会过时效的事 |
 | `list_skills` | 列出已安装技能的名字 + 简介 | 遇到不熟的任务，先看有没有现成方法 |
 | `use_skill` | 读某个技能的完整说明 | 照技能里的步骤做事 |
 | `read_skill_file` | 读技能目录里的附加文件（`references/xxx.md`） | 技能正文让你「读取 references/…」时；一次一个文件 |

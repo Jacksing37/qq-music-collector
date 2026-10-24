@@ -564,6 +564,17 @@ class LLMConfig(BaseModel):
     fetch_chars: int = Field(2000, ge=200, le=12000)
     #: fetch_url 的超时秒数
     fetch_timeout: float = Field(15.0, ge=3, le=60)
+    #: 是否提供 web_search（让模型自己搜网页）。**默认关**：搜的是 Bing 的
+    #: 公开 HTML 端点，机房 IP 搜密了会吃验证码，确认能跑再打开
+    web_search: bool = False
+    #: 一次搜几条（1~8）。条数越多越费 token，5 条够回答绝大多数问题
+    search_max: int = Field(5, ge=1, le=8)
+    #: 每条摘要最多多少字。'' = 不截；摘要本来就短，200 字基本是全文
+    search_snippet_chars: int = Field(200, ge=0, le=800)
+    #: 搜索请求的超时秒数。Bing 国内响应一般 1~3 秒，20 秒是上限保险
+    search_timeout: float = Field(20.0, ge=5, le=60)
+    #: 两次搜索的最小间隔（秒）。防反爬；0 = 不限（不推荐，容易被要求验证码）
+    search_interval: float = Field(1.0, ge=0, le=30)
     #: 是否启用技能包（扫描技能目录下的 SKILL.md）
     skills: bool = True
     #: 技能目录；留空 = data/skills；相对路径按 data/ 解析

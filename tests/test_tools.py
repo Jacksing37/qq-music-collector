@@ -399,7 +399,7 @@ def test_install_denied() -> None:
           not [n for n in names if tl.looks_like_install(n)], str(names))
     check("白名单就是这八个工具（新增的必须显式加进来）",
           tl.ALLOWED_TOOL_NAMES == {
-              "fetch_url", "list_skills", "use_skill", "read_skill_file",
+              "fetch_url", "web_search", "list_skills", "use_skill", "read_skill_file",
               "run_skill_script", "remember", "recall", "forget",
           },
           str(sorted(tl.ALLOWED_TOOL_NAMES)))

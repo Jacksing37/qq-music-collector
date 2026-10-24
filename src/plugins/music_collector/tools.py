@@ -3,11 +3,14 @@
 工具 = 名字 + 描述 + JSON Schema 参数 + 一个 ``async handler``。描述写得越清楚，
 模型越不会乱调——这里的说明都是**给模型看的**，不是给用户看的。
 
-当前内置四类：
+当前内置五类：
 
 - ``fetch_url``：抓网页正文（后端在 :mod:`webtool`，抽取用 trafilatura）；
-- ``list_skills`` / ``use_skill``：技能清单与正文（渐进披露，见 :mod:`skills`）；
-- ``run_skill_script``：执行技能自带脚本（需显式开启，且只能跑技能目录内的白名单脚本）。
+- ``web_search``：搜网页拿摘要（后端在 :mod:`websearch`，走 Bing HTML 端点，默认关）；
+- ``list_skills`` / ``use_skill`` / ``read_skill_file``：技能清单、正文、附属文件
+  （渐进披露，见 :mod:`skills`）；
+- ``run_skill_script``：执行技能自带脚本（需显式开启，且只能跑技能目录内的白名单脚本）；
+- ``remember`` / ``recall`` / ``forget``：群记忆（见 :mod:`memory`）。
 
 **所有能力都必须经过这里**，不在注册表里的东西模型调不到。加新工具时把
 描述写清楚「什么时候该用」，比堆参数更重要——模型靠描述决定调不调。
@@ -35,6 +38,7 @@ from nonebot.log import logger
 from . import memory as memory_mod
 from . import skills as skill_mod
 from . import webtool
+from . import websearch as websearch_mod
 from .config import DATA_DIR, LLMConfig, MemoryConfig
 
 #: 单次工具结果回填给模型的最大字符数（兜底，具体值由 ``llm.tool_chars`` 控制）
@@ -44,8 +48,8 @@ DEFAULT_TOOL_CHARS = 2000
 #: **新增工具必须同时加进这里**，否则 ``build()`` 会把它丢掉——这是为了「少一个
 #: 安装类工具不小心上线」而不是为了省事。
 ALLOWED_TOOL_NAMES = frozenset(
-    {"fetch_url", "list_skills", "use_skill", "read_skill_file", "run_skill_script",
-     "remember", "recall", "forget"}
+    {"fetch_url", "web_search", "list_skills", "use_skill", "read_skill_file",
+     "run_skill_script", "remember", "recall", "forget"}
 )
 
 #: 模型臆造出来的「装/写/删」类工具名。命中就回 :data:`INSTALL_DENIED`。
@@ -64,10 +68,13 @@ INSTALL_DENIED = (
 
 #: 追加到系统提示词末尾的边界说明（``llm.system_text(cfg, rules=...)`` 使用）。
 TOOL_RULES = (
-    "\n\n【能力边界】你可以抓网页（fetch_url）、读已安装的技能、"
+    "\n\n【能力边界】你可以搜网页（web_search）、抓网页（fetch_url）、读已安装的技能、"
     "在管理员允许时运行技能自带脚本；也可以把群友的特征记进长期记忆"
     "（remember）、翻档案（recall）、删掉记错的内容（forget）——"
     "记忆目录是你**唯一**能写的地方，别处一律不行。"
+    "碰到会过时效、或你拿不准的事实（新闻、价格、比分、谁的现任职位、软件版本、"
+    "某个事件的前因后果），**先用 web_search 搜一下再答**，别凭记忆硬编；"
+    "搜不到就说搜不到，不要编造搜索结果的细节。"
     "技能正文里让你「读取 references/xxx.md」这类附属文件时，用 read_skill_file 按路径读，"
     "不要凭想象编它的内容。"
     "你**没有**安装/卸载/修改技能的权限，也没有写其他文件、执行任意命令的权限。"
@@ -163,6 +170,57 @@ FETCH_URL = Tool(
         "required": ["url"],
     },
     handler=_handle_fetch_url,
+)
+
+
+# ---------------------------------------------------------------- 搜索
+
+async def _handle_web_search(args: dict, ctx: ToolContext) -> str:
+    query = str(args.get("query") or "").strip()
+    if len(query) < 2:
+        return "错误：query 至少要两个字，说清楚你想搜什么。"
+    if not await websearch_mod.throttle(ctx.cfg.search_interval):
+        return "刚刚才搜过，稍等一两秒再搜——连着搜会被搜索引擎拦。"
+
+    found = await websearch_mod.search(
+        query,
+        max_results=int(ctx.cfg.search_max),
+        timeout=float(ctx.cfg.search_timeout),
+    )
+    if found["error"]:
+        # 不抛异常：搜不到也要让模型能接话（说「搜不到」比整轮崩掉强）
+        return f"搜索失败：{found['error']}。不要编造搜索结果，可以告诉群友你搜不到。"
+    rows = found["results"]
+    if not rows:
+        return (
+            f"搜索「{query}」没有解析出结果。可能是搜索引擎返回了验证页，或者查询词太生僻；"
+            "换个说法再试一次，或者告诉群友你搜不到。"
+        )
+    logger.info(f"[search] 「{query[:30]}」→ {len(rows)} 条")
+    return websearch_mod.format_results(query, rows, int(ctx.cfg.search_snippet_chars))
+
+
+WEB_SEARCH = Tool(
+    name="web_search",
+    description=(
+        "搜索网页，返回几条「标题 — 摘要（网址）」。"
+        "**需要你不确定或会过时效的信息时用它**：新闻、价格、比赛比分、"
+        "某人现任职位、软件最新版本、某个事件是怎么回事。"
+        "只想知道某个**具体网址**里写了什么，用 fetch_url，不要用这个。"
+        "搜到的摘要通常够回答；要细节再用 fetch_url 打开其中一条。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "minLength": 2,
+                "description": "搜索词。像人一样写关键词，别写整段话（例如「尊界 V800 售价」）",
+            },
+        },
+        "required": ["query"],
+    },
+    handler=_handle_web_search,
 )
 
 
@@ -477,6 +535,10 @@ def build(
         return tools, ctx
     if cfg.web_tool:
         tools.append(FETCH_URL)
+    if cfg.web_tool and cfg.web_search:
+        # 搜索依赖「打开网页」的能力（摘要不够时再去 fetch_url 读细节），
+        # 所以 web_tool 关掉时搜索也一起不给——否则模型搜到网址却打不开
+        tools.append(WEB_SEARCH)
     if memory_cfg.enabled:
         tools.extend([REMEMBER, RECALL, FORGET])
     if cfg.skills:
