@@ -339,6 +339,39 @@ def _example_has(key: str) -> bool:
     return key in example.read_text(encoding="utf-8")
 
 
+def test_reload_trigger() -> None:
+    """保存配置后要不要重建定时任务。
+
+    这条锁的是一个真出过的 bug：判断条件原来只比对 ``llm.banter`` 这一个键，
+    而用户改的通常是 ``llm.banter_minutes`` / ``banter_quiet``，于是「开关没动」
+    就不重排，改了间隔得等旧的那次跑完（甚至等下次重启）才生效。
+    """
+    print("\n[8] 保存配置后要不要重建定时任务")
+    from music_collector import webui as wui
+
+    for k in (
+        "llm.banter",
+        "llm.banter_minutes",
+        "llm.banter_quiet",
+        "llm.banter_groups",
+        "llm.banter_daily_max",
+        "llm.banter_fresh_minutes",
+        "memory.digest_hours",
+        "window.mode",
+        "window.daily.start",
+    ):
+        check(f"{k} → 要重排", wui.needs_job_reload({k: 1}))
+
+    for k in ("llm.model", "llm.temperature", "memory.inject_chars", "playlist.seq", "logs.level"):
+        check(f"{k} → 不用重排", not wui.needs_job_reload({k: 1}))
+
+    check("没有改动 → 不用重排", not wui.needs_job_reload({}))
+    check(
+        "混着改也能认出搭话项",
+        wui.needs_job_reload({"llm.model": "x", "llm.banter_minutes": "90-120"}),
+    )
+
+
 def main() -> None:
     tmp = Path(tempfile.mkdtemp(prefix="banter_"))
     test_parse()
@@ -348,6 +381,7 @@ def main() -> None:
     test_run(tmp)
     test_store_latest(tmp)
     test_defaults()
+    test_reload_trigger()
     print(f"\n通过 {PASSED} 项，失败 {FAILED} 项")
     sys.exit(1 if FAILED else 0)
 

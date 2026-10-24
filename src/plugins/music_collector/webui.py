@@ -820,6 +820,22 @@ def current_values(group_id: typing.Optional[int] = None) -> dict[str, object]:
     return _walk(base.model_dump(mode="json"), "")
 
 
+#: 改到这些前缀的配置后必须重建定时任务。定时任务里有一类是「注册时就把下次时刻
+#: 算死了」（主动搭话用 ``date`` 触发器、群记忆用 ``interval``），光改配置不重建，
+#: 新值要等旧的那次跑完、甚至要等下次重启才生效。
+_RELOAD_PREFIXES = ("window", "llm.banter", "memory.digest_hours")
+
+
+def needs_job_reload(values: dict[str, object]) -> bool:
+    """这批改动里有没有影响定时任务的。
+
+    注意要按**前缀**判断，不能只比对 ``llm.banter`` 这一个键——用户改的通常
+    ``llm.banter`` 是 ``banter_minutes`` / ``banter_quiet`` 这些，「开关没动」就
+    不重排，表现成「改了间隔没反应」。
+    """
+    return any(str(k).startswith(_RELOAD_PREFIXES) for k in values)
+
+
 def apply_updates(
     values: dict[str, object], group_id: typing.Optional[int] = None
 ) -> tuple[bool, dict[str, str]]:
@@ -827,7 +843,8 @@ def apply_updates(
 
     ``group_id`` 非空时写进该群的覆盖层（进程级配置项仍会自动落到全局）。
 
-    返回 ``(ok, errors)``。成功后若涉及 ``window.*``，重新注册定时任务。
+    返回 ``(ok, errors)``。成功后若涉及时间窗口、主动搭话或整理间隔，
+    重新注册定时任务（见 ``needs_job_reload``）。
     """
     if not values:
         return True, {}
@@ -855,8 +872,9 @@ def apply_updates(
         return False, errors
 
     # 时间窗口（全局的或某个群单独的）改了都要重建定时任务，否则新时刻不生效。
-    # 主动搭话开关同理：它是「注册了才有任务」的，光改配置不重建，得等到下次重启
-    if any(k.startswith("window") for k in values) or "llm.banter" in values:
+    # 主动搭话同理：它是「注册了才有任务、注册时算死下次时刻」的，改间隔/勿扰/
+    # 开关任何一项都得重排，否则要等旧的那次跑完才看得到新节奏。
+    if needs_job_reload(values):
         try:
             reload_jobs()
         except Exception as exc:  # noqa: BLE001

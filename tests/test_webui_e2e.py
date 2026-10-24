@@ -50,6 +50,25 @@ def test_endpoints():
         assert s.status_code == 200
         assert "window_label" in s.json()
 
+        # 改「主动搭话」的任一相关项都必须重排定时任务。
+        # 这里只改间隔、不动开关——正是原来漏判的场景（条件只比对 llm.banter）。
+        from unittest import mock
+
+        from src.plugins.music_collector import webui as wui
+
+        with mock.patch.object(wui, "reload_jobs") as rj:
+            p3 = client.patch("/api/music-admin/config", headers=H,
+                              json={"values": {"llm.banter_minutes": "90-120"}})
+            assert p3.status_code == 200 and p3.json()["ok"] is True
+            assert rj.called, "改了 llm.banter_minutes 却没重排定时任务"
+
+        # 对照：改个跟定时无关的项，不该白重建一轮任务
+        with mock.patch.object(wui, "reload_jobs") as rj2:
+            p4 = client.patch("/api/music-admin/config", headers=H,
+                              json={"values": {"llm.temperature": 0.7}})
+            assert p4.status_code == 200 and p4.json()["ok"] is True
+            assert not rj2.called, "改 temperature 不该重排定时任务"
+
         # 管理员接口（只读 GET，不改动 .env）
         a = client.get("/api/music-admin/admin", headers=H)
         assert a.status_code == 200
