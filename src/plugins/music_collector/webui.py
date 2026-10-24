@@ -597,7 +597,7 @@ FIELD_META["llm.link_hint"] = (
 )
 FIELD_META["llm.banter"] = (
     "主动搭话",
-    "没人 @ 它时也自己冒个泡：每隔一段随机时间，把群里最近的一句话接过去。"
+    "没人 @ 它时也自己冒个泡：每隔一段随机时间，把群里「上次搭话之后」聊的那一段接过去。"
     "素材来自「群记忆」的旁听记录，所以那边也要开着旁听；不 @ 人、不引用",
     False,
 )
@@ -624,8 +624,44 @@ FIELD_META["llm.banter_daily_max"] = (
     False,
 )
 FIELD_META["llm.banter_fresh_minutes"] = (
-    "消息超过多久就不接",
-    "最近一条消息超过这么多分钟，这轮就空过——半夜突然接一句两小时前的话很突兀",
+    "最后一条超过多久就不接",
+    "判的是这批消息的**最后一条**：超过这么多分钟就说明话题已经凉了，这轮空过。"
+    "半夜突然接一句两小时前的话很突兀",
+    False,
+)
+FIELD_META["llm.banter_batch_max"] = (
+    "一次最多看几条消息",
+    "从上次搭话之后算起，一次最多读几条群消息。群里刷屏时不给上限会上百条，"
+    "既慢又贵；超出的部分只取最近的",
+    False,
+)
+FIELD_META["llm.banter_batch_chars"] = (
+    "一次最多看多少字",
+    "素材总字数上限，超了从**最旧的**丢——接话接的是眼下的话题，"
+    "半小时前的开场白没什么用。6000 字约 3000 token",
+    False,
+)
+FIELD_META["llm.banter_judge"] = (
+    "先判断该不该插嘴",
+    "打开后会先让模型当「判官」看一眼这批对话，吵架、严肃话题、别人正在对话、"
+    "对话已收尾……说不该就闭嘴。判不出来（报错/回废话）也按不接处理。"
+    "关掉就只剩「长度 / 命令 / 纯符号」三道硬规则，基本等于逢话必接",
+    False,
+)
+FIELD_META["llm.banter_judge_model"] = (
+    "判官用的模型",
+    "留空 = 跟主模型。这活儿很简单，填个便宜快的更划算（如 deepseek-chat / gpt-4o-mini）",
+    False,
+)
+FIELD_META["llm.banter_judge_hint"] = (
+    "判官判定标准",
+    "直接写「什么情况别接、什么情况可以接」，判官就按这个来。留空 = 用内置清单。"
+    "不同群尺度不一样（有的能开玩笑、有的在聊工作），所以建议按自己的群改一版",
+    False,
+)
+FIELD_META["llm.banter_judge_chars"] = (
+    "判官最多看多少字",
+    "判官不需要看全量，看个大概就够判断气氛。太多反而慢；只取**最近**的那部分",
     False,
 )
 
@@ -1794,6 +1830,11 @@ async def _api_bot(request: Request):
                 "daily_max": int(cfg.banter_daily_max),
                 "fresh_minutes": float(cfg.banter_fresh_minutes),
                 "groups": list(cfg.banter_groups),
+                "batch_max": int(cfg.banter_batch_max),
+                "batch_chars": int(cfg.banter_batch_chars),
+                # 判官：开没开、用哪个模型——「开了却没动静」多半是它一直在拦
+                "judge": bool(cfg.banter_judge),
+                "judge_model": (cfg.banter_judge_model or "").strip() or cfg.model,
                 "next": _fmt_when(next_run_of("banter")),
             },
         },

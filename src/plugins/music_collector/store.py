@@ -1122,7 +1122,10 @@ class Store:
     async def latest_chat(
         self, group_id: int, *, max_age: float = 0.0
     ) -> Optional[dict]:
-        """取这群**最近一条群友消息**（旁听记录），给「主动搭话」当引子。
+        """取这群**最近一条群友消息**（旁听记录）。
+
+        主动搭话已经改用 :meth:`recent_chat`（它要看「上次搭话之后的一整段」，
+        只给一句只能机械附和），这个单条版本留给「只关心最新一句」的场景和测试。
 
         只认 ``kind='listen'``：那才是群友平时闲聊的原话，格式干净（纯文本）；
         ``kind='chat'`` 里存的是「昵称(QQ号)：提问」，拿去当引子会多一层前缀。
@@ -1144,6 +1147,58 @@ class Store:
             async with db.execute(sql, params) as cur:
                 row = await cur.fetchone()
         return dict(row) if row else None
+
+    async def recent_chat(
+        self,
+        group_id: int,
+        *,
+        after_id: int = 0,
+        limit: int = 0,
+        max_chars: int = 0,
+        max_age: float = 0.0,
+    ) -> list[dict]:
+        """取「游标之后」的群友消息（旁听记录），按时间**正序**。
+
+        给「主动搭话」当素材：从上次接过的那条之后，群里又聊了些什么。和
+        :meth:`latest_chat` 的区别是它只要最新的一条，这里要一整段——模型看到
+        「这半小时都聊了什么」才能接过话题，只给最后一句就只能机械附和。
+
+        三个量纲一起用的原因：
+
+        - ``after_id``：`chat_log.id` 自增且唯一，比按时间戳判重更可靠（同一秒可能多条）；
+        - ``limit``：群里刷屏时别一次读几百条；
+        - ``max_chars``：超了**从最旧的丢**——接话要接的是眼下的话题，
+          半小时前的开场白没什么用。
+
+        ``max_age``（秒）非零时只认这段时间内产生的消息，防止接很久以前的话。
+        """
+        sql = (
+            "SELECT id, user_id, nick, content, created_at FROM chat_log "
+            "WHERE group_id=? AND kind='listen' AND role='user'"
+        )
+        params: list[object] = [int(group_id)]
+        if after_id > 0:
+            sql += " AND id>?"
+            params.append(int(after_id))
+        if max_age > 0:
+            sql += " AND created_at>=?"
+            params.append(float(time.time()) - float(max_age))
+        sql += " ORDER BY id DESC"
+        if limit > 0:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, params) as cur:
+                rows = list(await cur.fetchall())
+
+        rows.reverse()  # DESC 取完再翻正序，这样 limit 才是「最新的 N 条」
+        if max_chars > 0:
+            total = sum(len(r["content"] or "") for r in rows)
+            while len(rows) > 1 and total > max_chars:
+                total -= len(rows.pop(0)["content"] or "")
+        return [dict(r) for r in rows]
 
     async def pending_digest(
         self, group_id: int, *, limit: int = 300, since: float = 0.0

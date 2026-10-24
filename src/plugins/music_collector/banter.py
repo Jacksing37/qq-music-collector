@@ -4,16 +4,23 @@
 
 - ``@ 机器人`` / ``戳一戳`` / 非音乐链接 —— 都是「群里发生了某件事」才回；
 - 这里是**定时**的：非勿扰时段里，每隔一段随机时间挑一个点，
-  把群里最近的一句话接过去。
+  把群里「上次搭话之后」聊的那一段接过去。
 
 几道闸（缺一不可）：
 
 - ``llm.banter`` 总开关 + ``llm.enabled`` + 生效群；
 - 勿扰时段 ``llm.banter_quiet``：**可配多段**，支持跨午夜（``23:00-08:00``）；
-- 最近一条消息太旧（``banter_fresh_minutes``）就不接——半夜三点突然回一句
+- 没有新消息（游标之后一片空白）就不接；
+- 批次里最后一条太旧（``banter_fresh_minutes``）就不接——半夜三点突然回一句
   两小时前的话，比不说话还怪；
-- 太短（「哈哈」「+1」）、纯标点、命令一律不接；
+- 太短（「哈哈」「+1」）、纯标点、命令一律不从当「接的对象」；
+- **判官**（``banter_judge``）：先问一句「此刻插嘴自然吗」，吵架、严肃话题、
+  别人正在对话、对话已收尾……说不该就闭嘴。判不出来也按「不接」；
 - 每群每天上限 ``banter_daily_max``（``0`` = 不限）。
+
+**素材是一段而不是一条**：从 ``_LAST_ID``（上次搭话处理到的 ``chat_log.id``）往后取，
+所以读到的是「这段时间发生了什么事」。游标顺便解决了「同一句被接两次」。
+判官说「不接」时**也推进游标**，否则下一轮还是这批消息，会死锁在反复白跑。
 
 素材取自 ``chat_log(kind='listen')``，也就是旁听器攒下来的群聊。这样做的好处是
 不额外占存储，代价是**依赖 ``memory.listen``**：关掉旁听就没素材，此时
@@ -24,6 +31,7 @@ from __future__ import annotations
 
 import random
 import re
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -39,19 +47,50 @@ from .service import service
 #: 主动搭话能带多少字的历史。**不跟 ``llm.history_chars`` 走**：
 #: 那个值可能配到上百万字（真人提问时值得），但主动搭话只要「知道最近聊了啥」，
 #: 带全部历史等于每句话花一块多钱。12000 字约 6000 token，够看最近几十轮。
+#:
+#: 注意它和「批次素材」（``banter_batch_chars``）不是一回事：历史里是
+#: ``kind='chat'``（跟机器人的问答），素材是 ``kind='listen'``（群友闲聊），
+#: 两者互补，不重复。
 BANTER_HISTORY_CHARS = 12000
 
 #: 主动搭话的回复上限。冒泡不该写小作文。
 BANTER_REPLY_CHARS = 120
 
+#: 拼给模型的「背景素材」总预算。比 ``llm.CONTEXT_CHAR_LIMIT``（4000）略小，
+#: 留点余量给说明文字——那个上限是**截开头**的，靠它裁剪会把最新的话扔掉。
+_CONTEXT_BUDGET = 3900
+
 #: 送给模型的说明。走 ``chat(context=...)`` 传，因此**不进对话历史**——
 #: 否则「你是在主动接话」会一直挂在上下文里，真人提问时模型还以为又该自己找话。
 BANTER_HINT = (
-    "（这是群里刚才的一句话，没有人在跟你说话。"
-    "你主动顺口接一句，20~60 字，像群友随口搭话："
-    "不要 @ 任何人、不要引用、不要连发好几条、不要解释你在做什么、"
-    "也别追问一堆问题。实在接不上就聊点跟它沾边的。）"
+    "（下面是群里刚才的一段对话，没有人在跟你说话。"
+    "你顺着最后那句话主动接一句：20~60 字，像群友随口搭话。"
+    "不要 @ 任何人、不要引用、不要连发好几条、不要解释你在做什么、也别追问一堆问题。"
+    "前面那些是背景，挑最自然的那个点接，不用逐句回应。）"
 )
+
+#: 判官的内置标准（``llm.banter_judge_hint`` 留空时用它）。
+#: 之所以做成可配置，是因为「什么话题不该插嘴」只有群主知道——有的群能开玩笑，
+#: 有的群在聊工作，写死在代码里必然有一半场景不合适。
+DEFAULT_JUDGE_HINT = (
+    "不要接：争吵或阴阳怪气；严肃话题（生病、去世、家人、成绩、钱、感情）；"
+    "明显是在问某个人、或几个人正在对话；纯表情、复读、单字；广告拉人；"
+    "对话已经收尾（「好的」「收到」「晚安」）。\n"
+    "可以接：泛泛的感慨或吐槽、玩梗、没人接的提问、在聊某个具体话题。\n"
+    "不确定时选「不接」。"
+)
+
+#: 判官的 system。**只要两个字**——判定结果要好解析，解释反而会污染输出。
+JUDGE_SYSTEM = (
+    "你在帮一个群聊机器人决定要不要插话。"
+    "只输出「接」或「不接」两个字，不要解释、不要标点、不要任何别的字。"
+)
+
+#: 群号 -> 上次搭话处理到的 ``chat_log.id``。放内存就够了：重启后最多把最近
+#: ``banter_batch_max`` 条再看一遍（可能重复接一小段），不值得为它建表。
+#:
+#: 它同时解决「同一句被接两次」——推进游标之后，接过的那批不会再被捞出来。
+_LAST_ID: dict[int, int] = {}
 
 _RANGE_RE = re.compile(r"\A\s*(\d+(?:\.\d+)?)\s*[-~～]\s*(\d+(?:\.\d+)?)\s*\Z")
 _SPAN_RE = re.compile(r"\A\s*(\d{1,2}):(\d{2})\s*[-~～]\s*(\d{1,2}):(\d{2})\s*\Z")
@@ -172,6 +211,109 @@ def worth_reply(text: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------- 批次素材
+
+
+def format_batch(rows: list[dict], tz) -> str:
+    """把一批旁听消息拼成「一段对话」。
+
+    带时间戳和昵称，是为了让模型看出「谁在跟谁说、隔了多久」——没有这些，
+    几十行文字糊在一起，它会把不相干的两句话当成对话的上下句。
+    """
+    lines: list[str] = []
+    for row in rows:
+        try:
+            ts = datetime.fromtimestamp(float(row["created_at"]), tz).strftime("%H:%M")
+        except (KeyError, TypeError, ValueError, OSError):
+            ts = "--:--"
+        nick = (str(row.get("nick") or "").strip() or "群友")[:20]
+        uid = row.get("user_id") or 0
+        # 换行压成空格：一条消息占一行，模型才容易数清「有几个人在说话」
+        body = str(row.get("content") or "").strip().replace("\n", " ")
+        lines.append(f"[{ts}] {nick}({uid})：{body}")
+    return "\n".join(lines)
+
+
+def clip_tail(text: str, limit: int) -> str:
+    """从**末尾**往回截（保留最近的内容），尽量从整行开始。
+
+    和 ``llm.with_context`` 的「保留开头」正好相反：参考资料该留开头（网页正文
+    从标题读起），群聊素材该留结尾（现在在聊什么才是重点）。
+    """
+    if limit <= 0 or len(text) <= limit:
+        return text
+    cut = text[-limit:]
+    nl = cut.find("\n")
+    return cut[nl + 1:] if 0 <= nl < 80 else cut
+
+
+def _advance(group_id: int, last_id: int) -> None:
+    """把游标推到 ``last_id``（只前进不后退）。"""
+    if last_id > _LAST_ID.get(int(group_id), 0):
+        _LAST_ID[int(group_id)] = int(last_id)
+
+
+def reset_cursor(group_id: Optional[int] = None) -> None:
+    """清掉搭话游标（测试用；也方便以后加「重新开始」的按钮）。"""
+    if group_id is None:
+        _LAST_ID.clear()
+    else:
+        _LAST_ID.pop(int(group_id), None)
+
+
+# ---------------------------------------------------------------- 判官（该不该插嘴）
+
+
+def judge_prompt(material: str, hint: str) -> str:
+    return f"群里刚才的对话：\n{material}\n\n判定标准：\n{hint}\n\n此刻插一句话，自然吗？"
+
+
+def parse_verdict(text: str) -> bool:
+    """把判官的回答读成「接不接」。
+
+    **必须先判否定词**——中文里「不接」本身就含「接」字，先判肯定的话
+    会把所有拒绝都读成同意，那这个功能就是反的。解析不出来一律按不接。
+    """
+    body = (text or "").strip()
+    if not body:
+        return False
+    for no in ("不接", "别接", "不要接", "不插", "别说", "闭嘴"):
+        if no in body:
+            return False
+    return "接" in body
+
+
+async def should_reply(cfg: LLMConfig, material: str) -> tuple[bool, str]:
+    """问判官「此刻插一句自然吗」。返回 ``(接不接, 原因)``。
+
+    走 ``llm.complete``：一次性、不写历史、不占冷却。**这点是关键**——如果让
+    主模型自己输出「SKIP」，那次请求已经被 ``chat()`` 写进历史了，下次真人提问
+    上下文里会躺着一条「助手: SKIP」。
+
+    判不出来（空正文 / 报错 / 回一堆废话）一律按**不接**：识相的意思是宁缺毋滥，
+    静默最多是少说一句，接错话是社死。
+    """
+    hint = (cfg.banter_judge_hint or "").strip() or DEFAULT_JUDGE_HINT
+    # 兜一道：万一有人往判定标准里贴了几万字，每次判官请求都得带上它
+    hint = hint[:3000]
+    body = clip_tail(material, int(cfg.banter_judge_chars))
+    verdict, why = await llm_bot.complete(
+        judge_prompt(body, hint),
+        cfg,
+        system=JUDGE_SYSTEM,
+        model=(cfg.banter_judge_model or "").strip(),
+        # 只要两个字，但别卡太死：有的模型会带个标点或先说半句，
+        # 8 个 token 容易把「不接」本身也截掉，那就变成「判不出来」了
+        max_tokens=16,
+        temperature=0.0,
+    )
+    if not verdict:
+        logger.warning(f"[banter] 判官没回话（{why}）→ 按不接处理")
+        return False, f"judge_empty({why})"
+    ok = parse_verdict(verdict)
+    return ok, f"判官「{verdict.strip()[:8]}」"
+
+
 def target_groups(cfg: LLMConfig) -> list[int]:
     """这次该在哪些群搭话：``banter_groups`` → ``llm.groups`` → 所有旁听过的群。"""
     for candidate in (cfg.banter_groups, cfg.groups):
@@ -213,8 +355,12 @@ async def run_banter() -> dict:
     - ``off`` —— 总开关关着 / ``llm.enabled`` 关着；
     - ``quiet`` —— 此刻仍在勿扰时段；
     - ``no_group`` —— 没有任何可搭话的群；
-    - ``no_seed`` —— 所有群都没有新鲜素材；
+    - ``no_seed`` —— 所有群都没有可接的素材（没新消息 / 太旧 / 全是短句）；
     - ``ok`` —— 至少发出去一条。
+
+    摘要里还带 ``skipped``（跳过的群数）和 ``declined``（判官说别插嘴的群数）——
+    后者为 0 而 ``sent`` 也为 0 时，说明是「没素材」而不是「识相闭嘴」，
+    排查起来不至于混为一谈。
     """
     llm_cfg = service.config.llm
     if not llm_cfg.banter or not llm_cfg.enabled:
@@ -254,24 +400,78 @@ async def run_banter() -> dict:
     day = _today(now)
     sent = 0
     skipped = 0
+    declined = 0
+    fresh = max(60.0, llm_cfg.banter_fresh_minutes * 60.0)
     for gid in groups:
         if not _quota_left(gid, day, llm_cfg.banter_daily_max):
             skipped += 1
             continue
+
+        # 取「上次搭话之后」的**所有**群消息，而不是只看最新一条：
+        # 只给一句，模型只能机械附和；给一段，它才接得住话题。
         try:
-            row = await service.store.latest_chat(
-                gid, max_age=max(60.0, llm_cfg.banter_fresh_minutes * 60.0)
+            rows = await service.store.recent_chat(
+                gid,
+                after_id=_LAST_ID.get(gid, 0),
+                limit=int(llm_cfg.banter_batch_max),
+                max_chars=int(llm_cfg.banter_batch_chars),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[banter] 群{gid} 取最近消息失败: {exc}")
             continue
-        if not row:
+        if not rows:
             skipped += 1
             continue
-        text = (row.get("content") or "").strip()
-        if not worth_reply(text):
+
+        last_id = int(rows[-1].get("id") or 0)
+        try:
+            age = time.time() - float(rows[-1]["created_at"])
+        except (KeyError, TypeError, ValueError):
+            age = 0.0
+        # 判的是**最后一条**而不是第一条：聊了半小时的对话，只要刚还在继续就值得接
+        if age > fresh:
+            _advance(gid, last_id)
+            logger.info(f"[banter] 群{gid} 最后一条已是 {age / 60:.0f} 分钟前，这批凉了，跳过")
             skipped += 1
             continue
+
+        # 先做免费的粗筛：整批都够不上（全是「嗯」「哈哈」「/命令」）就直接跳过，
+        # 省一次判官调用。判官只负责「语义上该不该说」，不管这种机械过滤。
+        idx = -1
+        for i in range(len(rows) - 1, -1, -1):
+            if worth_reply(str(rows[i].get("content") or "")):
+                idx = i
+                break
+        if idx < 0:
+            _advance(gid, last_id)
+            skipped += 1
+            continue
+
+        material = format_batch(rows, service.resolver.tz)
+
+        # 判官再说该不该插嘴。判「不接」**也要推进游标**——否则下一轮还是这批
+        # 消息，判官大概率还说不接，就死锁在那儿反复白跑。
+        if llm_cfg.banter_judge:
+            ok, verdict_why = await should_reply(llm_cfg, material)
+            if not ok:
+                _advance(gid, last_id)
+                declined += 1
+                logger.info(
+                    f"[banter] 群{gid} 决定不插嘴（{verdict_why}）："
+                    f"{len(rows)} 条 / {len(material)} 字"
+                )
+                skipped += 1
+                continue
+
+        # 接的是「最后一条有内容的」，前面那些当背景。
+        # 这样历史里存的是一句自然的话，而不是一整段带时间戳的群聊记录。
+        text = str(rows[idx].get("content") or "").strip()
+        earlier_text = format_batch(rows[:idx], service.resolver.tz) if idx > 0 else ""
+        # 预算要自己算：``with_context`` 超长时截的是**开头**（保留前 4000 字），
+        # 而素材是正序、最旧的在前面——照它截会把最新的那段扔掉，正好接不上。
+        # 所以先给 BANTER_HINT 留位置，再把背景按「保留最近」截到剩余预算里。
+        earlier = clip_tail(earlier_text, max(0, _CONTEXT_BUDGET - len(BANTER_HINT) - 40))
+        context = BANTER_HINT + (f"\n\n刚才群里还在聊这些：\n{earlier}" if earlier else "")
 
         # 只改这一次请求的副本：工具关掉（省 900 token 且不该联网）、冷却清零
         # （不占被搭话者的额度，否则他紧接着 @ 机器人会被静默）、
@@ -285,11 +485,11 @@ async def run_banter() -> dict:
                                      BANTER_HISTORY_CHARS),
             }
         )
-        uid = int(row.get("user_id") or 0)
-        nick = row.get("nick") or ""
+        uid = int(rows[idx].get("user_id") or 0)
+        nick = rows[idx].get("nick") or ""
         reply, why = await llm_bot.chat(
             gid, uid, nick, text, probe,
-            context=BANTER_HINT,
+            context=context,
             mem=service.cfg(gid).memory,
         )
         if not reply:
@@ -298,11 +498,19 @@ async def run_banter() -> dict:
             continue
         if await safe_send_group(bot, gid, Message(reply)):
             _bump(gid, day)
+            # 发出去了才推进游标；发送失败不推，下一轮还能再试这批
+            _advance(gid, last_id)
             sent += 1
             logger.info(
-                f"[banter] 群{gid} 接住 {nick}({uid}) 的「{text[:20]}」→ 回复 {len(reply)} 字"
+                f"[banter] 群{gid} 接住 {nick}({uid}) 的「{text[:20]}」"
+                f"（这批 {len(rows)} 条）→ 回复 {len(reply)} 字"
             )
         else:
             skipped += 1
 
-    return {"status": "ok" if sent else "no_seed", "sent": sent, "skipped": skipped}
+    return {
+        "status": "ok" if sent else "no_seed",
+        "sent": sent,
+        "skipped": skipped,
+        "declined": declined,
+    }

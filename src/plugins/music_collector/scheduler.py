@@ -274,7 +274,7 @@ async def job_memory_digest() -> None:
 
 
 async def job_banter() -> None:
-    """主动搭话：非勿扰时段里自己冒个泡，接住群里最近的一句话。
+    """主动搭话：非勿扰时段里自己冒个泡，接住群里最近的一段对话。
 
     和别的任务最大的不同是**它是自己排自己的**：跑完（不管成没成）都要重新
     挑一个随机时间点，否则只会响一次。``date`` 触发器 + 自我重排，比固定
@@ -285,8 +285,12 @@ async def job_banter() -> None:
         if result.get("sent"):
             logger.info(
                 f"[banter] 本轮发了 {result['sent']} 条"
-                f"（跳过 {result.get('skipped', 0)} 个群）"
+                f"（跳过 {result.get('skipped', 0)} 个群，"
+                f"其中判官拦下 {result.get('declined', 0)} 个）"
             )
+        elif result.get("declined"):
+            # 和「没素材」区分开：看日志时能立刻知道它是主动闭嘴，不是坏了
+            logger.info(f"[banter] 本轮判官认为都不该插嘴（{result['declined']} 个群）沉默")
         elif result.get("status") not in ("ok", "quiet"):
             logger.info(f"[banter] 本轮没发（{result.get('status')}）")
     except Exception as exc:  # noqa: BLE001 — 冒泡失败绝不能影响别的任务

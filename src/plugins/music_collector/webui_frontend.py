@@ -1576,12 +1576,20 @@ const BOT_GROUPS=[
    keys:["llm.poke_reply","llm.poke_prompt","llm.reply_link","llm.link_hint"]},
   {title:"主动搭话",
    note:"上面那些都是「有人叫它」才回，这一组是<b>没人叫也自己说</b>：非勿扰时段里每隔一段随机时间，"
-      + "把群里最近的一句话接过去，<b>不 @ 人、不引用</b>。<br>"
+      + "把群里<b>上次搭话之后</b>聊的那一段接过去，<b>不 @ 人、不引用</b>。<br>"
       + "素材取自「群记忆」的旁听记录，所以<b>旁听也要开着</b>，否则没有可接的话。<br>"
       + "想安静就两个地方下手：把<b>间隔</b>拉长（90-180），或把<b>每天上限</b>压小（比如 4）。"
       + "间隔决定节奏，上限决定总量——后者更好控制。",
-   keys:["llm.banter","llm.banter_minutes","llm.banter_quiet",
-         "llm.banter_groups","llm.banter_daily_max","llm.banter_fresh_minutes"]},
+   keys:["llm.banter","llm.banter_minutes","llm.banter_quiet","llm.banter_groups",
+         "llm.banter_daily_max","llm.banter_fresh_minutes",
+         "llm.banter_batch_max","llm.banter_batch_chars"]},
+  {title:"主动搭话 · 判官",
+   note:"插嘴之前先问一句「此刻说这话自然吗」。<b>这一组决定它识不识相</b>："
+      + "吵架、严肃话题、别人正在对话、对话已经收尾……判官说不该，它就闭嘴不冒泡。<br>"
+      + "判不出来（接口报错、回一堆废话）一律按<b>不接</b>——静默最多是少说一句，接错话是社死。<br>"
+      + "关掉这个开关就只剩「太短 / 命令 / 纯符号」三道硬规则，基本等于逢话必接。",
+   keys:["llm.banter_judge","llm.banter_judge_model","llm.banter_judge_chars",
+         "llm.banter_judge_hint"]},
   {title:"高级",
    note:"厂商私有参数（top_k、repetition_penalty、chat_template_kwargs…）在这里用 JSON 直接塞进请求体，会覆盖上面同名项。",
    keys:["llm.extra_body","llm.stop","llm.seed"]}
@@ -1653,8 +1661,12 @@ function renderBotStatus(st){
   if(bant.enabled){
     const quiet=(bant.quiet||[]).join("、")||"无";
     const cap=bant.daily_max>0?`每天最多 ${bant.daily_max} 次`:"每天不限";
+    const judge=bant.judge
+      ? `<b>开</b>（${esc(bant.judge_model||"主模型")} 先判该不该插嘴）`
+      : `<span class="muted">关（逢话必接）</span>`;
     parts.push(`主动搭话：<b>每 ${esc(bant.minutes||"30-60")} 分钟</b>　勿扰：<code>${esc(quiet)}</code>　`
       + `${esc(cap)}　下次：<b>${esc(bant.next||"待排期")}</b>`);
+    parts.push(`　判官：${judge}　一次最多看 <b>${esc(String(bant.batch_max||40))}</b> 条消息`);
   } else {
     parts.push(`主动搭话：<span class="muted">关（打开后没人叫它也自己冒泡）</span>`);
   }
