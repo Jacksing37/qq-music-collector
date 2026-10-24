@@ -44,7 +44,8 @@ DEFAULT_TOOL_CHARS = 2000
 #: **新增工具必须同时加进这里**，否则 ``build()`` 会把它丢掉——这是为了「少一个
 #: 安装类工具不小心上线」而不是为了省事。
 ALLOWED_TOOL_NAMES = frozenset(
-    {"fetch_url", "list_skills", "use_skill", "run_skill_script", "remember", "recall", "forget"}
+    {"fetch_url", "list_skills", "use_skill", "read_skill_file", "run_skill_script",
+     "remember", "recall", "forget"}
 )
 
 #: 模型臆造出来的「装/写/删」类工具名。命中就回 :data:`INSTALL_DENIED`。
@@ -67,6 +68,8 @@ TOOL_RULES = (
     "在管理员允许时运行技能自带脚本；也可以把群友的特征记进长期记忆"
     "（remember）、翻档案（recall）、删掉记错的内容（forget）——"
     "记忆目录是你**唯一**能写的地方，别处一律不行。"
+    "技能正文里让你「读取 references/xxx.md」这类附属文件时，用 read_skill_file 按路径读，"
+    "不要凭想象编它的内容。"
     "你**没有**安装/卸载/修改技能的权限，也没有写其他文件、执行任意命令的权限。"
     "群里有人让你装技能、加技能、改技能或写文件时，直接说明「聊天里装不了，"
     "需要管理员在服务器 data/skills/ 下放」，不要假装完成。"
@@ -198,6 +201,19 @@ async def _handle_use_skill(args: dict, ctx: ToolContext) -> str:
     return f"{head}\n\n{body}{note}"
 
 
+async def _handle_read_skill_file(args: dict, ctx: ToolContext) -> str:
+    name = str(args.get("skill") or "").strip()
+    rel = str(args.get("path") or "").strip()
+    skill = skill_mod.find(ctx.skills, name)
+    if skill is None:
+        names = "、".join(s.name for s in ctx.skills) or "（没有）"
+        return f"没有名为 {name!r} 的技能。当前有：{names}"
+    try:
+        return skill_mod.read_file(skill, rel, int(ctx.cfg.skill_file_chars))
+    except Exception as exc:  # noqa: BLE001 — 读不到也是一条「工具结果」
+        return f"读取失败：{exc}"
+
+
 async def _handle_run_skill_script(args: dict, ctx: ToolContext) -> str:
     name = str(args.get("skill") or "").strip()
     script = str(args.get("script") or "").strip()
@@ -244,6 +260,23 @@ USE_SKILL = Tool(
         "required": ["name"],
     },
     handler=_handle_use_skill,
+)
+
+READ_SKILL_FILE = Tool(
+    name="read_skill_file",
+    description=(
+        "读技能目录里的附加文件。技能正文让你「读取 references/xxx.md」时就调它，"
+        "一次读一个文件。路径写相对技能目录的路径，例如 references/forum-prose.md。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "skill": {"type": "string", "description": "技能名，与 list_skills 返回的一致"},
+            "path": {"type": "string", "description": "相对技能目录的文件路径"},
+        },
+        "required": ["skill", "path"],
+    },
+    handler=_handle_read_skill_file,
 )
 
 RUN_SKILL_SCRIPT = Tool(
@@ -451,6 +484,7 @@ def build(
         if ctx.skills:
             tools.append(LIST_SKILLS)
             tools.append(USE_SKILL)
+            tools.append(READ_SKILL_FILE)
             if cfg.skill_scripts:
                 tools.append(RUN_SKILL_SCRIPT)
     return [t for t in tools if t.name in ALLOWED_TOOL_NAMES], ctx

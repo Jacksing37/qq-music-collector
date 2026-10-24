@@ -32,6 +32,9 @@ from nonebot.log import logger
 
 #: 允许执行的脚本后缀。别加 .exe/.bat——那是「模型决定跑什么」的最短路径
 ALLOWED_SUFFIX = {".py", ".sh"}
+#: ``read_skill_file`` 允许读的后缀。只读文本：技能目录里也可能有图片、压缩包，
+#: 读成文本只会得到一堆乱码，白占上下文
+READABLE_SUFFIX = {".md", ".txt", ".py", ".sh", ".json", ".yaml", ".yml", ".csv"}
 #: 一次最多传几个参数、单个参数多长（防止模型拿参数往脚本里灌东西）
 MAX_ARGS = 8
 MAX_ARG_CHARS = 200
@@ -137,21 +140,52 @@ def find(skills: Iterable[Skill], name: str) -> Optional[Skill]:
     return None
 
 
-def _resolve_script(skill: Skill, script: str) -> Path:
-    """把 ``script`` 解析成技能目录内的真实路径；越界直接拒绝。"""
-    rel = (script or "").strip().lstrip("/\\")
-    if not rel:
-        raise ValueError("没有指定脚本")
+def _resolve_member(skill: Skill, rel: str, what: str = "文件") -> Path:
+    """把 ``rel`` 解析成技能目录内的真实路径；越界直接拒绝。
+
+    这是「模型给的路径」唯一要过的一道闸：``../../.env`` 这种能让它读到服务器上
+    任意文件，所以必须解析后确认仍在技能根目录内。
+    """
+    text = (rel or "").strip().lstrip("/\\")
+    if not text:
+        raise ValueError(f"没有指定{what}")
     root = skill.root.resolve()
-    target = (root / rel).resolve()
+    target = (root / text).resolve()
     # startswith 不够：/data/skills/a-evil 也以 /data/skills/a 开头
     if target != root and root not in target.parents:
-        raise ValueError(f"脚本不在技能目录内: {script}")
+        raise ValueError(f"{what}不在技能目录内: {rel}")
+    if not target.is_file():
+        raise ValueError(f"{what}不存在: {rel}")
+    return target
+
+
+def _resolve_script(skill: Skill, script: str) -> Path:
+    """把 ``script`` 解析成技能目录内的真实路径；越界直接拒绝。"""
+    target = _resolve_member(skill, script, "脚本")
     if target.suffix not in ALLOWED_SUFFIX:
         raise ValueError(f"只允许执行 {'/'.join(sorted(ALLOWED_SUFFIX))} 脚本")
-    if not target.is_file():
-        raise ValueError(f"脚本不存在: {script}")
     return target
+
+
+def read_file(skill: Skill, rel: str, max_chars: int = 6000) -> str:
+    """读技能目录里的**附加文件**（``references/xxx.md`` 这类）。
+
+    技能是「渐进披露」的：``SKILL.md`` 只写主线，细化内容放附属文件里，用到哪块
+    再读哪块。没有这个入口的话，SKILL.md 里那句「读取 references/forum-prose.md」
+    就成了一句做不到的话——模型只能瞎猜，或者跑去抓 GitHub。
+
+    只读文本后缀；路径必须落在技能目录内（见 :func:`_resolve_member`）。
+    """
+    target = _resolve_member(skill, rel)
+    if target.suffix.lower() not in READABLE_SUFFIX:
+        raise ValueError(
+            f"只能读文本文件（{' / '.join(sorted(READABLE_SUFFIX))}），不能读 {target.suffix or '无后缀'}"
+        )
+    limit = max(200, int(max_chars))
+    text = target.read_text(encoding="utf-8", errors="replace")
+    if len(text) > limit:
+        text = text[:limit].rstrip() + f"\n…（文件过长，只取了前 {limit} 字）"
+    return text
 
 
 def _command(target: Path) -> list[str]:

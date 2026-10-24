@@ -506,6 +506,12 @@ FIELD_META["llm.skill_body_chars"] = (
     "use_skill 返回的技能正文最多多少字，超出截断。技能写得长可以调大",
     False,
 )
+FIELD_META["llm.skill_file_chars"] = (
+    "附加文件上限（字）",
+    "技能正文里让你「读取 references/xxx.md」时，read_skill_file 一次最多返回多少字。"
+    "技能是渐进披露的：主线在 SKILL.md，细化的写法放到附属文件里按需读",
+    False,
+)
 FIELD_META["llm.skill_scripts"] = (
     "允许执行技能脚本",
     "⚠️ 打开后模型可以运行技能目录里的 .py / .sh 脚本（只限已存在的文件，有超时和输出上限）。"

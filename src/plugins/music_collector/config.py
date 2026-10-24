@@ -564,6 +564,9 @@ class LLMConfig(BaseModel):
     skills_dir: str = ""
     #: use_skill 返回的技能正文最多多少字
     skill_body_chars: int = Field(3000, ge=200, le=20000)
+    #: read_skill_file 读附加文件（references/xxx.md 这类）最多多少字。
+    #: 技能是渐进披露的：正文只写主线，细化内容放在附属文件里按需读
+    skill_file_chars: int = Field(6000, ge=200, le=40000)
     #: 是否允许执行技能自带的脚本。**默认关**：一开就是「模型可以让你服务器上跑
     #: 技能目录里的代码」，只该在完全信任技能来源时打开
     skill_scripts: bool = False

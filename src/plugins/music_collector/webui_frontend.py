@@ -1618,7 +1618,7 @@ const BOT_GROUPS=[
       + "⚠️ <b>允许执行技能脚本</b>等于「模型能让你服务器上跑代码」，只在完全信任技能来源时打开。",
    keys:["llm.tools","llm.tool_rounds","llm.tool_chars",
          "llm.web_tool","llm.fetch_chars","llm.fetch_timeout",
-         "llm.skills","llm.skills_dir","llm.skill_body_chars",
+         "llm.skills","llm.skills_dir","llm.skill_body_chars","llm.skill_file_chars",
          "llm.skill_scripts","llm.skill_timeout"]},
   {title:"上下文与频率限制",
    keys:["llm.history_rounds","llm.history_chars","llm.cooldown","llm.max_input_chars","llm.max_reply_chars","llm.at_sender","llm.fallback_intro","llm.timeout"]},

@@ -477,6 +477,7 @@ netease:
 > | `llm.skills` | 开 | 启用技能包（扫 `data/skills`） |
 > | `llm.skills_dir` | 空 | 技能目录，留空 = `data/skills` |
 > | `llm.skill_body_chars` | `3000` | `use_skill` 返回的技能正文上限 |
+> | `llm.skill_file_chars` | `6000` | `read_skill_file` 读 `references/xxx.md` 这类附加文件的上限 |
 > | `llm.skill_scripts` | 关 | 允许执行技能自带脚本（见下方风险说明） |
 > | `llm.skill_timeout` | `20` | 技能脚本超时秒数 |
 
@@ -489,6 +490,7 @@ netease:
 | `fetch_url` | 抓网页正文并抽成纯文本 | 有人发了链接、它需要知道里面写了什么 |
 | `list_skills` | 列出已安装技能的名字 + 简介 | 遇到不熟的任务，先看有没有现成方法 |
 | `use_skill` | 读某个技能的完整说明 | 照技能里的步骤做事 |
+| `read_skill_file` | 读技能目录里的附加文件（`references/xxx.md`） | 技能正文让你「读取 references/…」时；一次一个文件 |
 | `run_skill_script` | 跑技能自带的脚本（默认关闭） | 技能说明里明确要求跑脚本时 |
 | `remember` | 把关于某人的长期事实记进档案 | 对方说到偏好、身份、习惯，以后会用得上 |
 | `recall` | 查某个人的完整档案（不填人则看全群一览） | 拿不准谁是谁、想确认自己记过什么 |
@@ -530,7 +532,7 @@ description: 煮面条的标准步骤与常见问题
   ——这是**渐进披露**，不会一上来就把所有技能正文塞进上下文。
 - 加技能就是丢一个目录进去，**不用改代码**（每次请求现扫，不必重启）。
 - 🔒 **QQ 聊天里禁止安装任何技能**。这不是配置项、也没有开关，三道闸一起拦：
-  1. 工具名有硬白名单（`fetch_url` / `list_skills` / `use_skill` / `run_skill_script`），
+  1. 工具名有硬白名单（`fetch_url` / `list_skills` / `use_skill` / `read_skill_file` / `run_skill_script`），
      就算以后有人加了「安装技能」的工具，也不会被送到群里；
   2. 模型自己编出 `install_skill` / `write_file` 这类名字时，工具调用会被直接拒绝，
      并回一句「聊天里装不了，需要管理员放目录」；

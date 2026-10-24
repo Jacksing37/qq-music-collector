@@ -179,6 +179,7 @@ def test_tools_registry() -> None:
     names = [t.name for t in tool_list]
     check("默认有 fetch_url", "fetch_url" in names, str(names))
     check("有技能时有 list/use_skill", "list_skills" in names and "use_skill" in names, str(names))
+    check("有技能时有 read_skill_file", "read_skill_file" in names, str(names))
     check("脚本执行默认不开", "run_skill_script" not in names, str(names))
     check("ctx 带上了技能", len(ctx.skills) == 1, str(ctx.skills))
 
@@ -332,6 +333,55 @@ def test_skills() -> None:
         timed_out = "超时" in str(exc)
     check("超时会被 kill 并报超时", timed_out)
 
+    # ---- read_file：技能目录里的附属文件（references/xxx.md）
+    # 这是「渐进披露」的第二步：SKILL.md 只写主线，细化内容按需读。
+    # 没有它的话，正文里那句「读取 references/forum-prose.md」就是句做不到的话。
+    refs = d / "references"
+    refs.mkdir()
+    (refs / "style.md").write_text("正文的细化写法", encoding="utf-8")
+    (refs / "long.md").write_text("段" * 500, encoding="utf-8")
+    (d / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (root / "secret.md").write_text("技能目录外的秘密", encoding="utf-8")
+
+    check("能读附属文件", sk.read_file(skill, "references/style.md") == "正文的细化写法",
+          sk.read_file(skill, "references/style.md"))
+    got = sk.read_file(skill, "references/long.md", 200)
+    check("超长会被截断并给提示", len(got) < 300 and "只取了前" in got, str(len(got)))
+
+    for bad_path, label in (
+        ("../secret.md", "向上越界"),
+        ("../../etc/passwd", "深越界"),
+        ("/etc/passwd", "绝对路径"),
+        ("references/nope.md", "文件不存在"),
+    ):
+        try:
+            sk.read_file(skill, bad_path)
+            ok, detail = False, ""
+        except ValueError as exc:
+            ok, detail = True, str(exc)
+        check(f"{label} 被拒绝", ok, detail)
+
+    try:
+        sk.read_file(skill, "logo.png")
+        binary_ok = False
+        binary_detail = ""
+    except ValueError as exc:
+        binary_ok, binary_detail = "只能读文本" in str(exc), str(exc)
+    check("非文本后缀被拒绝", binary_ok, binary_detail)
+
+    # 工具层：模型真的调得到
+    cfg2 = LLMConfig(skills_dir=str(root))
+    tools2, ctx2 = tl.build(cfg2, 1, 2)
+    res = asyncio.run(tl.dispatch(
+        tools2, "read_skill_file",
+        {"skill": "alpha", "path": "references/style.md"}, ctx2, 2000,
+    ))
+    check("dispatch 能读到附属文件", "细化写法" in res, res[:60])
+    res2 = asyncio.run(tl.dispatch(
+        tools2, "read_skill_file", {"skill": "nope", "path": "x.md"}, ctx2, 2000,
+    ))
+    check("未知技能给出可读提示", "没有名为" in res2, res2[:50])
+
 
 # ------------------------------------------------------------------ 禁止装技能
 
@@ -347,10 +397,10 @@ def test_install_denied() -> None:
     check("组装出来的工具全在白名单里", set(names) <= tl.ALLOWED_TOOL_NAMES, str(names))
     check("没有任何安装类工具",
           not [n for n in names if tl.looks_like_install(n)], str(names))
-    check("白名单就是这七个工具（新增的必须显式加进来）",
+    check("白名单就是这八个工具（新增的必须显式加进来）",
           tl.ALLOWED_TOOL_NAMES == {
-              "fetch_url", "list_skills", "use_skill", "run_skill_script",
-              "remember", "recall", "forget",
+              "fetch_url", "list_skills", "use_skill", "read_skill_file",
+              "run_skill_script", "remember", "recall", "forget",
           },
           str(sorted(tl.ALLOWED_TOOL_NAMES)))
 
