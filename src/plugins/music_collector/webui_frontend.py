@@ -193,6 +193,30 @@ button:disabled{opacity:.5;cursor:not-allowed}
 [data-theme="light"] .log-lv-WARNING .ll{color:#a16207}
 .log-lv-ERROR .ll,.log-lv-CRITICAL .ll{color:var(--bad)}
 .log-line.log-lv-ERROR,.log-line.log-lv-CRITICAL{background:rgba(248,113,113,.06)}
+/* ---- LLM 调用记录（日志页的「🧠 LLM 调用」来源） ---- */
+.tr-item{background:var(--input);border:1px solid var(--card-bd);border-radius:10px;margin-bottom:8px;
+  font-size:13px;overflow:hidden}
+.tr-item[open]{border-color:var(--accent)}
+.tr-item.tr-bad{border-color:rgba(248,113,113,.45)}
+.tr-item>summary{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 10px;
+  cursor:pointer;list-style:none}
+.tr-item>summary::-webkit-details-marker{display:none}
+.tr-item>summary::before{content:"▸";color:var(--muted);font-size:11px}
+.tr-item[open]>summary::before{content:"▾"}
+.tr-time{color:var(--muted);font-variant-numeric:tabular-nums}
+.tr-tag{font-size:11px;padding:1px 7px;border-radius:999px;border:1px solid var(--card-bd);color:var(--muted)}
+.tr-who{color:var(--txt)}
+.tr-cost{color:var(--accent2);font-variant-numeric:tabular-nums;margin-left:auto}
+.tr-flag{font-size:12px}
+.tr-body{padding:0 12px 12px;border-top:1px dashed var(--card-bd);margin-top:2px}
+.tr-kv{margin-top:10px}
+.tr-kv b{display:block;font-size:12px;color:var(--muted);margin-bottom:3px;font-weight:600}
+.tr-kv pre{margin:0;white-space:pre-wrap;word-break:break-word;
+  font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.65;
+  background:var(--bg2);border:1px solid var(--card-bd);border-radius:8px;padding:8px 10px;
+  max-height:280px;overflow:auto}
+.tr-steps{margin:0;padding-left:18px;line-height:1.75;color:var(--muted);font-size:12px}
+.tr-meta{margin-top:10px;font-size:12px;color:var(--muted);line-height:1.7}
 
 /* 配置页：吸顶栈（「配置对象」条 + 分组跳转栏），滚动时都跟着走 */
 .cfg-bar{position:sticky;top:var(--cfg-stick);z-index:22;display:flex;align-items:center;gap:10px;
@@ -246,6 +270,10 @@ button:disabled{opacity:.5;cursor:not-allowed}
   border:1px solid var(--card-bd);border-radius:10px;padding:10px}
 .mem-item{display:flex;flex-direction:column;gap:2px;padding:7px 9px;border-radius:9px;cursor:pointer;
   border:1px solid transparent}
+/* 成员列表**限高滚动**：群里几百人时它会一直长下去，把右边的编辑区和下面的群概况
+   全推走，想改一个人得先滚过整份名单。 */
+#memPeople{max-height:min(56vh,560px);overflow-y:auto;overscroll-behavior:contain;
+  padding-right:4px;scrollbar-width:thin}
 .mem-item:hover{background:var(--input)}
 .mem-item.active{background:var(--input);border-color:var(--accent)}
 .mem-item .mi-name{font-weight:600;font-size:13px}
@@ -363,6 +391,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
   .pv-body{padding:14px 14px 26px}
   /* 手机上两栏已经叠成一列，固定 340px 的最小高度只会留下一大片空白 */
   .mem-side{min-height:0}
+  #memPeople{max-height:42vh}
   .ctx-row{grid-template-columns:9px 1fr auto 48px}
   .ctx-pct{font-size:25px}
 }
@@ -518,14 +547,6 @@ button:disabled{opacity:.5;cursor:not-allowed}
       </div>
 
       <div id="botForm"></div>
-      <div class="card">
-        <div class="row end">
-          <span class="count" id="botDirtyCount"></span>
-          <span class="msg" id="botMsg"></span>
-          <button id="botReset">重置改动</button>
-          <button id="botSave" class="btn-primary">保存</button>
-        </div>
-      </div>
     </section>
 
     <!-- 群记忆 -->
@@ -621,7 +642,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
         </div>
         <div id="logMeta" class="muted" style="margin-bottom:8px"></div>
         <div class="log-view" id="logView"><div class="empty">加载中…</div></div>
-        <p class="muted" style="margin-top:10px">这里只显示<strong>本次进程启动后</strong>的日志（内存环形缓冲，重启即清空）。条目数、最低等级、是否额外落盘文件，在「配置」页的<strong>运行日志</strong>分组里改，保存后立即生效。<br>服务器上日志的大头是协议端（<code>nonebot</code>）与网页请求（<code>uvicorn</code>），想看机器人自己干了什么，把「来源」切到 <strong>🤖 只看机器人</strong> 即可。</p>
+        <p class="muted" style="margin-top:10px">这里只显示<strong>本次进程启动后</strong>的日志（内存环形缓冲，重启即清空）。条目数、最低等级、是否额外落盘文件，在「配置」页的<strong>运行日志</strong>分组里改，保存后立即生效。<br>服务器上日志的大头是协议端（<code>nonebot</code>）与网页请求（<code>uvicorn</code>），想看机器人自己干了什么，把「来源」切到 <strong>🤖 只看机器人</strong> 即可。<br><strong>想看大模型到底问了什么、回了什么、中间调了什么工具</strong>，把「来源」切到 <strong>🧠 LLM 调用</strong>——那是另一套结构化记录，每次问答一条，点开看详情。</p>
       </div>
     </section>
 
@@ -751,12 +772,25 @@ $("#tokenOk").onclick = () => {
 $("#tokenInput").addEventListener("keydown", e=>{ if(e.key==="Enter") $("#tokenOk").click(); });
 
 /* ---- 侧边栏切换 ---- */
+/* 底部保存栏是全局那一块（#footbar），配置页和机器人页共用：
+   两页都是「一堆字段 + 一堆改动」，放各自卡片里既重复又会被长表单推到屏幕外。
+   FOOT 记住当前归谁，按钮点击时据此分发。 */
+let FOOT="";
+function syncFootbar(name){
+  const on=(name==="config"||name==="bot");
+  $("#footbar").classList.toggle("hidden", !on);
+  FOOT=on?name:"";
+  $("#saveMsg").textContent=""; $("#saveMsg").className="msg";
+  if(name==="config") refreshDirty();
+  else if(name==="bot") refreshBotDirty();
+  else { $("#dirtyCount").textContent=""; }
+}
 function switchPage(name){
   stopLogTimer();   // 离开日志页就停掉轮询
   document.querySelectorAll(".nav").forEach(b=>b.classList.toggle("active", b.dataset.page===name));
   document.querySelectorAll(".page").forEach(s=>s.classList.add("hidden"));
   $("#page-"+name).classList.remove("hidden");
-  $("#footbar").classList.toggle("hidden", name!=="config");
+  syncFootbar(name);
   if(name==="overview") loadOverview();
   if(name==="collect") loadCollect();
   if(name==="master") loadMaster();
@@ -1285,8 +1319,10 @@ function markDirty(key,val){
 }
 function refreshDirty(){
   const n=Object.keys(DIRTY).length;
-  $("#dirtyCount").textContent=n?`● ${n} 项待保存`:"";
-  $("#saveBtn").disabled=n===0;
+  if(FOOT==="config"){
+    $("#dirtyCount").textContent=n?`● ${n} 项待保存`:"";
+    $("#saveBtn").disabled=n===0;
+  }
   document.querySelectorAll("#configForm .field").forEach(fr=>{
     const k=fr.dataset.key; const ctrl=fr.querySelector(".fctrl");
     if(ctrl) ctrl.classList.toggle("dirty", !!DIRTY[k]);
@@ -1499,8 +1535,13 @@ async function revertAll(){
   }catch(e){ toast("恢复失败："+e.message,"bad"); }
 }
 function setMsg(t,kind=""){ const m=$("#saveMsg"); m.textContent=t; m.className="msg"+(kind?(" "+kind):""); }
-$("#saveBtn").onclick=saveConfig;
-$("#resetBtn").onclick=()=>{ DIRTY={}; document.querySelectorAll(".fctrl.dirty").forEach(c=>c.classList.remove("dirty")); refreshDirty(); setMsg("已重置本地改动"); };
+/* 底部保存栏两页共用：按 FOOT 分发到对应的那套脏数据 */
+$("#saveBtn").onclick=()=>{ if(FOOT==="bot"){ saveBot(); return; } saveConfig(); };
+$("#resetBtn").onclick=()=>{
+  if(FOOT==="bot"){ BOT_DIRTY={}; renderBotForm(BOT_SCHEMA, BOT_ORIG); botMsg("已重置本地改动"); return; }
+  DIRTY={}; document.querySelectorAll(".fctrl.dirty").forEach(c=>c.classList.remove("dirty"));
+  refreshDirty(); setMsg("已重置本地改动");
+};
 $("#cfgResetAll").onclick=revertAll;
 $("#cfgGroupSel").onchange=async (e)=>{
   const v=e.target.value;
@@ -1523,8 +1564,11 @@ function botMarkDirty(key,val){
 }
 function refreshBotDirty(){
   const n=Object.keys(BOT_DIRTY).length;
-  const cnt=$("#botDirtyCount"); if(cnt) cnt.textContent = n?`● ${n} 项待保存`:"";
-  const btn=$("#botSave"); if(btn) btn.disabled = n===0;
+  /* 和配置页共用底部那条保存栏：两页不会同时显示，用哪套脏数据由 FOOT 决定 */
+  if(FOOT==="bot"){
+    $("#dirtyCount").textContent=n?`● ${n} 项待保存`:"";
+    $("#saveBtn").disabled=n===0;
+  }
   document.querySelectorAll("#botForm .field").forEach(fr=>{
     const ctrl=fr.querySelector(".fctrl"); if(ctrl) ctrl.classList.toggle("dirty", !!BOT_DIRTY[fr.dataset.key]);
   });
@@ -1740,7 +1784,8 @@ function renderBotStatus(st){
   }
   box.innerHTML = parts.join("<br>");
 }
-function botMsg(t,kind=""){ const m=$("#botMsg"); if(m){ m.textContent=t; m.className="msg"+(kind?(" "+kind):""); } }
+/* 机器人页的提示走底部共用保存栏（和配置页同一个位置、同一种样式） */
+function botMsg(t,kind=""){ const m=$("#saveMsg"); if(m){ m.textContent=t; m.className="msg"+(kind?(" "+kind):""); } }
 async function loadBot(){
   try{
     const j=await (await api("/api/music-admin/bot")).json();
@@ -1788,10 +1833,9 @@ async function clearBotHist(){
     await loadContext(CTXU.gid||0);
   }catch(e){ toast("清空失败: "+e.message,"bad"); }
 }
-$("#botSave").onclick=saveBot;
+/* 保存 / 重置已经并到全局底部栏（见 syncFootbar 与 #saveBtn 的分发） */
 $("#botTest").onclick=testBot;
 $("#botClearHist").onclick=clearBotHist;
-$("#botReset").onclick=()=>{ BOT_DIRTY={}; renderBotForm(BOT_SCHEMA, BOT_ORIG); botMsg("已重置本地改动"); };
 
 /* ---- 上下文用量（机器人页） ---- */
 /* 颜色按段固定：改顺序会让人以为「绿色那块变大了」，所以写死成 key→色 而非按索引 */
@@ -2134,11 +2178,24 @@ async function loadLogs(silent){
   const lv=$("#logLevel").value||"";
   const q=$("#logSearch").value.trim();
   const src=$("#logSource").value||"";
-  let url="/api/music-admin/logs?limit=2000";
-  if(lv) url+="&level="+encodeURIComponent(lv);
-  if(q) url+="&q="+encodeURIComponent(q);
-  if(src) url+="&source="+encodeURIComponent(src);
   try{
+    /* 「🧠 LLM 调用」是虚拟来源：走另一套结构化记录（输入 / 经过 / 输出），
+       普通日志是文本行，一次问答摊成十几行根本看不出在问什么 */
+    if(src==="llm-trace"){
+      let turl="/api/music-admin/llm-trace?limit=200";
+      if(q) turl+="&q="+encodeURIComponent(q);
+      const tj=await (await api(turl)).json();
+      $("#logLevel").disabled=true;   // 调用记录没有日志等级，这个筛选无意义
+      fillLogLevels(tj.levels);
+      fillLogSources(tj.sources||[], tj.bot_logger);
+      renderTraces(tj.items||[], tj.stats||{});
+      return;
+    }
+    $("#logLevel").disabled=false;
+    let url="/api/music-admin/logs?limit=2000";
+    if(lv) url+="&level="+encodeURIComponent(lv);
+    if(q) url+="&q="+encodeURIComponent(q);
+    if(src) url+="&source="+encodeURIComponent(src);
     const j=await (await api(url)).json();
     fillLogLevels(j.levels);
     fillLogSources(j.sources, j.bot_logger);
@@ -2155,10 +2212,15 @@ function fillLogSources(sources, botName){
   const rows=sources||[];
   let html='<option value="">全部来源</option>';
   if(botName) html+=`<option value="bot">🤖 只看机器人</option>`;
+  /* 固定项：它不是 logger，是 llmtrace 那份结构化记录 */
+  html+=`<option value="llm-trace">🧠 LLM 调用</option>`;
   html+=rows.map(s=>`<option value="${esc(s.name)}">${esc(s.name)}（${s.count}）</option>`).join("");
   sel.innerHTML=html;
   // 原来选中的来源还在就保留；否则回落「全部来源」
-  if(keep && (keep==="bot" ? botName : rows.some(s=>s.name===keep))) sel.value=keep; else sel.value="";
+  const alive = keep==="bot" ? botName
+              : keep==="llm-trace" ? true
+              : (keep && rows.some(s=>s.name===keep));
+  sel.value = alive ? keep : "";
 }
 
 function fillLogLevels(levels){
@@ -2197,6 +2259,84 @@ function renderLogs(items, st){
   if(atBottom) view.scrollTop=view.scrollHeight;   // 原来就在底部才自动跟随，避免打断翻看
 }
 
+/* ---- LLM 调用记录 ---- */
+let TRACES_LAST=[];
+/* 展开状态按 id 记：3 秒自动刷新会重建列表，不记的话正在看的那条会被收起 */
+const TR_OPEN=new Set();
+function fmtMs(ms){
+  ms=Number(ms)||0;
+  return ms>=1000 ? (ms/1000).toFixed(2)+"s" : Math.round(ms)+"ms";
+}
+function renderTraces(items, st){
+  TRACES_LAST=items;
+  const view=$("#logView");
+  $("#logMeta").textContent=[`共 ${st.size||0} 条调用记录（上限 ${st.capacity||0}）`,
+    `成功 ${st.succeeded||0}`, `失败 ${st.failed||0}`, `进程累计 ${st.total||0}`].join(" · ");
+  if(!items.length){
+    view.innerHTML='<div class="empty">（还没有调用记录。@ 机器人说一句话，或者等它自己搭话，这里就会有一条。）</div>';
+    return;
+  }
+  const frag=document.createDocumentFragment();
+  items.forEach(it=>{
+    const d=document.createElement("details");
+    d.className="tr-item"+(it.ok?"":" tr-bad");
+    d.dataset.id=String(it.id);
+    if(TR_OPEN.has(String(it.id))) d.open=true;
+    d.addEventListener("toggle",()=>{ if(d.open) TR_OPEN.add(String(it.id)); else TR_OPEN.delete(String(it.id)); });
+
+    const isJudge = it.kind==="judge";
+    const sum=document.createElement("summary");
+    sum.innerHTML=`<span class="tr-time">${esc(it.time)}</span>`
+      +`<span class="tr-tag">${isJudge?"🧑‍⚖️ 判官":"群"+esc(String(it.group_id))}</span>`
+      +`<span class="tr-who">${esc(it.speaker)}(${esc(String(it.user_id))})</span>`
+      +`<span class="tr-cost">${fmtMs(it.elapsed_ms)}</span>`
+      +`<span class="tr-flag">${it.ok?"✅":"❌ "+esc((it.error||"未生成").slice(0,60))}</span>`;
+    d.appendChild(sum);
+
+    const kv=(k,v)=> v ? `<div class="tr-kv"><b>${k}</b><pre>${esc(v)}</pre></div>` : "";
+    let html="";
+    /* 判官那条的「提问」其实是它看到的一段群聊，「回复」是判定结果 */
+    html+=kv(isJudge?"看到的对话":"提问", it.question);
+    if((it.steps||[]).length){
+      html+=`<div class="tr-kv"><b>经过（${it.steps.length} 步）</b><ul class="tr-steps">`
+        + it.steps.map(s=>`<li>${esc(s)}</li>`).join("") + `</ul></div>`;
+    }
+    html+=kv(isJudge?"判定":"回复", it.reply);
+    html+=kv("思考", it.reasoning);
+    const meta=[];
+    if(it.model) meta.push("模型 "+it.model);
+    if(it.thinking) meta.push("思考 "+it.thinking);
+    meta.push("system "+(it.system_chars||0)+" 字");
+    meta.push("历史 "+(it.history_msgs||0)+" 条 / "+(it.history_chars||0)+" 字");
+    meta.push("工具 "+(it.tool_schemas||0)+" 个");
+    if(it.tool_calls) meta.push("实际调用工具 "+it.tool_calls+" 次");
+    if(it.usage && (it.usage.prompt_tokens||it.usage.completion_tokens)){
+      meta.push(`用量 ${it.usage.prompt_tokens||0}+${it.usage.completion_tokens||0} token`);
+    }
+    html+=`<div class="tr-meta">${esc(meta.join("　·　"))}</div>`;
+    const body=document.createElement("div");
+    body.className="tr-body";
+    body.innerHTML=html;
+    d.appendChild(body);
+    frag.appendChild(d);
+  });
+  view.innerHTML="";
+  view.appendChild(frag);
+}
+/* trace 模式下的纯文本版（复制按钮 / 贴给别人看） */
+function tracesText(){
+  return TRACES_LAST.map(t=>{
+    const isJudge=t.kind==="judge";
+    return [
+      `${t.time} ${isJudge?"🧑‍⚖️ 判官":"群"+t.group_id+" "+t.speaker+"("+t.user_id+")"} `
+        + `${fmtMs(t.elapsed_ms)} ` + (t.ok ? "成功" : "失败："+(t.error||"未生成")),
+      `${isJudge?"看到的对话":"提问"}：${t.question||""}`,
+      (t.steps||[]).length ? "经过：\n  "+t.steps.join("\n  ") : "",
+      `${isJudge?"判定":"回复"}：${t.reply||"（空）"}`,
+    ].filter(Boolean).join("\n");
+  }).join("\n\n--------\n\n");
+}
+
 $("#logRefresh").onclick=()=>loadLogs();
 $("#logLevel").onchange=()=>loadLogs(true);
 $("#logSource").onchange=()=>loadLogs(true);
@@ -2206,15 +2346,24 @@ $("#logSearch").addEventListener("input",()=>{
   LOG_SEARCH_T=setTimeout(()=>loadLogs(true), 300);
 });
 $("#logCopy").onclick=async()=>{
+  /* 来源切到「🧠 LLM 调用」时，列表是结构化记录而不是日志行 */
+  if($("#logSource").value==="llm-trace"){
+    if(!TRACES_LAST.length){ toast("没有可复制的内容"); return; }
+    try{ await copyText(tracesText()); toast(`已复制 ${TRACES_LAST.length} 条调用记录`,"ok"); }
+    catch(e){ toast("复制失败："+(e.message||e),"bad"); }
+    return;
+  }
   if(!LOGS_LAST.length){ toast("没有可复制的内容"); return; }
   const text=LOGS_LAST.map(l=>`${l.time} [${l.level}] ${l.name} | ${l.message}`+(l.exc?("\n"+l.exc):"")).join("\n");
   try{ await copyText(text); toast(`已复制 ${LOGS_LAST.length} 条日志`,"ok"); }
   catch(e){ toast("复制失败："+(e.message||e),"bad"); }
 };
 $("#logClear").onclick=async()=>{
+  const isTrace=$("#logSource").value==="llm-trace";
+  const url=isTrace?"/api/music-admin/llm-trace":"/api/music-admin/logs";
   const btn=$("#logClear"); btn.disabled=true;
   try{
-    const j=await (await api("/api/music-admin/logs",{method:"POST",
+    const j=await (await api(url,{method:"POST",
       headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"clear"})})).json();
     toast(j.message||"已清空", j.ok?"ok":"bad");
     loadLogs(true);

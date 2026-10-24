@@ -41,6 +41,7 @@ from nonebot.log import logger
 
 from .bot_utils import safe_send_group
 from .config import LLMConfig
+from . import llmtrace as llmtrace_mod
 from .llm import llm_bot
 from .service import service
 
@@ -283,7 +284,9 @@ def parse_verdict(text: str) -> bool:
     return "接" in body
 
 
-async def should_reply(cfg: LLMConfig, material: str) -> tuple[bool, str]:
+async def should_reply(
+    cfg: LLMConfig, material: str, group_id: int = 0
+) -> tuple[bool, str]:
     """问判官「此刻插一句自然吗」。返回 ``(接不接, 原因)``。
 
     走 ``llm.complete``：一次性、不写历史、不占冷却。**这点是关键**——如果让
@@ -292,11 +295,17 @@ async def should_reply(cfg: LLMConfig, material: str) -> tuple[bool, str]:
 
     判不出来（空正文 / 报错 / 回一堆废话）一律按**不接**：识相的意思是宁缺毋滥，
     静默最多是少说一句，接错话是社死。
+
+    每次判定都记进 :mod:`llmtrace`（``kind="judge"``）：否则「开了主动搭话却一直
+    没动静」只能靠猜，看不出是没素材还是判官一路拦。
     """
     hint = (cfg.banter_judge_hint or "").strip() or DEFAULT_JUDGE_HINT
     # 兜一道：万一有人往判定标准里贴了几万字，每次判官请求都得带上它
     hint = hint[:3000]
     body = clip_tail(material, int(cfg.banter_judge_chars))
+
+    trace = llmtrace_mod.start(group_id, 0, "判官", cfg, question=body, kind="judge")
+    started = time.monotonic()
     verdict, why = await llm_bot.complete(
         judge_prompt(body, hint),
         cfg,
@@ -309,8 +318,19 @@ async def should_reply(cfg: LLMConfig, material: str) -> tuple[bool, str]:
     )
     if not verdict:
         logger.warning(f"[banter] 判官没回话（{why}）→ 按不接处理")
+        llmtrace_mod.step(trace, f"⚠️ 判官没有回话（{why}）→ 按不接")
+        llmtrace_mod.finish(
+            trace, error=f"judge_empty({why})",
+            elapsed_ms=(time.monotonic() - started) * 1000,
+        )
         return False, f"judge_empty({why})"
+
     ok = parse_verdict(verdict)
+    llmtrace_mod.step(trace, f"判定：{'接' if ok else '不接'}")
+    llmtrace_mod.finish(
+        trace, reply=verdict.strip(),
+        elapsed_ms=(time.monotonic() - started) * 1000,
+    )
     return ok, f"判官「{verdict.strip()[:8]}」"
 
 
@@ -452,7 +472,7 @@ async def run_banter() -> dict:
         # 判官再说该不该插嘴。判「不接」**也要推进游标**——否则下一轮还是这批
         # 消息，判官大概率还说不接，就死锁在那儿反复白跑。
         if llm_cfg.banter_judge:
-            ok, verdict_why = await should_reply(llm_cfg, material)
+            ok, verdict_why = await should_reply(llm_cfg, material, gid)
             if not ok:
                 _advance(gid, last_id)
                 declined += 1

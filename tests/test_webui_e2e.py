@@ -113,11 +113,27 @@ def test_endpoints():
         assert bad.status_code == 200 and bad.json()["group_id"] == 0
         assert client.get("/api/music-admin/context").status_code == 401
 
+        # ---- LLM 调用记录接口（日志页的「🧠 LLM 调用」来源）----
+        tp = client.get("/api/music-admin/llm-trace", headers=H)
+        assert tp.status_code == 200
+        tj = tp.json()
+        assert tj["ok"] is True and isinstance(tj["items"], list)
+        assert "size" in tj["stats"] and "capacity" in tj["stats"]
+        # 顺带带回日志那边的基础信息，两个下拉来回切才不会变空
+        assert "levels" in tj and "sources" in tj and "bot_logger" in tj
+        assert client.get("/api/music-admin/llm-trace").status_code == 401
+        # 清空是 POST；未知动作报 400
+        cp = client.post("/api/music-admin/llm-trace", headers=H, json={"action": "clear"})
+        assert cp.status_code == 200 and cp.json()["ok"] is True
+        assert client.post("/api/music-admin/llm-trace", headers=H,
+                           json={"action": "nope"}).status_code == 400
+
         # ---- 仪表盘页面本身：新卡片与手机适配规则要真的出现在 HTML 里 ----
         page = client.get("/music-admin", headers=H)
         assert page.status_code == 200
         html = page.text
-        for marker in ("ctxGroup", "ctxBar", "ctxList", "上下文用量", "botNav"):
+        for marker in ("ctxGroup", "ctxBar", "ctxList", "上下文用量", "botNav",
+                       "llm-trace", "tr-item", "footbar", "memPeople"):
             assert marker in html, f"页面里少了 {marker}"
         # 断点与「跳转栏横向滑」这类关键规则，删掉会立刻在小屏上表现成挤成一团
         for rule in ("max-width:900px", "max-width:640px", "max-width:560px",

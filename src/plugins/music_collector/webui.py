@@ -40,6 +40,7 @@ from .config import (
     reset_config_value,
 )
 from . import logbuffer
+from . import llmtrace as llmtrace_mod
 from . import memory as memory_mod
 from . import skills as skills_mod
 from . import tools as tools_mod
@@ -1585,6 +1586,58 @@ async def _api_logs(request: Request):
     })
 
 
+async def _api_llm_trace(request: Request):
+    """「LLM 调用」记录：每次问答的**输入 / 经过 / 输出**。
+
+    数据源是 :mod:`llmtrace`（内存环形缓冲，只含本次启动后）。日志页「来源」
+    下拉里的 ``🧠 LLM 调用`` 走的就是这里——那页的普通日志是文本行，一次问答
+    摊成十几行会淹没在 nonebot / uvicorn 的刷屏里，看不出「到底问了什么、回了什么」。
+    """
+    if not _token_ok(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    if request.method == "POST":
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        action = (body or {}).get("action") or "clear"
+        if action != "clear":
+            return JSONResponse({"ok": False, "message": f"未知操作: {action}"}, status_code=400)
+        removed = llmtrace_mod.clear()
+        return JSONResponse({
+            "ok": True,
+            "message": f"已清空 {removed} 条调用记录",
+            "removed": removed,
+            **llmtrace_mod.stats(),
+        })
+
+    qp = request.query_params
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return int(qp.get(key) or default)
+        except (TypeError, ValueError):
+            return default
+
+    limit = max(1, min(500, _int("limit", 100)))
+    return JSONResponse({
+        "ok": True,
+        "items": llmtrace_mod.snapshot(
+            limit=limit,
+            query=qp.get("q") or "",
+            group_id=_int("group_id", 0),
+            only_failed=str(qp.get("failed") or "") in ("1", "true", "yes"),
+        ),
+        "stats": llmtrace_mod.stats(),
+        # 顺带把日志那边的基础信息带上：前端在两种来源间来回切时，
+        # 「级别 / 来源」两个下拉不该因为换了接口就变空
+        "levels": list(logbuffer.LEVELS),
+        "sources": logbuffer.sources(),
+        "bot_logger": logbuffer.BOT_LOGGER,
+    })
+
+
 # -------------------------------------------------------------------- 群记忆
 
 
@@ -1950,6 +2003,7 @@ def register_webui() -> None:
     app.add_api_route("/api/music-admin/admin", _api_admin, methods=["GET", "POST"])
     app.add_api_route("/api/music-admin/account", _api_account, methods=["GET", "POST"])
     app.add_api_route("/api/music-admin/logs", _api_logs, methods=["GET", "POST"])
+    app.add_api_route("/api/music-admin/llm-trace", _api_llm_trace, methods=["GET", "POST"])
     app.add_api_route("/api/music-admin/memory", _api_memory, methods=["GET", "POST"])
     logger.info("[music] WebUI 已挂载: http://<本机IP>:8080/music-admin  (需 token 访问)")
 

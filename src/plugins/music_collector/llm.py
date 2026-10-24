@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from . import llmtrace as llmtrace_mod
 from . import memory as memory_mod
 from . import tools as tools_mod
 from .config import LLMConfig, MemoryConfig
@@ -879,8 +880,13 @@ class LLMBot:
         tool_ctx,
         tool_schemas: list[dict],
         group_id: int,
+        trace: Optional[dict] = None,
     ) -> tuple[str, str, int]:
         """跑「模型 ⇄ 工具」往返，返回 ``(最终正文, 思考内容, 工具调用次数)``。
+
+        ``trace`` 是网页「LLM 调用」记录里那条（见 :mod:`llmtrace`），
+        有就把每轮工具调用写进去——排查「它为什么答得不对」时，
+        「到底调了哪个工具、拿到什么」往往比最终回复更有用。
 
         两个容易踩的点：
 
@@ -928,6 +934,13 @@ class LLMBot:
                     }
                 )
                 logger.info(f"[llm] 群{group_id} 工具 {name} 返回 {len(result)} 字")
+                if trace is not None:
+                    trace["tool_calls"] = used
+                    llmtrace_mod.step(
+                        trace,
+                        f"🔧 调 {name}({preview}) → 返回 {len(result)} 字："
+                        f"{result[:120].replace(chr(10), ' ')}",
+                    )
         return "", "", used  # 循环必然在上面 return，这里只为让类型完整
 
     async def chat(
@@ -978,6 +991,26 @@ class LLMBot:
         if quote:
             body = f"{quote}\n{body}"
 
+        # 网页「LLM 调用」记录这一条：问了什么、经过什么、回了什么。
+        # 每条返回路径都要经过 _done 归档——失败的那几次才是最需要看的。
+        trace = llmtrace_mod.start(group_id, user_id, speaker, cfg, question=body)
+        started = time.monotonic()
+
+        def _done(reply_text, why: str = "", think: str = ""):
+            """收口：归档这条调用记录，再原样返回给调用方。
+
+            思考内容显式传参而不是闭包捕获——冷却 / 空消息那两条路径上，
+            ``reasoning`` 还没被赋值，闭包会直接抛 NameError。
+            """
+            llmtrace_mod.finish(
+                trace,
+                reply=reply_text or "",
+                reasoning=think,
+                error=why,
+                elapsed_ms=(time.monotonic() - started) * 1000,
+            )
+            return reply_text, why
+
         left = self.cooldown_left(group_id, user_id, cfg.cooldown)
         if left > 0:
             # 群里表现为「完全没反应」，必须留痕：否则分不清是限流还是压根没触发
@@ -985,7 +1018,8 @@ class LLMBot:
                 f"[llm] 群{group_id} {speaker}({user_id}) 冷却中"
                 f"（还剩 {left:.0f}s / 共 {cfg.cooldown}s）→ 静默跳过"
             )
-            return None, "cooldown"
+            llmtrace_mod.step(trace, f"⏳ 冷却中（还剩 {left:.0f}s），没走到模型")
+            return _done(None, "cooldown")
 
         async with self._lock(group_id):
             memory_cfg = mem if mem is not None else MemoryConfig()
@@ -994,10 +1028,11 @@ class LLMBot:
             # 工具一开就是「agent 模式」：能力边界（不许装技能、不许写文件）由代码
             # 追加在系统提示词末尾，用户改人设也删不掉。群成员档案插在人设之后，
             # 硬规则之前——档案再长也盖不掉能力边界。
+            memory_text = memory_mod.render_for_prompt(memory_cfg, group_id)
             system = system_text(
                 cfg,
                 tools_mod.TOOL_RULES if cfg.tools else "",
-                memory_mod.render_for_prompt(memory_cfg, group_id),
+                memory_text,
             )
             base: list[dict] = []
             if system:
@@ -1031,10 +1066,28 @@ class LLMBot:
             reply: Optional[str] = None
             reasoning = ""
             used_tools = 0
+
+            # 把「这次请求由什么撑起来」记进调用记录：排查时第一眼要看的就这几项
+            trace["system_chars"] = len(system)
+            trace["history_msgs"] = len(hist)
+            trace["history_chars"] = sum(message_chars(m) for m in hist)
+            trace["tool_schemas"] = len(tool_schemas)
+            llmtrace_mod.step(
+                trace,
+                f"📦 system {len(system)} 字（其中记忆 {len(memory_text)} 字）"
+                f" / 历史 {len(hist)} 条 {trace['history_chars']} 字"
+                f" / 工具 {len(tool_schemas)} 个",
+            )
+            if pics:
+                llmtrace_mod.step(trace, f"🖼 带图 {len(pics)} 张")
+            if context:
+                llmtrace_mod.step(trace, f"📎 附参考资料 {len(context)} 字")
+
             while True:
                 try:
                     reply, reasoning, used_tools = await self._run_turns(
-                        current, cfg, tool_list, tool_ctx, tool_schemas, group_id
+                        current, cfg, tool_list, tool_ctx, tool_schemas, group_id,
+                        trace=trace,
                     )
                     break
                 except Exception as exc:  # noqa: BLE001 — 任何失败都只记原因
@@ -1047,6 +1100,7 @@ class LLMBot:
                         logger.warning(
                             f"[llm] 群{group_id} 接口不接受 tools（{err[:80]}）→ 去掉工具重试"
                         )
+                        llmtrace_mod.step(trace, f"↩️ 接口不认 tools，去掉工具重试：{err[:100]}")
                         continue
                     # ② 上游不认图（换了纯文本模型 / 中转层不支持多模态）：去掉图片再试
                     if allow_drop_images and is_vision_unsupported(err):
@@ -1054,6 +1108,7 @@ class LLMBot:
                         logger.warning(
                             f"[llm] 群{group_id} 上游不接受图片（{err[:80]}）→ 去掉图片重试"
                         )
+                        llmtrace_mod.step(trace, f"↩️ 上游不认图，去掉图片重试：{err[:100]}")
                         current = without_images(current, plain)
                         continue
                     # ③ 上下文超窗：丢掉历史再试。没带历史还超窗说明单条提问就超了，
@@ -1067,11 +1122,15 @@ class LLMBot:
                             f"[llm] 群{group_id} 上下文超窗（丢弃 {dropped} 条 / "
                             f"{dropped_chars} 字）→ 不带历史重试"
                         )
+                        llmtrace_mod.step(
+                            trace,
+                            f"↩️ 超窗，丢弃 {dropped} 条 / {dropped_chars} 字历史后重试",
+                        )
                         current = [*base, {"role": "user", "content": current[-1]["content"]}]
                         continue
                     self.last_error = err
                     logger.warning(f"[llm] 群{group_id} 生成失败: {err}")
-                    return None, f"error: {err}"
+                    return _done(None, f"error: {err}")
 
             self.last_error = ""
             if not reply:
@@ -1080,7 +1139,8 @@ class LLMBot:
                 err = "模型没有给出正文（工具调用可能达到上限）"
                 self.last_error = err
                 logger.warning(f"[llm] 群{group_id} {err}（已用工具 {used_tools} 次）")
-                return None, f"error: {err}"
+                llmtrace_mod.step(trace, f"⚠️ 正文为空（已用工具 {used_tools} 次）")
+                return _done(None, f"error: {err}")
             if cfg.max_reply_chars > 0 and len(reply) > cfg.max_reply_chars:
                 reply = reply[: cfg.max_reply_chars].rstrip() + "…"
 
@@ -1124,7 +1184,7 @@ class LLMBot:
             f"[llm] 群{group_id} {speaker}({user_id}) 提问 {len(question)} 字{pics_note}{ctx_note}"
             f" → 回复 {len(reply)} 字{tool_note}（model={cfg.model}）"
         )
-        return reply, ""
+        return _done(reply, "", reasoning)
 
     async def complete(
         self,

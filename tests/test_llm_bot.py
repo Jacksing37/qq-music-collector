@@ -865,6 +865,56 @@ async def test_context_breakdown() -> None:
     check("改了窗口不影响 used", d5["used"] == d2["used"], f'{d5["used"]} vs {d2["used"]}')
 
 
+async def test_trace_wired() -> None:
+    """每次 ``chat`` 都要在 llmtrace 里留一条——成功、失败、冷却都要留。
+
+    网页日志页的「🧠 LLM 调用」全靠这条线：漏了某个返回路径，就会出现
+    「明明问了却没记录」，排查时最误导。
+    """
+    print("\n[14] LLM 调用记录接线")
+    from music_collector import llmtrace as lt
+
+    lt.clear()
+    cfg = LLMConfig(
+        enabled=True, base_url="http://x/v1", api_key="k", model="m",
+        cooldown=0, history_rounds=0, tools=False, max_input_chars=0,
+    )
+
+    ok_bot = make_bot({"content": "这是回答", "reasoning_content": "想了想"})
+    reply, why = await ok_bot.chat(9101, 7, "张三", "你好呀", cfg)
+    check("成功：正常返回", reply == "这是回答" and why == "", f"{reply}/{why}")
+    items = lt.snapshot(limit=5)
+    check("成功也留了记录", len(items) == 1, str(len(items)))
+    one = items[0] if items else {}
+    check("记下提问（带昵称与 QQ 号）", "张三(7)" in (one.get("question") or ""),
+          str(one.get("question")))
+    check("记下回复", one.get("reply") == "这是回答", str(one.get("reply")))
+    check("记下思考内容", one.get("reasoning") == "想了想", str(one.get("reasoning")))
+    check("标记成功", one.get("ok") is True)
+    check("耗时是数字", isinstance(one.get("elapsed_ms"), int), str(one.get("elapsed_ms")))
+
+    bad_bot = make_bot(None, error="boom")
+    reply2, why2 = await bad_bot.chat(9101, 8, "李四", "再问", cfg)
+    check("失败：返回 None", reply2 is None)
+    bad = lt.snapshot(limit=1)[0]
+    check("失败也留了记录", bad.get("speaker") == "李四", str(bad.get("speaker")))
+    check("失败标记 ok=False", bad.get("ok") is False)
+    check("失败原因写进去了", "boom" in (bad.get("error") or ""), str(bad.get("error")))
+
+    # 冷却：压根没走到模型，也得留痕（否则群里「没反应」无从判断原因）
+    cool_cfg = cfg.model_copy(update={"cooldown": 60})
+    await ok_bot.chat(9102, 9, "王五", "第一句", cool_cfg)
+    lt.clear()
+    reply3, why3 = await ok_bot.chat(9102, 9, "王五", "第二句", cool_cfg)
+    check("冷却：返回 cooldown", why3 == "cooldown", why3)
+    cool = lt.snapshot(limit=1)
+    check("冷却也留了记录", len(cool) == 1, str(len(cool)))
+    check("记录里写明是冷却",
+          any("冷却" in s for s in (cool[0].get("steps") or [])), str(cool[0].get("steps")))
+
+    lt.clear()
+
+
 async def test_handle_at_routing() -> None:
     print("\n[13] handle_at 分流：大模型优先，兜底自我介绍")
     import music_collector as mc
@@ -956,6 +1006,7 @@ async def main() -> None:
     test_sampling_and_thinking()
     await test_context_budget()
     await test_context_breakdown()
+    await test_trace_wired()
     await test_diagnostic_logs()
     await test_handle_at_routing()
     print("\n====================================================")
