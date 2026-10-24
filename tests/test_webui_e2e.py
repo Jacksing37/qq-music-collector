@@ -96,6 +96,17 @@ def test_endpoints():
         # 未带 token -> 401
         assert client.get("/api/music-admin/bot").status_code == 401
 
+        # ---- 群记忆接口：要给出「下次自动整理」的时刻（页面直接显示）----
+        mm = client.get("/api/music-admin/memory", headers=H)
+        assert mm.status_code == 200
+        mj = mm.json()
+        assert mj["ok"] is True and "groups" in mj
+        assert "next_digest" in mj, "群记忆列表少了下次整理时间"
+        mg = client.get("/api/music-admin/memory?group=999000111", headers=H)
+        assert mg.status_code == 200
+        assert "next_digest" in mg.json(), "群记忆详情少了下次整理时间"
+        assert client.get("/api/music-admin/memory").status_code == 401
+
         # ---- 上下文用量接口（机器人页那张卡的数据源）----
         cx = client.get("/api/music-admin/context", headers=H)
         assert cx.status_code == 200

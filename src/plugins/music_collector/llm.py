@@ -968,6 +968,7 @@ class LLMBot:
         images: Optional[list[str]] = None,
         quote: str = "",
         context: str = "",
+        background: str = "",
         mem: Optional[MemoryConfig] = None,
     ) -> tuple[Optional[str], str]:
         """生成一条回复。
@@ -975,8 +976,10 @@ class LLMBot:
         ``images`` 是图片链接（``llm.vision`` 关着时会被忽略，只在文字里留
         ``[图片]`` 标记）；``quote`` 是被引用消息压成的一句前缀；
         ``context`` 是**当次**附带的参考资料（网页正文 / 转发记录），
-        只拼进这次请求，不写进上下文历史；``mem`` 是记忆配置（不传就用默认值，
-        指向 ``data/memory``）。
+        ``background`` 是群聊背景（它上次说话之后大家在聊什么），两者都只拼进这次
+        请求、不写进上下文历史；分开传是为了日志里能分别记账——排查「答得驴唇不对
+        马嘴」时，最要紧的就是看它当时读到的背景到底是什么。
+        ``mem`` 是记忆配置（不传就用默认值，指向 ``data/memory``）。
 
         返回 ``(回复文本, 原因)``：
 
@@ -1008,8 +1011,15 @@ class LLMBot:
 
         # 网页「LLM 调用」记录这一条：问了什么、经过什么、回了什么。
         # 每条返回路径都要经过 _done 归档——失败的那几次才是最需要看的。
-        trace = llmtrace_mod.start(group_id, user_id, speaker, cfg, question=body)
+        trace = llmtrace_mod.start(
+            group_id, user_id, speaker, cfg, question=body, background=background
+        )
         started = time.monotonic()
+
+        # 背景和参考资料都只作用于这次请求，拼成一段给模型看；但记录里分开存
+        extra = context
+        if background:
+            extra = f"{background}\n\n{context}" if context else background
 
         def _done(reply_text, why: str = "", think: str = ""):
             """收口：归档这条调用记录，再原样返回给调用方。
@@ -1058,11 +1068,11 @@ class LLMBot:
             current = [
                 *base,
                 *hist,
-                {"role": "user", "content": with_context(build_question_content(body, pics), context)},
+                {"role": "user", "content": with_context(build_question_content(body, pics), extra)},
             ]
             # 降级重试时用的纯文本版本：参考资料的顺序要和上面一致，否则「去掉图片
             # 重试」会把网页正文一起丢掉，模型突然从「知道内容」变成「不知道内容」。
-            plain = with_context(body, context)
+            plain = with_context(body, extra)
 
             # 工具按配置组装。tool_rounds=0 等于「不许调工具」，连 schema 都不发，
             # 省得模型调了却拿不到结果。
@@ -1095,6 +1105,9 @@ class LLMBot:
             )
             if pics:
                 llmtrace_mod.step(trace, f"🖼 带图 {len(pics)} 张")
+            if background:
+                lines = background.count("\n")
+                llmtrace_mod.step(trace, f"💬 群聊背景 {len(background)} 字 / 约 {lines} 行")
             if context:
                 llmtrace_mod.step(trace, f"📎 附参考资料 {len(context)} 字")
 

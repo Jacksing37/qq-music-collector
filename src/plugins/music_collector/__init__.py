@@ -515,11 +515,8 @@ async def _llm_answer(
     """
     group_id = int(getattr(event, "group_id", 0) or 0)
     user_id = int(getattr(event, "user_id", 0) or 0)
-    # 群友闲聊不进问答历史，这里把那一段补上（走 context，不进历史、不占历史预算）。
-    # 传 text 是让它把「当前这句提问」从背景里剔掉——那句会被旁听和问答各记一次
+    # 群友闲聊不进问答历史，这里把那一段补上（走 background，不进历史、不占历史预算）
     background = await _llm_background(event, llm_cfg, text)
-    if background:
-        context = f"{background}\n\n{context}" if context else background
     reply, reason = await llm_bot.chat(
         group_id,
         user_id,
@@ -529,6 +526,8 @@ async def _llm_answer(
         images=list(images or []),
         quote=quote,
         context=context,
+        # 单独传而不是并进 context：日志页要能还原「它当时读到了哪几句群聊」
+        background=background,
         # 记忆配置挂在 AppConfig 顶层（memory: 段），llm_cfg 里没有它
         mem=service.cfg(group_id).memory if group_id else None,
     )

@@ -49,11 +49,16 @@ class TraceBuffer:
         cfg: Any,
         question: str = "",
         kind: str = "chat",
+        background: str = "",
     ) -> dict[str, Any]:
         """开一条记录。返回的 dict 由调用方往里填，最后交给 :meth:`finish`。
 
         ``kind`` 区分用途：``chat`` 是正常问答，``judge`` 是主动搭话前的判官预检——
         后者也要留痕，否则「它为什么一直不说话」只能靠猜。
+
+        ``background`` 是这次请求附带的群聊背景（它上次说话之后大家在聊什么）。
+        单独存一份而不是混进步骤里：日志页要能看见「它当时到底读到了哪几句」，
+        只写一句「附参考资料 358 字」根本判断不出它是不是理解错了上下文。
         """
         with self._lock:
             self._seq += 1
@@ -71,6 +76,7 @@ class TraceBuffer:
             "thinking": str(getattr(cfg, "thinking", "") or ""),
             "tools_on": bool(getattr(cfg, "tools", False)),
             "question": str(question or "")[:MAX_FIELD],
+            "background": str(background or "")[:MAX_FIELD],
             "reply": "",
             "reasoning": "",
             "system_chars": 0,
@@ -148,6 +154,7 @@ class TraceBuffer:
                 or q in (i.get("reply") or "").lower()
                 or q in (i.get("speaker") or "").lower()
                 or q in (i.get("error") or "").lower()
+                or q in (i.get("background") or "").lower()
                 or any(q in s.lower() for s in (i.get("steps") or []))
             ]
         items.reverse()
@@ -188,8 +195,11 @@ def start(
     cfg: Any,
     question: str = "",
     kind: str = "chat",
+    background: str = "",
 ) -> dict:
-    return buffer.start(group_id, user_id, speaker, cfg, question, kind=kind)
+    return buffer.start(
+        group_id, user_id, speaker, cfg, question, kind=kind, background=background
+    )
 
 
 def step(entry: Optional[dict], text: str) -> None:

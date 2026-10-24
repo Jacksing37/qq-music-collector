@@ -1961,7 +1961,7 @@ async function loadMemory(){
   try{
     if(!MEM.loaded){
       const j=await (await api("/api/music-admin/memory")).json();
-      MEM.groups=j.groups||[]; MEM.loaded=true;
+      MEM.groups=j.groups||[]; MEM.loaded=true; MEM.nextDigest=j.next_digest||"";
       const sel=$("#memGroup"); sel.innerHTML="";
       if(!MEM.groups.length){
         const op=document.createElement("option");
@@ -1986,7 +1986,8 @@ async function loadMemoryGroup(){
   const gid=MEM.gid;
   if(!gid){
     $("#memPeople").innerHTML='<div class="empty">还没有任何记录。等群里聊几句、或者去「机器人 → 工具与技能」确认记忆是开着的。</div>';
-    $("#memStats").textContent="—"; $("#memGroupNote").value="";
+    $("#memStats").textContent = MEM.nextDigest ? `下次自动整理 ${MEM.nextDigest}` : "—";
+    $("#memGroupNote").value="";
     $("#memBody").value=""; $("#memNick").value=""; $("#memUid").value=""; $("#memMeta").textContent="";
     return;
   }
@@ -1997,7 +1998,8 @@ async function loadMemoryGroup(){
   const st=j.stats||{}, lg=j.log||{};
   $("#memStats").textContent =
     `${st.people||0} 人 / ${st.chars||0} 字 ｜ 群聊记录 ${lg.rows||0} 条（未整理 ${lg.pending||0}）`
-    + ` ｜ 每 ${(j.limits&&j.limits.digest_hours)||0} 小时自动整理`;
+    + ` ｜ 每 ${(j.limits&&j.limits.digest_hours)||0} 小时自动整理`
+    + (j.next_digest ? ` ｜ 下次 ${j.next_digest}` : " ｜ 下次：未排期");
   $("#memGroupNote").value=j.group_note||"";
   if(!j.enabled) memMsg("记忆功能当前是关闭的（档案还能看和改，但不会再自动更新）","bad");
   renderMemPeople();
@@ -2300,6 +2302,7 @@ function renderTraces(items, st){
     const sum=document.createElement("summary");
     sum.innerHTML=`<span class="tr-time">${esc(it.time)}</span>`
       +`<span class="tr-tag">${isJudge?"🧑‍⚖️ 判官":"群"+esc(String(it.group_id))}</span>`
+      +(it.background?`<span class="tr-tag">💬 背景 ${(it.background.match(/\n/g)||[]).length} 行</span>`:"")
       +`<span class="tr-who">${esc(it.speaker)}(${esc(String(it.user_id))})</span>`
       +`<span class="tr-cost">${fmtMs(it.elapsed_ms)}</span>`
       +`<span class="tr-flag">${it.ok?"✅":"❌ "+esc((it.error||"未生成").slice(0,60))}</span>`;
@@ -2307,6 +2310,8 @@ function renderTraces(items, st){
 
     const kv=(k,v)=> v ? `<div class="tr-kv"><b>${k}</b><pre>${esc(v)}</pre></div>` : "";
     let html="";
+    /* 群聊背景放在最前面：排查「答得驴唇不对马嘴」时，先看它当时读到了什么 */
+    html+=kv("群聊背景（它当时看到的）", it.background);
     /* 判官那条的「提问」其实是它看到的一段群聊，「回复」是判定结果 */
     html+=kv(isJudge?"看到的对话":"提问", it.question);
     if((it.steps||[]).length){
@@ -2342,6 +2347,7 @@ function tracesText(){
     return [
       `${t.time} ${isJudge?"🧑‍⚖️ 判官":"群"+t.group_id+" "+t.speaker+"("+t.user_id+")"} `
         + `${fmtMs(t.elapsed_ms)} ` + (t.ok ? "成功" : "失败："+(t.error||"未生成")),
+      t.background ? `群聊背景：\n${t.background}` : "",
       `${isJudge?"看到的对话":"提问"}：${t.question||""}`,
       (t.steps||[]).length ? "经过：\n  "+t.steps.join("\n  ") : "",
       `${isJudge?"判定":"回复"}：${t.reply||"（空）"}`,

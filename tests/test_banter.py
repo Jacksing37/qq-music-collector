@@ -191,7 +191,10 @@ def test_run(tmp: Path) -> None:
                            "text": text, "tools": probe.tools,
                            "cooldown": probe.cooldown,
                            "history_chars": probe.history_chars,
-                           "context": kw.get("context")})
+                           # 素材现在走 background 传（日志页要看见内容），
+                           # 这里合并回来，下面的断言不关心它走哪个参数
+                           "context": (kw.get("background") or "") + (kw.get("context") or ""),
+                           "background": kw.get("background")})
         return "是啊，挺晒的，记得带伞", ""
 
     # 判官走 llm_bot.complete。**必须打桩**：不打桩这里会真的发请求。
@@ -300,6 +303,9 @@ def test_run(tmp: Path) -> None:
               "第一句话在这里" in (call2["context"] or ""), (call2["context"] or "")[:120])
         check("背景带时间戳（模型才看得出谁跟谁说）",
               "[" in (call2["context"] or ""), (call2["context"] or "")[:80])
+        check("素材走 background 传（日志页才看得见内容）",
+              "第一句话在这里" in (call2.get("background") or ""),
+              (call2.get("background") or "")[:80])
 
         # ---- 条数上限 ----
         cfg.banter_batch_max = 1

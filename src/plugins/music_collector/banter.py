@@ -568,7 +568,9 @@ async def run_banter() -> dict:
         nick = rows[idx].get("nick") or ""
         reply, why = await llm_bot.chat(
             gid, uid, nick, text, probe,
-            context=context,
+            # 走 background 而不是 context：日志页要能看见这段素材（它当时读到哪几句），
+            # 只写「附参考资料 600 字」没法判断接错话是素材问题还是模型想歪了
+            background=context,
             mem=service.cfg(gid).memory,
         )
         if not reply:

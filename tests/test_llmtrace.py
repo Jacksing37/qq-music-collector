@@ -45,6 +45,7 @@ def test_basic() -> None:
 
     e = buf.start(100, 7, "张三", cfg, question="群友问了啥")
     check("start 记下提问", e["question"] == "群友问了啥", str(e["question"]))
+    check("没传背景时为空", e["background"] == "", str(e["background"]))
     check("默认 kind=chat", e["kind"] == "chat", str(e["kind"]))
     check("start 记下模型", e["model"] == "m1", e["model"])
     check("start 记下工具开关", e["tools_on"] is True)
@@ -81,6 +82,26 @@ def test_basic() -> None:
     e3 = buf.start(100, 9, "王五", cfg, question="第三问")
     buf.finish(e3, reply="半截", error="error: 超时")
     check("带错误的半截回复算失败", buf.snapshot(limit=1)[0]["ok"] is False)
+
+
+def test_background() -> None:
+    section("1b. 群聊背景：单独存一份、超长截断、能搜到")
+    buf = TraceBuffer(keep=10)
+    cfg = LLMConfig(model="m1")
+    bg = (
+        "【群里刚才在聊的，不是在跟你说话，判断语境用】\n"
+        "[21:53] 张三(1)：锅贴真不错\n[21:54] 李四(2)：我连吃三天"
+    )
+    e = buf.start(100, 7, "张三", cfg, question="他们说的啥", background=bg)
+    check("背景原样存下", e["background"] == bg, str(e["background"])[:60])
+    buf.finish(e, reply="说锅贴")
+    got = buf.snapshot(limit=1)[0]
+    check("归档后仍能看见背景", "锅贴真不错" in got["background"], got["background"][:60])
+    check("关键词能搜到背景里的内容",
+          len(buf.snapshot(query="连吃三天")) == 1, str(len(buf.snapshot(query="连吃三天"))))
+
+    e2 = buf.start(100, 7, "张三", cfg, question="长背景", background="x" * (MAX_FIELD + 500))
+    check("背景超长按上限截断", len(e2["background"]) == MAX_FIELD, str(len(e2["background"])))
 
 
 def test_limits() -> None:
@@ -143,6 +164,7 @@ def test_query() -> None:
 
 def main() -> None:
     test_basic()
+    test_background()
     test_limits()
     test_query()
     print(f"\n通过 {PASSED} 项，失败 {FAILED} 项")

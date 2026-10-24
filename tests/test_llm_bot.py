@@ -1088,6 +1088,60 @@ async def test_reply_resets_banter() -> None:
         (cfg.banter, cfg.banter_minutes, cfg.banter_reset_on_reply, cfg.at_sender) = saved
 
 
+async def test_trace_has_background() -> None:
+    """@ 回复的调用记录里要能看见群聊背景（网页「LLM 调用」那一页用）。
+
+    这条链路的坑在于：背景原先是被并进 ``context`` 一起传的，日志里只剩
+    「附参考资料 358 字」，看不出它当时读到了哪几句——答得驴唇不对马嘴时根本
+    没法判断是背景给错了还是模型自己想歪了。
+    """
+    print("\n[15d] 调用记录里带群聊背景")
+    import music_collector as mc
+    from music_collector import llmtrace as lt
+    from music_collector.store import Store
+
+    tmp = Path(tempfile.mkdtemp(prefix="trbg_"))
+    store = Store(tmp / "trbg.db")
+    await store.init()
+    old_store = service.store
+    cfg = config_manager.config.llm
+    saved = (cfg.enabled, cfg.bg_chat, cfg.bg_chat_max, cfg.bg_chat_chars,
+             cfg.bg_chat_minutes, cfg.bg_chat_min_rows, cfg.groups, cfg.at_sender)
+    old_post = mc.llm_bot._post_chat
+    gid, uid = 9410, 5
+
+    async def fake_post(messages, cf, tools=None):
+        return "嗯，锅贴确实不错"
+
+    try:
+        service.store = store
+        cfg.enabled = True
+        cfg.groups = []
+        cfg.at_sender = False
+        cfg.bg_chat = True
+        cfg.bg_chat_max = 30
+        cfg.bg_chat_chars = 2000
+        cfg.bg_chat_minutes = 120
+        cfg.bg_chat_min_rows = 6
+        await store.append_chat(gid, 6, "王五", "user", "那家锅贴真不错", kind="listen")
+
+        mc.llm_bot._post_chat = fake_post  # type: ignore[assignment]
+        bot = StubBot()
+        await mc._llm_answer(bot, make_event("是吗", user_id=uid, group_id=gid), cfg, "是吗")
+
+        rec = lt.snapshot(limit=1)[0]
+        check("记录里有背景内容",
+              "锅贴真不错" in (rec.get("background") or ""), (rec.get("background") or "")[:80])
+        check("提问与背景分开存",
+              "锅贴" not in (rec.get("question") or ""), str(rec.get("question")))
+        check("背景确实进了请求（模型能看到）", bool(bot.sent), str(bot.sent))
+    finally:
+        mc.llm_bot._post_chat = old_post  # type: ignore[assignment]
+        service.store = old_store
+        (cfg.enabled, cfg.bg_chat, cfg.bg_chat_max, cfg.bg_chat_chars,
+         cfg.bg_chat_minutes, cfg.bg_chat_min_rows, cfg.groups, cfg.at_sender) = saved
+
+
 async def test_handle_at_routing() -> None:
     print("\n[13] handle_at 分流：大模型优先，兜底自我介绍")
     import music_collector as mc
@@ -1197,6 +1251,7 @@ async def main() -> None:
     await test_background()
     await test_background_incident()
     await test_reply_resets_banter()
+    await test_trace_has_background()
     await test_diagnostic_logs()
     await test_handle_at_routing()
     print("\n====================================================")

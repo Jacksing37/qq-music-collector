@@ -1731,6 +1731,9 @@ async def _api_memory(request: Request):
             return JSONResponse({
                 "ok": True,
                 "root": str(memory_mod.memory_root(mem0)),
+                # 整批群都没选时也把「下次整理」给出来：页面上先看到节奏，才好判断
+                # 「怎么半天没更新」是没到点还是坏了
+                "next_digest": _fmt_when(next_run_of("memory_digest")),
                 "groups": [
                     {"group_id": g, **memory_mod.stats(mem0, g)} for g in sorted(ids)
                 ],
@@ -1752,6 +1755,9 @@ async def _api_memory(request: Request):
             "group_note": memory_mod.read_group_note(mem, gid),
             "stats": memory_mod.stats(mem, gid),
             "log": await service.store.chat_log_stats(gid),
+            # 下次自动整理的时刻。它是 interval 任务（每 digest_hours 小时），
+            # 光写「每 6 小时」看不出下一个点在哪，页面上直接给出来最省事
+            "next_digest": _fmt_when(next_run_of("memory_digest")),
             "limits": {
                 "note_chars": int(mem.note_chars),
                 "inject_chars": int(mem.inject_chars),
