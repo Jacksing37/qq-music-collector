@@ -39,6 +39,7 @@ import nonebot  # noqa: E402
 
 nonebot.init(driver="~fastapi")
 
+from music_collector import llm as llm_mod  # noqa: E402
 from music_collector import skills as sk  # noqa: E402
 from music_collector import tools as tl  # noqa: E402
 from music_collector import webtool  # noqa: E402
@@ -62,6 +63,28 @@ PAGE_HTML = """<!doctype html>
   <ul><li>要点一：水一定要滚开再下面条</li><li>要点二：煮的时候不要盖锅盖</li></ul>
 </article>
 </body></html>
+"""
+
+#: 第二张完全不同的页面。缓存测试要用它——同一个页面在进程里被反复抽取时，
+#: trafilatura 的去重会让后几次抽出空内容（2.3.1 实测），用两个页面能避开这个坑
+PAGE2_HTML = """<!doctype html>
+<html><head><title>咖啡豆怎么挑 - 手冲笔记</title></head>
+<body><article>
+  <h1>咖啡豆怎么挑</h1>
+  <p>浅烘焙的豆子酸味更明显，适合手冲；中深烘更苦更厚，做意式更稳。</p>
+  <p>买的时候看烘焙日期，两周内的最香，放三个月以上基本只剩焦味了。</p>
+</article></body></html>
+"""
+#: 正文全在 JS 里、静态 HTML 只有 meta 的页面（B 站视频页就是这形状）
+META_ONLY_HTML = """<!doctype html>
+<html><head>
+<title>那个苹果回来了_哔哩哔哩_bilibili</title>
+<meta name="description" content="这回苹果是真的，燃尽了，好久没有这种新 iPhone 的感觉了，视频播放量 30484、弹幕量 430、点赞数 1831">
+<meta property="og:title" content="那个苹果回来了_哔哩哔哩_bilibili">
+<meta property="og:description" content="这回苹果是真的，燃尽了，好久没有这种新 iPhone 的感觉了，视频播放量 30484、弹幕量 430、点赞数 1831">
+<meta name="keywords" content="iPhone,Duo,折叠屏">
+</head>
+<body><div id="app"></div><script>render()</script></body></html>
 """
 
 
@@ -90,6 +113,19 @@ class _Handler(BaseHTTPRequestHandler):
             body = "太短".encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+        elif self.path == "/meta":
+            # 正文是空的（JS 渲染），只有 meta —— 模拟 B 站 / 知乎视频页
+            body = META_ONLY_HTML.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+        elif self.path == "/p2":
+            body = PAGE2_HTML.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+        elif self.path == "/pdf":
+            body = b"%PDF-1.7" + b"0" * 100
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
         elif self.path == "/image":
             body = b"\x89PNG\r\n\x1a\n" + b"0" * 100
             self.send_response(200)
@@ -146,14 +182,114 @@ def test_webtool(port: int) -> None:
     red = asyncio.run(webtool.fetch_page(base + "/redirect", timeout=5, allow_private=True))
     check("跟随重定向（逐跳复核）", red is not None and "面条" in (red or {}).get("text", ""), str(red)[:60])
 
-    for path, label in (("/nope", "404"), ("/image", "图片"), ("/short", "正文过短")):
+    for path, label in (("/nope", "404"), ("/short", "正文过短且没有 meta")):
         got = asyncio.run(webtool.fetch_page(base + path, timeout=5, allow_private=True))
         check(f"{label} 返回 None", got is None, str(got)[:60])
+
+    # 图片 / PDF 不再是「抓不到」，而是明确的非文本结果（让模型知道别再重试）
+    for path, want_kind in (("/image", "image"), ("/pdf", "binary")):
+        got = asyncio.run(webtool.fetch_page(base + path, timeout=5, allow_private=True))
+        check(f"{want_kind} 归到非文本而非 None",
+              bool(got) and got.get("kind") == want_kind, str(got)[:80])
+        check(f"{want_kind} 不带正文", not (got or {}).get("text"), str(got)[:80])
+
+    # 正文抽不出来 → 退回 meta（B 站那种页面以前会被判成没抓到）
+    meta_page = asyncio.run(webtool.fetch_page(base + "/meta", timeout=5, max_chars=500,
+                                               allow_private=True))
+    check("正文为空时用 meta 兜底", meta_page is not None and meta_page.get("source") == "meta",
+          str(meta_page)[:80])
+    check("兜底内容里有简介", "燃尽了" in (meta_page or {}).get("text", ""),
+          (meta_page or {}).get("text", "")[:80])
+    check("兜底的标题不是空的", bool((meta_page or {}).get("title")), str(meta_page)[:80])
+    check("重复的 og:description 不重复列",
+          (meta_page or {}).get("text", "").count("燃尽了") == 1,
+          (meta_page or {}).get("text", ""))
 
     check("不存在的域名不抛异常",
           asyncio.run(webtool.fetch_page("http://no-such-host.invalid/", timeout=3)) is None)
     check("内网地址默认拒绝",
           asyncio.run(webtool.fetch_page(base + "/", timeout=3)) is None)
+
+
+# ------------------------------------------------------------------ 抓取增强
+
+
+def test_webtool_extras(port: int) -> None:
+    print("\n[1b] webtool 增强：资源分类 / meta 兜底 / 缓存 / 提示语")
+    for ct, want in (
+        ("text/html; charset=utf-8", "text"),
+        ("application/xhtml+xml", "text"),
+        ("", "text"),
+        ("image/png", "image"),
+        ("image/webp; charset=binary", "image"),
+        ("application/pdf", "binary"),
+        ("video/mp4", "binary"),
+        ("audio/mpeg", "binary"),
+        ("application/octet-stream", "binary"),
+        ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "binary"),
+    ):
+        got = webtool.classify_resource_kind(ct)
+        check(f"分类 {ct or '(空)'} → {want}", got == want, got)
+
+    check("图片猜出 .png", webtool.suggested_extension("image/png") == ".png")
+    check("PDF 猜出 .pdf", webtool.suggested_extension("application/pdf") == ".pdf")
+    check("没见过的类型返回空串", webtool.suggested_extension("application/x-nope") == "")
+
+    # 缓存键：query 要保留（内容常常就在 query 里），fragment 和尾斜杠要去掉
+    check("大小写归一",
+          webtool.normalize_url("HTTPS://Example.COM/A") == "https://example.com/A",
+          webtool.normalize_url("HTTPS://Example.COM/A"))
+    check("去掉 fragment",
+          webtool.normalize_url("https://a.com/x#top") == "https://a.com/x",
+          webtool.normalize_url("https://a.com/x#top"))
+    check("去掉尾斜杠",
+          webtool.normalize_url("https://a.com/x/") == "https://a.com/x",
+          webtool.normalize_url("https://a.com/x/"))
+    check("⚠️ 保留 query（丢了会命中错页面）",
+          webtool.normalize_url("https://a.com/p?id=2") == "https://a.com/p?id=2",
+          webtool.normalize_url("https://a.com/p?id=2"))
+    check("默认端口去掉",
+          webtool.normalize_url("https://a.com:443/x") == "https://a.com/x",
+          webtool.normalize_url("https://a.com:443/x"))
+
+    img = webtool.non_text_guidance("https://a.com/x.png", "image/png", "image")
+    check("图片提示语说要「别再抓」", "不要重复抓" in img, img)
+    check("图片提示语带 Content-Type", "image/png" in img, img)
+    pdf = webtool.non_text_guidance("https://a.com/x.pdf", "application/pdf", "binary")
+    check("文件提示语说抓不到正文", "不是网页" in pdf, pdf)
+    check("文件提示语建议贴文字", "贴成文字" in pdf, pdf)
+
+    # 缓存：第二次不该再真抓。**用 /p2**——同一个页面在进程里反复抽取时
+    # trafilatura 的去重会让后几次抽空（2.3.1 实测），换页能避开这个干扰
+    base = f"http://127.0.0.1:{port}"
+    webtool.clear_cache()
+    first = asyncio.run(webtool.fetch_page(base + "/p2", timeout=5, max_chars=0,
+                                           allow_private=True))
+    check("第一次抓：不是缓存", bool(first) and first.get("cached") is False, str(first)[:60])
+    check("正文真的抽到了", "咖啡豆" in (first or {}).get("text", ""),
+          (first or {}).get("text", "")[:60])
+    check("缓存里有一条", webtool.cache_size() == 1, str(webtool.cache_size()))
+    second = asyncio.run(webtool.fetch_page(base + "/p2", timeout=5, max_chars=0,
+                                            allow_private=True))
+    check("第二次命中缓存", bool(second) and second.get("cached") is True, str(second)[:60])
+    check("缓存来源标记为 cache", (second or {}).get("source") == "cache", str(second)[:60])
+    check("命中缓存也不丢正文", "咖啡豆" in (second or {}).get("text", ""),
+          (second or {}).get("text", "")[:60])
+    # 命中缓存时仍然按本次的 max_chars 裁
+    narrow = asyncio.run(webtool.fetch_page(base + "/p2", timeout=5, max_chars=20,
+                                            allow_private=True))
+    check("命中缓存也按本次 max_chars 截断",
+          bool(narrow) and len(narrow.get("text", "")) <= 21,
+          str((narrow or {}).get("text", "")))
+
+    webtool.clear_cache()
+    asyncio.run(webtool.fetch_page(base + "/p2", timeout=5, cache_minutes=0, allow_private=True))
+    check("cache_minutes=0 时不缓存", webtool.cache_size() == 0, str(webtool.cache_size()))
+
+    webtool.clear_cache()
+    asyncio.run(webtool.fetch_page(base + "/nope", timeout=5, allow_private=True))
+    check("失败结果不进缓存", webtool.cache_size() == 0, str(webtool.cache_size()))
+    webtool.clear_cache()
 
 
 # ------------------------------------------------------------------ 工具注册表
@@ -263,6 +399,85 @@ async def _fetch_url_cases() -> None:
         out = await tl.dispatch(tool_list, "fetch_url", {"url": "https://example.com/b"}, ctx)
         check("抓不到时告诉模型别编造", "不要编造" in out, out)
     finally:
+        webtool.fetch_page = original
+
+    # 非文本资源：要说清「别再抓」，而不是笼统失败
+    async def image(url, **kwargs):
+        return {"url": url, "title": "", "text": "", "kind": "image",
+                "content_type": "image/png", "source": "extract", "cached": False}
+
+    webtool.fetch_page = image  # type: ignore[assignment]
+    try:
+        out = await tl.dispatch(tool_list, "fetch_url", {"url": "https://example.com/a.png"}, ctx)
+        check("图片 → 明确说别再抓", "不要重复抓" in out, out[:100])
+        check("图片 → 不冒充「抓不到」", "不要编造" not in out, out[:100])
+    finally:
+        webtool.fetch_page = original
+
+    # 正文抽不出、用 meta 兜底时，要告诉模型「这不是全文」
+    async def meta(url, **kwargs):
+        return {"url": url, "title": "视频页",
+                "text": "Description: 这回苹果是真的，燃尽了，好久没有这种新 iPhone 的感觉了",
+                "kind": "text", "content_type": "text/html", "source": "meta", "cached": False}
+
+    webtool.fetch_page = meta  # type: ignore[assignment]
+    try:
+        out = await tl.dispatch(tool_list, "fetch_url", {"url": "https://example.com/v"}, ctx)
+        check("meta 兜底要标注不是全文", "不是全文" in out, out[:120])
+    finally:
+        webtool.fetch_page = original
+
+    # 命中缓存要说明，模型才不会以为是刚抓的
+    async def cached(url, **kwargs):
+        return {"url": url, "title": "t", "text": "刚抓到的内容", "kind": "text",
+                "content_type": "text/html", "source": "cache", "cached": True}
+
+    webtool.fetch_page = cached  # type: ignore[assignment]
+    try:
+        out = await tl.dispatch(tool_list, "fetch_url", {"url": "https://example.com/c"}, ctx)
+        check("命中缓存要标注", "缓存" in out, out[:120])
+    finally:
+        webtool.fetch_page = original
+
+    # 长文 + 给了 prompt → 走摘要，而不是把前 2000 字硬塞给它
+    long_text = "散热一般，续航还行。" * 600   # 6000 字，超过 fetch_summarize_chars
+    seen: dict = {}
+
+    async def very_long(url, **kwargs):
+        seen["max_chars"] = kwargs.get("max_chars")
+        return {"url": url, "title": "长评测", "text": long_text, "kind": "text",
+                "content_type": "text/html", "source": "extract", "cached": False}
+
+    async def fake_complete(prompt, cfg, **kwargs):
+        seen["prompt"] = prompt
+        return "散热一般，续航还行，屏幕亮度够用。", ""
+
+    original_complete = llm_mod.llm_bot.complete
+    llm_mod.llm_bot.complete = fake_complete  # type: ignore[assignment]
+    webtool.fetch_page = very_long  # type: ignore[assignment]
+    try:
+        out = await tl.dispatch(
+            tool_list, "fetch_url",
+            {"url": "https://example.com/long", "prompt": "散热怎么样"}, ctx,
+        )
+        check("摘要时不再预先截断正文", seen.get("max_chars") == 0, str(seen.get("max_chars")))
+        check("摘要问题进了 prompt", "散热怎么样" in (seen.get("prompt") or ""),
+              (seen.get("prompt") or "")[:80])
+        check("返回的是摘要而不是原文", "屏幕亮度够用" in out, out[:120])
+        check("标注了已摘要", "已按你的问题摘要" in out, out[:120])
+
+        # 摘要失败 → 退回截断，不能让整次抓取白费
+        async def bad_complete(prompt, cfg, **kwargs):
+            return "", "error: 502"
+
+        llm_mod.llm_bot.complete = bad_complete  # type: ignore[assignment]
+        out = await tl.dispatch(
+            tool_list, "fetch_url",
+            {"url": "https://example.com/long", "prompt": "散热怎么样"}, ctx,
+        )
+        check("摘要失败退回截断的正文", "散热一般" in out and len(out) < 3000, str(len(out)))
+    finally:
+        llm_mod.llm_bot.complete = original_complete  # type: ignore[assignment]
         webtool.fetch_page = original
 
 
@@ -580,6 +795,7 @@ def main() -> None:
     thread.start()
     try:
         test_webtool(port)
+        test_webtool_extras(port)
         test_tools_registry()
         test_fetch_url_tool()
         test_skills()

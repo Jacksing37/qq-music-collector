@@ -342,6 +342,9 @@ llm:
   web_tool: true              # 提供 fetch_url（模型需要时自己抓网页正文）
   fetch_chars: 2000           # fetch_url 返回的正文最多多少字
   fetch_timeout: 15.0         # fetch_url 超时秒数
+  fetch_cache_minutes: 15     # 同一链接缓存多久，0 = 每次都重抓
+  fetch_summarize: true       # 模型带 prompt 时，长网页按问题摘要
+  fetch_summarize_chars: 4000 # 正文超过多少字才摘要
   web_search: false           # 提供 web_search（模型自己搜网页）；走 Bing 公开页面，搜密了会被要验证码
   search_max: 5               # 一次搜几条（1~8）
   search_snippet_chars: 200   # 每条摘要上限，0=不截

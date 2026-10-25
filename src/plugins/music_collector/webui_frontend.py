@@ -1622,6 +1622,7 @@ const BOT_GROUPS=[
       + "⚠️ <b>允许执行技能脚本</b>等于「模型能让你服务器上跑代码」，只在完全信任技能来源时打开。",
    keys:["llm.tools","llm.tool_rounds","llm.tool_chars",
          "llm.web_tool","llm.fetch_chars","llm.fetch_timeout",
+         "llm.fetch_cache_minutes","llm.fetch_summarize","llm.fetch_summarize_chars",
          "llm.web_search","llm.search_max","llm.search_snippet_chars",
          "llm.search_timeout","llm.search_interval",
          "llm.skills","llm.skills_dir","llm.skill_body_chars","llm.skill_file_chars",

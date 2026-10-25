@@ -136,22 +136,88 @@ class Tool:
 
 # ---------------------------------------------------------------- 网页
 
-async def _handle_fetch_url(args: dict, ctx: ToolContext) -> str:
+#: 摘要时最多把多少字原文喂给模型。再多就是烧钱，而且长文摘要质量并不会更好
+SUMMARIZE_INPUT_CHARS = 12000
+
+
+async def _summarize_page(ctx: "ToolContext", want: str, title: str, url: str, text: str) -> str:
+    """让模型按「它想知道什么」把长网页摘一遍。失败返回空串（上层退回截断）。
+
+    为什么值得多一次调用：``fetch_chars`` 默认 2000 字是**截开头**。群里贴一篇
+    两万字的评测、问「散热怎么样」，截断版里可能压根没有散热那一段——模型只能
+    说没提到。摘要则是拿着全文回答问题。
+    """
+    # 延迟导入：llm 模块依赖 tools（registry），模块级导入会绕成环
+    from .llm import llm_bot
+
+    body = text[:SUMMARIZE_INPUT_CHARS]
+    ask = (
+        f"网页地址：{url}\n"
+        f"网页标题：{title}\n\n"
+        f"我想知道：{want}\n\n"
+        f"网页正文：\n{body}"
+    )
+    out, why = await llm_bot.complete(
+        ask,
+        ctx.cfg,
+        system=(
+            "你在读一个网页，按用户想知道的问题摘出要点。"
+            "只输出摘要本身，不要开场白、不要说「根据网页」、不要复述网页结构。"
+            "网页里没有的内容就说没提到，别补。"
+        ),
+        max_tokens=700,
+        temperature=0.2,
+    )
+    if not out:
+        logger.debug(f"[tools] 网页摘要失败（{why}）→ 退回截断")
+        return ""
+    return out.strip()
+
+
+async def _handle_fetch_url(args: dict, ctx: "ToolContext") -> str:
     url = str(args.get("url") or "").strip()
+    want = str(args.get("prompt") or "").strip()
     if not webtool.url_is_fetchable(url):
         return "错误：需要一个完整的 http/https 网址。"
+    summarize = bool(want) and bool(ctx.cfg.fetch_summarize)
     page = await webtool.fetch_page(
         url,
         timeout=ctx.cfg.fetch_timeout,
-        max_chars=ctx.cfg.fetch_chars,
+        # 要摘要就别先截断，否则摘要用的还是残页
+        max_chars=0 if summarize else ctx.cfg.fetch_chars,
+        cache_minutes=ctx.cfg.fetch_cache_minutes,
     )
     if not page:
         return (
             f"没能取到 {url} 的内容：可能打不开、需要登录，或者是 JS 渲染出来的页面。"
             "不要编造里面的内容；可以告诉用户你打不开这个链接。"
         )
+    kind = page.get("kind") or "text"
+    if kind != "text":
+        # 图片 / PDF / 音视频：明确告诉它读不了、别再抓，而不是一句「抓不到」让它重试
+        return webtool.non_text_guidance(
+            page.get("url") or url, page.get("content_type") or "", kind
+        )
+
     title = page.get("title") or "（无标题）"
-    return f"标题：{title}\n网址：{page['url']}\n正文：\n{page['text']}"
+    final_url = page.get("url") or url
+    text = page.get("text") or ""
+    notes: list[str] = []
+    if page.get("cached"):
+        notes.append("（用的是刚才那次抓到的缓存，没有重新请求）")
+    if page.get("source") == "meta":
+        notes.append("（正文抽不出来，下面是这一页的标题/描述，不是全文）")
+
+    if summarize and len(text) > int(ctx.cfg.fetch_summarize_chars):
+        summary = await _summarize_page(ctx, want, title, final_url, text)
+        if summary:
+            notes.append(f"（原文 {len(text)} 字，已按你的问题摘要）")
+            head = "\n".join(notes)
+            return f"标题：{title}\n网址：{final_url}\n{head}\n\n{summary}"
+
+    text = webtool.clip_text(text, ctx.cfg.fetch_chars)
+    head = ("\n" + "\n".join(notes)) if notes else ""
+    return f"标题：{title}\n网址：{final_url}{head}\n正文：\n{text}"
 
 
 FETCH_URL = Tool(
@@ -160,12 +226,21 @@ FETCH_URL = Tool(
         "抓取一个网页，返回标题和正文（已去掉导航、广告和脚本）。"
         "当用户发来链接、而你需要知道里面到底写了什么时调用；"
         "只对 http/https 网址有效，抓不到会明确告诉你失败。"
+        "长网页如果带上 prompt 说明你想找什么，会按那个问题摘要，比看截断的原文更准。"
+        "图片、PDF、音视频读不了，会明确告诉你别再抓。"
         "如果只是闲聊、或已经知道答案，不要调用它。"
     ),
     parameters={
         "type": "object",
         "properties": {
             "url": {"type": "string", "description": "完整网址，含 http:// 或 https://"},
+            "prompt": {
+                "type": "string",
+                "description": (
+                    "你想从这一页里找什么（例如「散热和续航怎么样」）。"
+                    "给了且正文很长时会按它摘要；省略就直接返回正文原文"
+                ),
+            },
         },
         "required": ["url"],
     },

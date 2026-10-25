@@ -566,6 +566,14 @@ class LLMConfig(BaseModel):
     fetch_chars: int = Field(2000, ge=200, le=12000)
     #: fetch_url 的超时秒数
     fetch_timeout: float = Field(15.0, ge=3, le=60)
+    #: fetch_url 的缓存分钟数：同一个 URL 在这段时间内只真抓一次。
+    #: 群里同一个链接常被几个人先后贴上，模型也可能两轮里抓两次；0 = 不缓存
+    fetch_cache_minutes: float = Field(15.0, ge=0, le=1440)
+    #: 让模型按「它想知道什么」给长网页做摘要（而不是硬截前 N 字）。
+    #: 只有它调用 fetch_url 时带了 prompt 才会触发，代价是多一轮模型调用
+    fetch_summarize: bool = True
+    #: 正文超过这么多字才值得摘要。太短直接给原文更省，也更准
+    fetch_summarize_chars: int = Field(4000, ge=500, le=100000)
     #: 是否提供 web_search（让模型自己搜网页）。**默认关**：搜的是 Bing 的
     #: 公开 HTML 端点，机房 IP 搜密了会吃验证码，确认能跑再打开
     web_search: bool = False
