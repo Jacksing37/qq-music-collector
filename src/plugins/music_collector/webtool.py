@@ -68,8 +68,46 @@ _HEADERS = {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
     ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6",
 }
+
+#: 会按「有没有设备 cookie」判断爬虫的站点。**同一个机房 IP**，带一个随机的
+#: ``buvid3`` 就是 200，不带就是 412 —— 实测阿里云出口访问 B 站，光换 UA 没用，
+#: 加上这个 cookie 立刻正常。值本来是站点下发的设备 id，首次访问者也没有，
+#: 我们自己造一个，只为让请求看起来像普通浏览器第一次来。
+_DEVICE_COOKIE_HOSTS = ("bilibili.com",)
+#: 进程内复用的设备 cookie（同一次访问里换值反而更像异常）
+_DEVICE_COOKIE: str = ""
+
+
+def _buvid3() -> str:
+    global _DEVICE_COOKIE
+    if not _DEVICE_COOKIE:
+        import uuid
+
+        _DEVICE_COOKIE = f"buvid3={uuid.uuid4().hex.upper()}infoc"
+    return _DEVICE_COOKIE
+
+
+def headers_for(url: str) -> dict:
+    """按目标站点补请求头。
+
+    目前只对 B 站补 ``Referer`` + 设备 cookie：它的 412 不是「你被封了 IP」那么简单，
+    裸请求（哪怕 UA 正常）一律 412，补上这两样就能拿到正常页面。
+    其他站点保持原样，免得给所有网站都带一个莫名其妙的 cookie。
+    """
+    headers = dict(_HEADERS)
+    try:
+        host = (urlsplit(url or "").hostname or "").lower()
+    except ValueError:
+        return headers
+    for base in _DEVICE_COOKIE_HOSTS:
+        if host == base or host.endswith("." + base):
+            headers["Referer"] = f"https://{base}/"
+            headers["Cookie"] = _buvid3()
+            break
+    return headers
 
 #: 明确是「二进制 / 文档」的 Content-Type，不算网页。
 #: 和 ``image/*`` / ``video/*`` / ``audio/*`` 一起归到非文本
@@ -460,7 +498,7 @@ async def fetch_page(
     ctype = ""
     try:
         async with httpx.AsyncClient(
-            timeout=float(timeout), headers=_HEADERS, follow_redirects=False
+            timeout=float(timeout), headers=headers_for(current), follow_redirects=False
         ) as client:
             raw = b""
             for _ in range(MAX_REDIRECTS + 1):

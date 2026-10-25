@@ -250,6 +250,25 @@ def test_webtool_extras(port: int) -> None:
     check("PDF 猜出 .pdf", webtool.suggested_extension("application/pdf") == ".pdf")
     check("没见过的类型返回空串", webtool.suggested_extension("application/x-nope") == "")
 
+    # B 站要带设备 cookie，否则同一个机房 IP 也会 412；别人不许带上这个 cookie
+    for url, want in (
+        ("https://www.bilibili.com/video/BV1htTe6qEU1/", True),
+        ("https://api.bilibili.com/x/web-interface/view?bvid=x", True),
+        ("https://bilibili.com/", True),
+        ("https://example.com/a", False),
+        ("https://notbilibili.com/a", False),   # 后缀要按点边界比，不能只 endswith
+    ):
+        got = webtool.headers_for(url)
+        check(f"{'带' if want else '不带'}设备 cookie：{url[:40]}",
+              ("Cookie" in got) == want, str(got.get("Cookie"))[:40])
+    bili_h = webtool.headers_for("https://www.bilibili.com/x")
+    check("B 站带 Referer", bili_h.get("Referer") == "https://bilibili.com/", bili_h.get("Referer"))
+    check("设备 cookie 是 buvid3", "buvid3=" in bili_h.get("Cookie", ""), bili_h.get("Cookie", ""))
+    check("同一进程内 cookie 值不跳变",
+          bili_h.get("Cookie") == webtool.headers_for("https://www.bilibili.com/y").get("Cookie"))
+    check("所有请求都带 Accept",
+          "Accept" in webtool.headers_for("https://example.com/"))
+
     # 缓存键：query 要保留（内容常常就在 query 里），fragment 和尾斜杠要去掉
     check("大小写归一",
           webtool.normalize_url("HTTPS://Example.COM/A") == "https://example.com/A",
