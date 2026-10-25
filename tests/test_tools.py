@@ -122,6 +122,10 @@ class _Handler(BaseHTTPRequestHandler):
             body = PAGE2_HTML.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+        elif self.path == "/blocked":
+            body = b"<html><body>error</body></html>"
+            self.send_response(412)
+            self.send_header("Content-Type", "text/html")
         elif self.path == "/pdf":
             body = b"%PDF-1.7" + b"0" * 100
             self.send_response(200)
@@ -192,6 +196,17 @@ def test_webtool(port: int) -> None:
         check(f"{want_kind} 归到非文本而非 None",
               bool(got) and got.get("kind") == want_kind, str(got)[:80])
         check(f"{want_kind} 不带正文", not (got or {}).get("text"), str(got)[:80])
+
+    # 站点拒绝抓取（412 等）要和「地址不存在」分开：前者重试没用
+    webtool.clear_cache()
+    blocked = asyncio.run(webtool.fetch_page(base + "/blocked", timeout=5, allow_private=True))
+    check("412 → kind=blocked", bool(blocked) and blocked.get("kind") == "blocked",
+          str(blocked)[:80])
+    check("412 带状态码", (blocked or {}).get("status") == 412, str(blocked)[:80])
+    check("被拒的不进缓存", webtool.cache_size() == 0, str(webtool.cache_size()))
+    bmsg = webtool.blocked_guidance("https://a.com/x", 412)
+    check("拒绝提示语说「不是地址写错」", "不是地址写错" in bmsg, bmsg)
+    check("拒绝提示语说「重试也没用」", "重试也没用" in bmsg, bmsg)
 
     # 正文抽不出来 → 退回 meta（B 站那种页面以前会被判成没抓到）
     meta_page = asyncio.run(webtool.fetch_page(base + "/meta", timeout=5, max_chars=500,
@@ -398,6 +413,19 @@ async def _fetch_url_cases() -> None:
     try:
         out = await tl.dispatch(tool_list, "fetch_url", {"url": "https://example.com/b"}, ctx)
         check("抓不到时告诉模型别编造", "不要编造" in out, out)
+    finally:
+        webtool.fetch_page = original
+
+    # 站点拒绝抓取：要跟「打不开」区分开，别让它反复重试
+    async def blocked(url, **kwargs):
+        return {"url": url, "title": "", "text": "", "kind": "blocked", "status": 412,
+                "content_type": "text/html", "source": "extract", "cached": False}
+
+    webtool.fetch_page = blocked  # type: ignore[assignment]
+    try:
+        out = await tl.dispatch(tool_list, "fetch_url", {"url": "https://example.com/z"}, ctx)
+        check("被站点拒绝 → 说不是地址写错", "不是地址写错" in out, out[:120])
+        check("被站点拒绝 → 带状态码", "412" in out, out[:120])
     finally:
         webtool.fetch_page = original
 

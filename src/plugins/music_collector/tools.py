@@ -193,6 +193,9 @@ async def _handle_fetch_url(args: dict, ctx: "ToolContext") -> str:
             "不要编造里面的内容；可以告诉用户你打不开这个链接。"
         )
     kind = page.get("kind") or "text"
+    if kind == "blocked":
+        # 412 / 403 / 429：站点反爬拦了。和「地址不存在」分开说，否则它会一直重试
+        return webtool.blocked_guidance(page.get("url") or url, int(page.get("status") or 0))
     if kind != "text":
         # 图片 / PDF / 音视频：明确告诉它读不了、别再抓，而不是一句「抓不到」让它重试
         return webtool.non_text_guidance(

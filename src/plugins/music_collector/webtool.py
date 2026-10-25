@@ -93,6 +93,10 @@ _BINARY_TYPES = frozenset(
     }
 )
 
+#: 这些状态码表示「站点拒绝抓取」，不是「地址不存在」。区别要说给模型听：
+#: 前者别重试、换个来源；后者该老实说页面没了
+_BLOCKED_STATUS = frozenset({401, 403, 407, 412, 429, 451})
+
 #: Content-Type → 扩展名（只用于提示语，不落盘）
 _EXT_BY_TYPE = {
     "image/png": ".png",
@@ -168,6 +172,21 @@ def non_text_guidance(url: str, content_type: str, kind: str) -> str:
         f"这个地址是文件或音视频（{detail}），不是网页，抓不到正文。\n"
         "**不要重复抓同一个地址**。如果是 PDF / 文档，请发的人把关键内容贴成文字；"
         "视频和音频同理，你读不了里面的内容。"
+    )
+
+
+def blocked_guidance(url: str, status: int) -> str:
+    """站点明确拒绝抓取（412 / 403 / 429 …）时回给模型的话。
+
+    和「地址不存在」要分开说：这种**不是地址写错**，重试也没用，而且很多站
+    （B 站、知乎）对机房 IP 就是这个反应。
+    """
+    hint = "（更像限流，隔几分钟再试可能有戏）" if status == 429 else ""
+    return (
+        f"{url} 这个站点拒绝了抓取（HTTP {status}）{hint}。\n"
+        "这**不是地址写错**，多半是开了反爬或拦机房 IP，**反复重试也没用**。\n"
+        "可以告诉用户你看不了这个站，请他把关键内容贴成文字；"
+        "或者换个来源（别的地方也讲过同一件事）。不要编造里面的内容。"
     )
 
 
@@ -405,8 +424,9 @@ async def fetch_page(
 
     - ``url``：跟完重定向后的最终地址
     - ``title`` / ``text``：标题与正文（非文本资源时都是空）
-    - ``kind``：``text`` / ``image`` / ``binary``
+    - ``kind``：``text`` / ``image`` / ``binary`` / ``blocked``（站点拒绝抓取）
     - ``content_type``：原始 Content-Type（提示语要用）
+    - ``status``：仅 ``kind="blocked"`` 时有，HTTP 状态码
     - ``source``：``extract``（trafilatura 抽到正文）/ ``meta``（退回页面元信息）/
       ``cache``（命中缓存）
     - ``cached``：是否来自缓存
@@ -455,10 +475,26 @@ async def fetch_page(
                         if not url_is_fetchable(current):
                             return None
                         continue  # 下一跳重新做公网校验
+                    ctype = (resp.headers.get("content-type") or "").lower()
                     if resp.status_code >= 400:
+                        # 412 / 403 / 429 是「对方不让我抓」，不是地址写错。这个区别
+                        # 对模型很重要：前者别重试、换来源；后者该说页面不存在
+                        if resp.status_code in _BLOCKED_STATUS:
+                            logger.debug(
+                                f"[web] 被站点拒绝 {resp.status_code}: {current[:80]}"
+                            )
+                            return {
+                                "url": current,
+                                "title": "",
+                                "text": "",
+                                "kind": "blocked",
+                                "status": resp.status_code,
+                                "content_type": ctype,
+                                "source": "extract",
+                                "cached": False,
+                            }
                         logger.debug(f"[web] 抓取失败 {resp.status_code}: {current[:80]}")
                         return None
-                    ctype = (resp.headers.get("content-type") or "").lower()
                     # 图片 / PDF / 音视频：**读不了**，但要让模型知道「读不了的是这种
                     # 东西」，而不是笼统的「抓不到」——后者会让它反复重试同一地址
                     kind = classify_resource_kind(ctype)
