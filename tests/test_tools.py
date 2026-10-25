@@ -262,13 +262,54 @@ def test_webtool_extras(port: int) -> None:
         check(f"{'带' if want else '不带'}设备 cookie：{url[:40]}",
               ("Cookie" in got) == want, str(got.get("Cookie"))[:40])
     bili_h = webtool.headers_for("https://www.bilibili.com/x")
-    check("B 站带 Referer", bili_h.get("Referer") == "https://bilibili.com/", bili_h.get("Referer"))
-    check("B 站带 Origin", bili_h.get("Origin") == "https://bilibili.com", bili_h.get("Origin"))
+    check("B 站带 Referer（必须 www）",
+          bili_h.get("Referer") == "https://www.bilibili.com/", bili_h.get("Referer"))
+    check("B 站带 Origin（必须 www）",
+          bili_h.get("Origin") == "https://www.bilibili.com", bili_h.get("Origin"))
     check("设备 cookie 是 buvid3", "buvid3=" in bili_h.get("Cookie", ""), bili_h.get("Cookie", ""))
     check("同一进程内 cookie 值不跳变",
           bili_h.get("Cookie") == webtool.headers_for("https://www.bilibili.com/y").get("Cookie"))
     check("所有请求都带 Accept",
           "Accept" in webtool.headers_for("https://example.com/"))
+
+    # BV 号提取：只认 bilibili 域名下的 /video/BVxxx
+    for url, want in (
+        ("https://www.bilibili.com/video/BV1htTe6qEU1/", "BV1htTe6qEU1"),
+        ("https://www.bilibili.com/video/BV1htTe6qEU1?spm_id_from=333.999", "BV1htTe6qEU1"),
+        ("https://m.bilibili.com/video/BV1htTe6qEU1", "BV1htTe6qEU1"),
+        ("https://www.bilibili.com/read/cv123456", ""),
+        ("https://b23.tv/abcdefg", ""),                 # 短链要跟一跳才知道是哪个视频
+        ("https://notbilibili.com/video/BV1htTe6qEU1", ""),
+    ):
+        got = webtool.bilibili_bvid(url)
+        check(f"BV 号提取: {url[:48]} → {want or '(无)'}", got == want, got)
+
+    # 接口 JSON → 可读文本（纯函数，不联网）
+    video_data = {
+        "bvid": "BV1htTe6qEU1",
+        "title": "初星学园 「歌声は君いろ」Official MV",
+        "owner": {"name": "学园偶像大师"},
+        "duration": 145,
+        "pubdate": 1761350400,
+        "desc": "演唱：姬崎莉波（CV.薄井友里）",
+        "stat": {"view": 123456, "danmaku": 789, "like": 4567},
+        "pages": [{"part": "MV"}, {"part": "花絮"}],
+    }
+    built = webtool.bilibili_text(video_data)
+    check("B 站接口 → 有文本", bool(built) and built["source"] == "bilibili", str(built)[:60])
+    check("B 站接口 → 带标题", "初星学园" in (built or {}).get("text", ""))
+    check("B 站接口 → 带 UP 主", "UP主：学园偶像大师" in (built or {}).get("text", ""))
+    check("B 站接口 → 时长格式化", "时长 2:25" in (built or {}).get("text", ""),
+          (built or {}).get("text", "")[:120])
+    check("B 站接口 → 带播放量", "播放 123456" in (built or {}).get("text", ""))
+    check("B 站接口 → 带简介", "姬崎莉波" in (built or {}).get("text", ""))
+    check("B 站接口 → 多分P 列出来", "分P（共 2）" in (built or {}).get("text", ""))
+    check("B 站接口 → url 用 BV 号",
+          (built or {}).get("url") == "https://www.bilibili.com/video/BV1htTe6qEU1",
+          str((built or {}).get("url")))
+    check("没标题的视频数据 → None", webtool.bilibili_text({"title": ""}) is None)
+    check("乱数据不炸", webtool.bilibili_text({"title": "x", "owner": None, "stat": None,
+                                               "pages": None}) is not None)
 
     # 缓存键：query 要保留（内容常常就在 query 里），fragment 和尾斜杠要去掉
     check("大小写归一",

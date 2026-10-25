@@ -210,6 +210,8 @@ async def _handle_fetch_url(args: dict, ctx: "ToolContext") -> str:
         notes.append("（用的是刚才那次抓到的缓存，没有重新请求）")
     if page.get("source") == "meta":
         notes.append("（正文抽不出来，下面是这一页的标题/描述，不是全文）")
+    if page.get("source") == "bilibili":
+        notes.append("（B 站视频页抓不了，下面是接口返回的视频信息——你没看视频本身，别装作看过）")
 
     if summarize and len(text) > int(ctx.cfg.fetch_summarize_chars):
         summary = await _summarize_page(ctx, want, title, final_url, text)

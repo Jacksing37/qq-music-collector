@@ -72,11 +72,13 @@ _HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6",
 }
 
-#: 会按「有没有设备 cookie」判断爬虫的站点。**同一个机房 IP**，带一个随机的
-#: ``buvid3`` 就是 200，不带就是 412 —— 实测阿里云出口访问 B 站，光换 UA 没用，
-#: 加上这个 cookie 立刻正常。值本来是站点下发的设备 id，首次访问者也没有，
-#: 我们自己造一个，只为让请求看起来像普通浏览器第一次来。
+#: 需要「设备 cookie + www 站点 Referer」的站点。实测阿里云出口访问 B 站：
+#: 裸请求 412、只换 UA 还是 412、**带上 Referer/Origin（必须是 ``www.`` 那个站点）
+#: 加一个随机 ``buvid3`` 才 200**。``buvid3`` 本来是站点下发的设备 id，
+#: 首次访问者也没有，我们自己造一个，只为让请求看起来像普通浏览器第一次来。
 _DEVICE_COOKIE_HOSTS = ("bilibili.com",)
+#: 这些站点的 Referer/Origin 必须写 ``www.`` 前缀，少一个 ``www.`` 会 403
+_DEVICE_COOKIE_ORIGIN = "https://www.bilibili.com"
 #: 进程内复用的设备 cookie（同一次访问里换值反而更像异常）
 _DEVICE_COOKIE: str = ""
 
@@ -93,9 +95,11 @@ def _buvid3() -> str:
 def headers_for(url: str) -> dict:
     """按目标站点补请求头。
 
-    目前只对 B 站补 ``Referer`` + 设备 cookie：它的 412 不是「你被封了 IP」那么简单，
-    裸请求（哪怕 UA 正常）一律 412，补上这两样就能拿到正常页面。
+    目前只对 B 站补：``Referer`` / ``Origin``（必须带 ``www.``）+ 设备 cookie。
     其他站点保持原样，免得给所有网站都带一个莫名其妙的 cookie。
+
+    注意这**不足以**抓到 B 站的视频页 HTML（实测照样 412），真正管用的是走 API，
+    见 :func:`_bilibili_video`。
     """
     headers = dict(_HEADERS)
     try:
@@ -104,8 +108,8 @@ def headers_for(url: str) -> dict:
         return headers
     for base in _DEVICE_COOKIE_HOSTS:
         if host == base or host.endswith("." + base):
-            headers["Referer"] = f"https://{base}/"
-            headers["Origin"] = f"https://{base}"
+            headers["Referer"] = _DEVICE_COOKIE_ORIGIN + "/"
+            headers["Origin"] = _DEVICE_COOKIE_ORIGIN
             headers["Cookie"] = _buvid3()
             break
     return headers
@@ -449,6 +453,108 @@ def clip_text(text: str, max_chars: int) -> str:
     return text
 
 
+#: B 站视频页的 HTML **从机房出口一律 412**——实测换 UA、加 Referer、加设备 cookie
+#: 都没用（本地能抓、服务器不能）。但同一个 IP 打 ``api.bilibili.com/x/web-interface/
+#: view`` 是 200，返回的 JSON 还比 HTML 干净（标题 / UP主 / 时长 / 播放 / 简介 / 分P）。
+#: 所以视频链接直接走接口，别去啃那个页面。
+_BILI_VIDEO = re.compile(r"/video/(BV[0-9A-Za-z]{10})", re.I)
+_BILI_API = "https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
+
+
+def bilibili_bvid(url: str) -> str:
+    """从 B 站视频链接里抠出 BV 号；不是视频链接返回空串。"""
+    try:
+        parts = urlsplit(url or "")
+    except ValueError:
+        return ""
+    host = (parts.hostname or "").lower()
+    if not (host == "bilibili.com" or host.endswith(".bilibili.com")):
+        return ""
+    match = _BILI_VIDEO.search(parts.path or "")
+    return match.group(1) if match else ""
+
+
+def bilibili_text(data: dict) -> Optional[dict]:
+    """把 ``view`` 接口的 ``data`` 拼成一段可读文本；不像视频数据就返回 ``None``。
+
+    抽成纯函数是为了能离线测——网络那半截在 :func:`_bilibili_video` 里。
+    """
+    if not isinstance(data, dict):
+        return None
+    title = str(data.get("title") or "").strip()
+    if not title:
+        return None
+    lines = [f"标题：{title}"]
+    owner = str((data.get("owner") or {}).get("name") or "").strip()
+    if owner:
+        lines.append(f"UP主：{owner}")
+    meta: list[str] = []
+    duration = int(data.get("duration") or 0)
+    if duration:
+        meta.append(f"时长 {duration // 60}:{duration % 60:02d}")
+    stat = data.get("stat") or {}
+    for key, label in (("view", "播放"), ("danmaku", "弹幕"), ("like", "点赞")):
+        value = stat.get(key)
+        if value:
+            meta.append(f"{label} {value}")
+    if meta:
+        lines.append(" ｜ ".join(meta))
+    pub = int(data.get("pubdate") or 0)
+    if pub:
+        lines.append("发布：" + time.strftime("%Y-%m-%d", time.localtime(pub)))
+    desc = str(data.get("desc") or "").strip()
+    if desc:
+        lines.append("简介：\n" + desc)
+    pages = data.get("pages") or []
+    if len(pages) > 1:
+        parts = [str(p.get("part") or "").strip() for p in pages[:8]]
+        lines.append(f"分P（共 {len(pages)}）：" + " / ".join(p for p in parts if p))
+    bvid = str(data.get("bvid") or "").strip()
+    return {
+        "url": f"https://www.bilibili.com/video/{bvid}" if bvid else "https://www.bilibili.com/",
+        "title": title[:120],
+        "text": "\n".join(lines),
+        "kind": "text",
+        "content_type": "application/json",
+        "source": "bilibili",
+        "cached": False,
+    }
+
+
+async def _bilibili_video(bvid: str, timeout: float) -> Optional[dict]:
+    """走 B 站开放接口取视频信息，拼成一段可读文本。失败返回 ``None``（不抛）。"""
+    api = _BILI_API.format(bvid=bvid)
+    try:
+        async with httpx.AsyncClient(
+            timeout=float(timeout), headers=headers_for(api), follow_redirects=False
+        ) as client:
+            resp = await client.get(api)
+    except httpx.HTTPError as exc:
+        logger.debug(f"[web] B 站接口请求失败（{bvid}）: {exc}")
+        return None
+    if resp.status_code != 200:
+        logger.debug(f"[web] B 站接口返回 {resp.status_code}（{bvid}）")
+        return None
+    try:
+        data = (resp.json() or {}).get("data") or {}
+    except ValueError:
+        logger.debug(f"[web] B 站接口返回的不是 JSON（{bvid}）")
+        return None
+    page = bilibili_text(data)
+    if page and not page.get("url", "").endswith(bvid):
+        page["url"] = f"https://www.bilibili.com/video/{bvid}"
+    return page
+
+
+def _finish(payload: dict, key: str, cache_ttl: float, max_chars: int) -> dict:
+    """缓存 + 按本次 ``max_chars`` 裁剪，统一出口。"""
+    if cache_ttl > 0:
+        _cache_put(key, payload, cache_ttl)
+    result = dict(payload)
+    result["text"] = clip_text(result.get("text") or "", max_chars)
+    return result
+
+
 async def fetch_page(
     url: str,
     *,
@@ -467,7 +573,7 @@ async def fetch_page(
     - ``content_type``：原始 Content-Type（提示语要用）
     - ``status``：仅 ``kind="blocked"`` 时有，HTTP 状态码
     - ``source``：``extract``（trafilatura 抽到正文）/ ``meta``（退回页面元信息）/
-      ``cache``（命中缓存）
+      ``bilibili``（走 B 站接口，只有视频信息、不含视频内容）/ ``cache``（命中缓存）
     - ``cached``：是否来自缓存
 
     ``allow_private`` 只给测试用（本机起 http.server 验证解析与 SSRF 逻辑），
@@ -496,7 +602,16 @@ async def fetch_page(
             logger.debug(f"[web] 命中缓存（{cache_minutes:g} 分钟内）: {current[:80]}")
             return hit
 
+    # B 站视频：别去啃 HTML（机房出口一律 412），直接走接口。顺带内容也更干净
+    bvid = bilibili_bvid(current)
+    if bvid:
+        page = await _bilibili_video(bvid, timeout)
+        if page:
+            logger.debug(f"[web] B 站视频走接口: {bvid}")
+            return _finish(page, key, cache_ttl, max_chars)
+
     ctype = ""
+    blocked: Optional[dict] = None
     try:
         async with httpx.AsyncClient(
             timeout=float(timeout), headers=headers_for(current), follow_redirects=False
@@ -522,7 +637,9 @@ async def fetch_page(
                             logger.debug(
                                 f"[web] 被站点拒绝 {resp.status_code}: {current[:80]}"
                             )
-                            return {
+                            # 跳出循环再决定：短链（b23.tv）跳到 B 站视频时，
+                            # 走到这里才知道它其实是个视频，还能改走接口救回来
+                            blocked = {
                                 "url": current,
                                 "title": "",
                                 "text": "",
@@ -532,6 +649,7 @@ async def fetch_page(
                                 "source": "extract",
                                 "cached": False,
                             }
+                            break
                         logger.debug(f"[web] 抓取失败 {resp.status_code}: {current[:80]}")
                         return None
                     # 图片 / PDF / 音视频：**读不了**，但要让模型知道「读不了的是这种
@@ -567,6 +685,16 @@ async def fetch_page(
         logger.debug(f"[web] 抓取出错: {exc}")
         return None
 
+    if blocked is not None:
+        # 被拒的是个 B 站视频？（短链跳过来、或接口路径没匹配上）改走接口再试一次
+        bvid_late = bilibili_bvid(blocked.get("url") or "")
+        if bvid_late:
+            page = await _bilibili_video(bvid_late, timeout)
+            if page:
+                logger.debug(f"[web] 页面被拒，改走 B 站接口: {bvid_late}")
+                return _finish(page, key, cache_ttl, max_chars)
+        return blocked
+
     html = _decode(raw)
     title, text = extract_content(html, current)
     source = "extract"
@@ -595,7 +723,4 @@ async def fetch_page(
         "source": source,
         "cached": False,
     }
-    if cache_ttl > 0:
-        _cache_put(key, payload, cache_ttl)
-    payload["text"] = clip_text(text, max_chars)
-    return payload
+    return _finish(payload, key, cache_ttl, max_chars)
