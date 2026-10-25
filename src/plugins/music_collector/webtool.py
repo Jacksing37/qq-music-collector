@@ -105,6 +105,7 @@ def headers_for(url: str) -> dict:
     for base in _DEVICE_COOKIE_HOSTS:
         if host == base or host.endswith("." + base):
             headers["Referer"] = f"https://{base}/"
+            headers["Origin"] = f"https://{base}"
             headers["Cookie"] = _buvid3()
             break
     return headers

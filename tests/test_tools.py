@@ -263,6 +263,7 @@ def test_webtool_extras(port: int) -> None:
               ("Cookie" in got) == want, str(got.get("Cookie"))[:40])
     bili_h = webtool.headers_for("https://www.bilibili.com/x")
     check("B 站带 Referer", bili_h.get("Referer") == "https://bilibili.com/", bili_h.get("Referer"))
+    check("B 站带 Origin", bili_h.get("Origin") == "https://bilibili.com", bili_h.get("Origin"))
     check("设备 cookie 是 buvid3", "buvid3=" in bili_h.get("Cookie", ""), bili_h.get("Cookie", ""))
     check("同一进程内 cookie 值不跳变",
           bili_h.get("Cookie") == webtool.headers_for("https://www.bilibili.com/y").get("Cookie"))
