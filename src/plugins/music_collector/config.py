@@ -699,6 +699,25 @@ class MemoryConfig(BaseModel):
     #: 群聊记录在库里保留多少天（0 = 永久）。上下文与整理素材共用这张表
     keep_days: float = Field(180, ge=0, le=3650)
 
+    # ------------------------------------------------ 风格卡（学「怎么说话」）
+    #: 是否学这个群的说话方式。关掉后不蒸馏、也不注入风格卡（已生成的 md 留在盘上）
+    style_enabled: bool = True
+    #: 多久重新学一次（小时）。风格是慢变量，一天一次足够；0 = 不自动学
+    style_hours: float = Field(24.0, ge=0, le=720)
+    #: 采样窗口：只看最近多少天的群消息（0 = 不限）
+    style_days: float = Field(30.0, ge=0, le=3650)
+    #: 一次最多从库里捞多少条消息参与采样
+    style_scan: int = Field(2000, ge=100, le=50000)
+    #: 每人最多贡献几条原话。**这是防「学到某一个人的口癖」的关键**：
+    #: 群里总有一两个人说话特别多，不设配额时素材会全变成他们的个人风格
+    style_per_person: int = Field(6, ge=1, le=50)
+    #: 风格卡注入的系统提示词预算（字）。独立于 ``inject_chars``，不挤成员档案
+    style_chars: int = Field(800, ge=200, le=4000)
+    #: 蒸馏用哪个模型；留空 = 跟 ``llm.model``
+    style_model: str = ""
+    #: 蒸馏结果的 token 上限（要输出 JSON + 原话）
+    style_max_tokens: int = Field(1200, ge=256, le=8000)
+
 
 class AppConfig(BaseModel):
     #: 总开关

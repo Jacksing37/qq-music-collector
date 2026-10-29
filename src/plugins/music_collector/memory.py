@@ -222,6 +222,11 @@ def _atomic_write(path: Path, text: str) -> None:
         raise
 
 
+#: 给同包其它模块复用（``style.py`` 写风格卡用）。做成公开别名，调用方就不用引用
+#: 下划线名字，原子写也只在这里实现一次。
+atomic_write = _atomic_write
+
+
 def load_person(mem: MemoryConfig, group_id: int, uid: object) -> Optional[Person]:
     path = _path_for(mem, group_id, str(uid))
     if not path.exists():
@@ -529,6 +534,19 @@ def render_for_prompt(mem: MemoryConfig, group_id: int) -> str:
                 clipped += "…"
             blocks.append("【群概况】\n" + clipped)
             used += len(clipped)
+
+        # 风格卡排在群概况之后、成员档案之前：它是「怎么说话」，比「谁是谁」更该
+        # 被先读到。**不计入 used**——它有独立预算 style_chars，不该挤掉成员档案。
+        # 延迟导入避开循环依赖：style 要用 memory 的路径与原子写。
+        try:
+            from . import style as style_mod
+
+            style_block = style_mod.render_for_prompt(mem, group_id)
+        except Exception as exc:  # noqa: BLE001 — 风格卡坏了不能耽误回话
+            logger.warning(f"[memory] 组装风格卡失败（本次不带）: {exc}")
+            style_block = ""
+        if style_block:
+            blocks.append(style_block.strip("\n"))
 
         people = list_people(mem, group_id)
         rows: list[str] = []

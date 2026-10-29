@@ -403,3 +403,12 @@ memory:
   digest_model: ''            # 整理用哪个模型，留空 = 跟主模型一致
   digest_max_tokens: 4000     # 整理输出上限（要输出 JSON，别太小）
   keep_days: 180              # 群聊记录保留天数（上下文与整理素材共用），0=永久
+  # ---- 风格卡：学「这个群怎么说话」（和上面的「谁是谁」是两件事）----
+  style_enabled: true         # 是否学群说话方式并注入；关掉后已生成的 style.md 留在盘上
+  style_hours: 24.0           # 多久重学一次；0 = 只能手动点「重学风格」
+  style_days: 30.0            # 采样窗口：只看最近多少天的群消息，0=不限
+  style_scan: 2000            # 一次最多从库里捞多少条消息参与采样
+  style_per_person: 6         # 每人最多贡献几条原话（防「学到某一个人的口癖」）
+  style_chars: 800            # 注入预算（字）；独立于 inject_chars，不挤成员档案
+  style_model: ''             # 蒸馏用哪个模型，留空 = 跟主模型一致
+  style_max_tokens: 1200      # 蒸馏输出上限（JSON + 原话）

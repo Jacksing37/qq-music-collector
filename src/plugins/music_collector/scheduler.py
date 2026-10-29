@@ -25,6 +25,7 @@ from nonebot.log import logger
 from nonebot_plugin_apscheduler import scheduler
 
 from . import banter as banter_mod
+from . import style as style_mod
 from .bot_utils import safe_send_group, send_report
 from .config import group_overrides
 from .digest import digest_all
@@ -273,6 +274,29 @@ async def job_memory_digest() -> None:
         logger.warning(f"[memory] 定时整理有 {len(bad)} 个群失败：{detail}")
 
 
+async def job_style() -> None:
+    """定时学「这个群怎么说话」，把结果写成风格卡。
+
+    和 ``job_memory_digest`` 是**两件事**：那个归纳「谁是谁」（事实），这个归纳
+    「怎么说话」（语体 + 原话样本）。合成一个任务的话，一份 JSON 要同时承载两种
+    粒度，两边的质量都会掉。失败只写日志，群里什么都看不到。
+    """
+    mem = service.config.memory
+    if not (mem.enabled and mem.style_enabled) or mem.style_hours <= 0:
+        return
+    result = await style_mod.distill_all()
+    if not result:
+        return
+    ok = {g: r for g, r in result.items() if r.get("status") == "ok"}
+    bad = {g: r for g, r in result.items() if r.get("status") == "error"}
+    if ok:
+        parts = [f"群{g}:{r.get('chars', 0)}字" for g, r in ok.items()]
+        logger.info("[style] 定时学习完成 " + "；".join(parts))
+    if bad:
+        detail = "；".join(f"群{g}:{r.get('why', '')}" for g, r in bad.items())
+        logger.warning(f"[style] 定时学习有 {len(bad)} 个群失败：{detail}")
+
+
 async def job_banter() -> None:
     """主动搭话：非勿扰时段里自己冒个泡，接住群里最近的一段对话。
 
@@ -336,6 +360,7 @@ _JOB_FUNCS = {
     "prune": job_prune,
     "descfix": job_descfix,
     "memory_digest": job_memory_digest,
+    "style": job_style,
     "banter": job_banter,
 }
 
@@ -405,6 +430,14 @@ def _memory_spec() -> Optional[tuple[str, str, dict]]:
     return ("memory_digest", "interval", {"hours": float(mem.digest_hours)})
 
 
+def _style_spec() -> Optional[tuple[str, str, dict]]:
+    """风格学习：进程级任务，按全局配置的间隔跑。"""
+    mem = service.config.memory
+    if not (mem.enabled and mem.style_enabled) or mem.style_hours <= 0:
+        return None
+    return ("style", "interval", {"hours": float(mem.style_hours)})
+
+
 def _banter_spec() -> Optional[tuple[str, str, dict]]:
     """主动搭话：只排**第一次**，之后由任务自己在每次跑完时重排。
 
@@ -444,7 +477,8 @@ def reload_jobs() -> tuple[bool, str]:
         return False, f"时间配置有误，定时任务未生效：{exc}"
 
     for extra in (
-        _clean_spec(), _prune_spec(), _descfix_spec(), _memory_spec(), _banter_spec()
+        _clean_spec(), _prune_spec(), _descfix_spec(), _memory_spec(),
+        _style_spec(), _banter_spec(),
     ):
         if extra is not None:
             specs.append(extra)

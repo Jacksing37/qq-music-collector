@@ -43,6 +43,7 @@ from . import logbuffer
 from . import llmtrace as llmtrace_mod
 from . import memory as memory_mod
 from . import skills as skills_mod
+from . import style as style_mod
 from . import tools as tools_mod
 from . import webtool
 from .llm import (
@@ -643,6 +644,47 @@ FIELD_META["memory.keep_days"] = (
     "群聊记录（上下文 + 整理素材）留多少天；0 = 永久保留",
     False,
 )
+FIELD_META["memory.style_enabled"] = (
+    "学群说话方式",
+    "从群聊里归纳句长、标点、口头禅，并挑几条原话当范例注入；"
+    "这是「像人」的关键，和记「谁是谁」是两件事",
+    False,
+)
+FIELD_META["memory.style_hours"] = (
+    "重学间隔（小时）",
+    "多久重学一次群说话方式；风格是慢变量，一天一次足够，0 = 只能手动点",
+    False,
+)
+FIELD_META["memory.style_days"] = (
+    "采样天数",
+    "只看最近多少天的群消息，避免用半年前的口气；0 = 不限",
+    False,
+)
+FIELD_META["memory.style_scan"] = (
+    "采样条数上限",
+    "一次最多从库里捞多少条消息参与采样（活跃群先到先得，取最新的这些）",
+    False,
+)
+FIELD_META["memory.style_per_person"] = (
+    "每人原话上限",
+    "每人最多贡献几条原话。设小一点，避免风格卡变成某一个人的口癖合集",
+    False,
+)
+FIELD_META["memory.style_chars"] = (
+    "风格卡注入字数",
+    "风格卡最多多少字进系统提示词；独立预算，不会挤掉成员档案和人设",
+    False,
+)
+FIELD_META["memory.style_model"] = (
+    "风格蒸馏用模型",
+    "留空 = 跟主模型一致；这是「读一批话、写一段观察」，小模型通常够用",
+    False,
+)
+FIELD_META["memory.style_max_tokens"] = (
+    "风格输出上限",
+    "蒸馏结果是 JSON（含原话），太小会被截断导致整轮作废",
+    False,
+)
 FIELD_META["llm.max_input_chars"] = (
     "提问字数上限",
     "单条提问最多取多少字送模型，超出截断；0 = 不限",
@@ -963,7 +1005,7 @@ def current_values(group_id: typing.Optional[int] = None) -> dict[str, object]:
 #: 改到这些前缀的配置后必须重建定时任务。定时任务里有一类是「注册时就把下次时刻
 #: 算死了」（主动搭话用 ``date`` 触发器、群记忆用 ``interval``），光改配置不重建，
 #: 新值要等旧的那次跑完、甚至要等下次重启才生效。
-_RELOAD_PREFIXES = ("window", "llm.banter", "memory.digest_hours")
+_RELOAD_PREFIXES = ("window", "llm.banter", "memory.digest_hours", "memory.style_hours")
 
 
 def needs_job_reload(values: dict[str, object]) -> bool:
@@ -1808,10 +1850,17 @@ async def _api_memory(request: Request):
             # 下次自动整理的时刻。它是 interval 任务（每 digest_hours 小时），
             # 光写「每 6 小时」看不出下一个点在哪，页面上直接给出来最省事
             "next_digest": _fmt_when(next_run_of("memory_digest")),
+            "style": {
+                "body": style_mod.read_style(mem, gid),
+                **style_mod.stats(mem, gid),
+                "next": _fmt_when(next_run_of("style")),
+            },
             "limits": {
                 "note_chars": int(mem.note_chars),
                 "inject_chars": int(mem.inject_chars),
                 "digest_hours": float(mem.digest_hours),
+                "style_chars": int(mem.style_chars),
+                "style_hours": float(mem.style_hours),
             },
         })
 
@@ -1865,6 +1914,27 @@ async def _api_memory(request: Request):
             msg = res.get("why") or "没有新内容"
         else:
             msg = f"整理失败：{res.get('why') or '未知原因'}"
+        return JSONResponse(
+            {"ok": status == "ok", "message": msg, "detail": res},
+            status_code=200 if status == "ok" else 400,
+        )
+
+    if action == "style":
+        # 手改风格卡：rotate=False，人写的东西不必进历史版本
+        ok, msg = style_mod.write_style(
+            mem, gid, str(body.get("text") or ""), rotate=False
+        )
+        return JSONResponse({"ok": ok, "message": msg}, status_code=200 if ok else 400)
+
+    if action == "style_distill":
+        res = await style_mod.distill_group(gid, mem=mem, force=True)
+        status = res.get("status")
+        if status == "ok":
+            msg = f"风格卡已更新：{res.get('rows', 0)} 条原话 → {res.get('chars', 0)} 字"
+        elif status == "skipped":
+            msg = res.get("why") or "没有新内容"
+        else:
+            msg = f"学习失败：{res.get('why') or '未知原因'}（旧卡保留）"
         return JSONResponse(
             {"ok": status == "ok", "message": msg, "detail": res},
             status_code=200 if status == "ok" else 400,

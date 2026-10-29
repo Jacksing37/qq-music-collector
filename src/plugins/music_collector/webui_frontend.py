@@ -596,6 +596,24 @@ button:disabled{opacity:.5;cursor:not-allowed}
           <button id="memGroupSave">💾 保存群概况</button>
         </div>
       </div>
+
+      <div class="card">
+        <h2><span class="dot"></span>说话方式 · 风格卡</h2>
+        <p class="muted">和上面的档案是两件事：档案记「谁是谁」，这里记<b>「这个群怎么说话」</b>——句长、分行、标点、
+          口头禅，外加几条<b>逐字原话</b>当范例。模型看着这几条原话说话，比读十条「语气活泼」有用得多。</p>
+        <p class="muted">这段有独立的字数预算（默认 800 字），<b>不占人设、也不挤成员档案</b>；原话只用来学口气，
+          提示词里已经写明「别照搬内容、别声称是某个人说的」。手改完保存就生效，不用重启。</p>
+        <div class="row" style="margin-bottom:8px">
+          <span class="muted" id="memStyleMeta">—</span>
+          <div class="spacer"></div>
+          <button id="memStyleDistill" title="马上重看一遍最近的群聊，重新归纳说话方式（会覆盖当前这张，旧版存 style.v1.md）">🔄 重学一次</button>
+        </div>
+        <textarea id="memStyleBody" class="mem-body" style="min-height:150px"
+          placeholder="（还没有风格卡。等群里聊够 10 条有内容的话，点「重学一次」，或者等定时任务自己跑）"></textarea>
+        <div class="row end" style="margin-top:10px">
+          <button id="memStyleSave" class="btn-primary">💾 保存风格卡</button>
+        </div>
+      </div>
     </section>
 
     <!-- 昵称映射 -->
@@ -1994,6 +2012,7 @@ async function loadMemoryGroup(){
     $("#memPeople").innerHTML='<div class="empty">还没有任何记录。等群里聊几句、或者去「机器人 → 工具与技能」确认记忆是开着的。</div>';
     $("#memStats").textContent = MEM.nextDigest ? `下次自动整理 ${MEM.nextDigest}` : "—";
     $("#memGroupNote").value="";
+    $("#memStyleBody").value=""; $("#memStyleMeta").textContent="—";
     $("#memBody").value=""; $("#memNick").value=""; $("#memUid").value=""; $("#memMeta").textContent="";
     return;
   }
@@ -2007,6 +2026,15 @@ async function loadMemoryGroup(){
     + ` ｜ 每 ${(j.limits&&j.limits.digest_hours)||0} 小时自动整理`
     + (j.next_digest ? ` ｜ 下次 ${j.next_digest}` : " ｜ 下次：未排期");
   $("#memGroupNote").value=j.group_note||"";
+  const sty=j.style||{};
+  $("#memStyleBody").value=sty.body||"";
+  const styChars=sty.chars||0, styBudget=(j.limits&&j.limits.style_chars)||800;
+  $("#memStyleMeta").textContent = sty.body
+    ? `${styChars}/${styBudget} 字 ｜ 来源 ${sty.source_msgs||0} 条原话 ｜ 更新于 ${sty.updated_at||"?"}`
+      + (sty.next ? ` ｜ 下次重学 ${sty.next}` : " ｜ 下次：未排期")
+    : `还没有风格卡（每 ${(j.limits&&j.limits.style_hours)||0} 小时自动学一次`
+      + (sty.next ? `，下次 ${sty.next}` : "") + `）`;
+  if(sty.body && !sty.enabled) memMsg("风格学习当前是关着的（卡还能看和改，但不会再自动更新）","bad");
   if(!j.enabled) memMsg("记忆功能当前是关闭的（档案还能看和改，但不会再自动更新）","bad");
   renderMemPeople();
   if(MEM.people.length) await selectMemPerson(MEM.people[0].uid);
@@ -2080,6 +2108,26 @@ async function saveMemGroupNote(){
   }catch(e){ memMsg("保存失败: "+e.message,"bad"); }
 }
 
+async function saveMemStyle(){
+  try{
+    const j=await memPost({action:"style", group:MEM.gid, text:$("#memStyleBody").value});
+    memMsg(j.message||(j.ok?"已保存":"保存失败"), j.ok?"ok":"bad");
+    if(j.ok) await loadMemoryGroup();
+  }catch(e){ memMsg("保存失败: "+e.message,"bad"); }
+}
+
+async function distillStyle(){
+  const btn=$("#memStyleDistill");
+  if(!confirm("重学会用模型重看一遍最近的群聊，覆盖当前这张卡（旧版留在 style.v1.md）。继续？")) return;
+  btn.disabled=true; memMsg("正在读最近的群聊、归纳说话方式…（可能要几十秒）");
+  try{
+    const j=await memPost({action:"style_distill", group:MEM.gid});
+    memMsg(j.message||(j.ok?"已更新":"没学成"), j.ok?"ok":"bad");
+    if(j.ok) await loadMemoryGroup();
+  }catch(e){ memMsg("学习失败: "+e.message,"bad"); }
+  finally{ btn.disabled=false; }
+}
+
 async function digestNow(){
   const btn=$("#memDigest");
   btn.disabled=true; memMsg("正在让模型读这段时间的群聊…（可能要几十秒）");
@@ -2097,6 +2145,8 @@ $("#memDigest").onclick=digestNow;
 $("#memSave").onclick=saveMemPerson;
 $("#memDelete").onclick=deleteMemPerson;
 $("#memGroupSave").onclick=saveMemGroupNote;
+$("#memStyleSave").onclick=saveMemStyle;
+$("#memStyleDistill").onclick=distillStyle;
 $("#memSearch").oninput=renderMemPeople;
 
 /* ---- 昵称映射 ---- */
