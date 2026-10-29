@@ -719,6 +719,35 @@ class MemoryConfig(BaseModel):
     style_max_tokens: int = Field(1200, ge=256, le=8000)
 
 
+class PersonaConfig(BaseModel):
+    """人设修订：听群友抱怨「AI 味」，攒够了**提议**怎么改系统提示词。
+
+    和 ``memory`` 的区别：记忆是「往提示词里加东西」（档案、风格卡，自动生效）；
+    这里动的是 ``llm.system_prompt`` 本身——**永远只出建议**，采纳与否由人在网页上定。
+    理由见 :mod:`persona` 的模块注释（自激漂移、被注入、改坏无声）。
+
+    数据落在 ``data/persona/``（全局，不分群）：``feedback.jsonl`` 是抱怨流水，
+    ``proposals/*.json`` 是历次建议，都能直接看、直接删。
+    """
+
+    #: 总开关。关掉后不识别、不记录、也不提议（已有的 jsonl 原样留盘）
+    enabled: bool = True
+    #: 是否实时识别抱怨。关掉只保留手动提议（适合先观察一段时间再开）
+    detect: bool = True
+    #: 「机器人刚说完话」的判定窗口（分钟）。超出这个时间的抱怨可能与它无关
+    window_minutes: float = Field(3.0, ge=0, le=120)
+    #: 攒够多少条新抱怨才提议。太小会让人设变成各次抱怨的缝合怪
+    min_feedback: int = Field(5, ge=1, le=100)
+    #: 多久检查一次（小时）。默认一周；0 = 只在网页上手动点
+    propose_hours: float = Field(168.0, ge=0, le=8760)
+    #: 提议用哪个模型；留空 = 跟 ``llm.model``
+    model: str = ""
+    #: 提议输出的 token 上限（要输出 JSON）
+    max_tokens: int = Field(2000, ge=256, le=16000)
+    #: 改完之后人设的总字数上限。超出的人设会挤占对话预算
+    persona_limit: int = Field(2500, ge=500, le=8000)
+
+
 class AppConfig(BaseModel):
     #: 总开关
     enabled: bool = True
@@ -748,6 +777,7 @@ class AppConfig(BaseModel):
     logs: LogsConfig = Field(default_factory=LogsConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    persona: PersonaConfig = Field(default_factory=PersonaConfig)
 
 
 #: 键名里含这些词的配置项属于敏感信息，写日志时打码，别把密码 / cookie / 密钥记进日志页
@@ -937,7 +967,9 @@ GLOBAL_ONLY_KEYS: frozenset[str] = frozenset({
 #: - ``llm.``：这一段的「哪些群启用」由 ``llm.groups`` 自己决定，且按要求只能
 #:   在网页端改；如果允许按群覆盖，会出现「按群改了 base_url 但 groups 没包含自己」
 #:   这种谁也说不清的组合，所以整段锁在全局层
-GLOBAL_ONLY_PREFIXES: tuple[str, ...] = ("logs.", "cache.", "netease.", "llm.", "memory.")
+GLOBAL_ONLY_PREFIXES: tuple[str, ...] = (
+    "logs.", "cache.", "netease.", "llm.", "memory.", "persona.",
+)
 
 
 def is_group_scopable(dotted_key: str) -> bool:

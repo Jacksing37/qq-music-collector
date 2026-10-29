@@ -348,14 +348,16 @@ def test_config_and_schema() -> None:
     config_manager.config.llm.model = "test-model"
 
     check("配置页不含 llm 段", all(s["key"] != "llm" for s in CONFIG_SCHEMA))
-    check("「机器人」页含 llm 与 memory 两段",
-          [s["key"] for s in BOT_SCHEMA] == ["llm", "memory"])
+    check("「机器人」页含 llm / memory / persona 三段",
+          [s["key"] for s in BOT_SCHEMA] == ["llm", "memory", "persona"])
     mem_fields = [f["key"] for f in BOT_SCHEMA[1]["fields"]]
     check("memory 段带 enabled/listen/digest_hours", "memory.enabled" in mem_fields
           and "memory.listen" in mem_fields and "memory.digest_hours" in mem_fields)
     check("memory 段是可编辑配置（字段数 ≥ 10）", len(mem_fields) >= 10, str(len(mem_fields)))
     mem_keys = [k for k in KEY_INDEX if k.startswith("memory.")]
     check("PATCH 认得 memory.*（KEY_INDEX 完整）", len(mem_keys) >= 12, str(len(mem_keys)))
+    pn_keys = [k for k in KEY_INDEX if k.startswith("persona.")]
+    check("PATCH 认得 persona.*（KEY_INDEX 完整）", len(pn_keys) >= 8, str(len(pn_keys)))
     llm_keys = [k for k in KEY_INDEX if k.startswith("llm.")]
     check("PATCH 仍认得 llm.*（KEY_INDEX 完整）", len(llm_keys) >= 14, str(len(llm_keys)))
     check("api_key 在表单里是密码框", KEY_INDEX["llm.api_key"]["secret"] is True)

@@ -614,6 +614,28 @@ button:disabled{opacity:.5;cursor:not-allowed}
           <button id="memStyleSave" class="btn-primary">💾 保存风格卡</button>
         </div>
       </div>
+
+      <div class="card">
+        <h2><span class="dot"></span>人设修订建议 · 全局</h2>
+        <p class="muted">风格卡是「往提示词里加东西」，这里动的是<b>人设本身</b>（<code>llm.system_prompt</code>）。
+          群友嫌它「AI 味」「官腔」「念稿」时，机器人会把那句话连同<b>它当时说的那句</b>记下来；
+          攒够门槛后每周检查一次，让模型指出人设里哪几句该改。</p>
+        <p class="muted"><b>只出建议，不会自己改。</b>让模型评价自己、再改自己，它会单调地滑向「范文腔」——
+          越改越不像人，而且不会自己纠回来。所以每条建议都摆出「原句 → 改成什么 → 依据哪条抱怨」，
+          你自己复制去「机器人设置」里改。改坏了随时能改回来。</p>
+        <div class="row" style="margin-bottom:8px">
+          <span class="muted" id="pnStats">加载中…</span>
+          <div class="spacer"></div>
+          <button id="pnClear" title="把已记录的抱怨清空（不影响已经生成的建议）">🗑 清空抱怨</button>
+          <button id="pnPropose" class="btn-primary" title="不必等阈值和周检查，现在就让模型看一遍">🩺 现在提建议</button>
+        </div>
+        <div class="row" style="margin-bottom:8px"><span class="msg" id="pnMsg"></span></div>
+        <div id="pnList"><div class="empty">还没有建议</div></div>
+        <details style="margin-top:12px">
+          <summary class="muted" style="cursor:pointer">最近的抱怨 <span id="pnCount"></span></summary>
+          <ul class="pv" id="pnFeedback" style="margin-top:8px"><li class="empty">（暂无）</li></ul>
+        </details>
+      </div>
     </section>
 
     <!-- 昵称映射 -->
@@ -2003,6 +2025,7 @@ async function loadMemory(){
       MEM.gid=parseInt(sel.value||"0",10)||0;
     }
     await loadMemoryGroup();
+    await loadPersona();
   }catch(e){ if(e.message!=="unauthorized") memMsg("加载失败: "+e.message,"bad"); }
 }
 
@@ -2128,6 +2151,94 @@ async function distillStyle(){
   finally{ btn.disabled=false; }
 }
 
+/* ---- 人设修订（全局，不分群） ---- */
+function pnMsg(t, kind){
+  const el=$("#pnMsg"); if(!el) return;
+  el.textContent=t||""; el.className="msg"+(kind?(" "+kind):"");
+}
+async function pnPost(body){
+  const r=await api("/api/music-admin/persona",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(body)});
+  return await r.json();
+}
+
+async function loadPersona(){
+  try{
+    const j=await (await api("/api/music-admin/persona")).json();
+    if(!j.ok){ pnMsg(j.message||"读取失败","bad"); return; }
+    const s=j.stats||{}, lim=j.limits||{};
+    $("#pnStats").textContent =
+      `抱怨 ${s.feedback||0} 条（新的 ${s.fresh||0} 条）`
+      + ` ｜ 攒够 ${lim.min_feedback||5} 条才提议`
+      + (j.next_propose ? ` ｜ 下次检查 ${j.next_propose}` : " ｜ 下次：未排期")
+      + ((j.latest&&j.latest.created_at) ? ` ｜ 上次建议 ${j.latest.created_at}` : "");
+    renderPersonaProposals(j.latest||{});
+    renderPersonaFeedback(j.feedback||[]);
+    if(!j.enabled) pnMsg("人设修订当前是关着的（已有的抱怨和建议还留着）","bad");
+    else if(!j.detect) pnMsg("实时识别抱怨没开，只能手动点「现在提建议」","bad");
+  }catch(e){ pnMsg("加载失败: "+e.message,"bad"); }
+}
+
+function renderPersonaProposals(latest){
+  const box=$("#pnList"); box.innerHTML="";
+  const edits=latest.edits||[];
+  if(!edits.length){
+    box.innerHTML='<div class="empty">还没有建议。等群里有人嫌它说话像机器，或者点上面的「现在提建议」手动跑一次。</div>';
+    return;
+  }
+  const head=document.createElement("p");
+  head.className="muted";
+  head.textContent=`${latest.created_at||""} ｜ 基于 ${latest.feedback_count||0} 条抱怨 ｜ 当时人设 ${latest.persona_chars||0} 字`;
+  box.appendChild(head);
+  edits.forEach((e,i)=>{
+    const d=document.createElement("div");
+    d.style.cssText="border:1px solid var(--line-soft,#3333);border-radius:8px;padding:10px 12px;margin-bottom:10px";
+    d.innerHTML=
+      `<div class="muted">#${i+1}　${esc(e.why||"")}</div>`
+      + `<div style="margin:8px 0"><s style="opacity:.6">${esc(e.old||"")}</s></div>`
+      + `<div style="font-weight:500">${esc(e.new||"")}</div>`
+      + `<div class="muted" style="margin-top:8px">依据：${(e.evidence||[]).map(esc).join(" / ")}</div>`;
+    box.appendChild(d);
+  });
+  const tip=document.createElement("p");
+  tip.className="muted";
+  tip.textContent="把「新句」复制去「机器人设置 → 系统提示词」里替换对应那句即可。改完人设会热生效，不用重启。";
+  box.appendChild(tip);
+}
+
+function renderPersonaFeedback(list){
+  const ul=$("#pnFeedback");
+  $("#pnCount").textContent = list.length ? `（${list.length}）` : "";
+  ul.innerHTML="";
+  if(!list.length){ ul.innerHTML='<li class="empty">（暂无）</li>'; return; }
+  list.forEach(f=>{
+    const li=document.createElement("li");
+    li.innerHTML=`<span class="muted">${esc(f.ts||"")} 群${f.group_id||"?"} ${esc(f.nick||"")}</span>：${esc(f.text||"")}`
+      + (f.reply ? `<br><span class="muted">它当时：${esc(f.reply)}</span>` : "");
+    ul.appendChild(li);
+  });
+}
+
+async function proposePersona(){
+  const btn=$("#pnPropose"); btn.disabled=true;
+  pnMsg("正在读人设和最近的抱怨…（可能要几十秒）");
+  try{
+    const j=await pnPost({action:"propose"});
+    pnMsg(j.message||(j.ok?"已生成":"没生成"), j.ok?"ok":"bad");
+    if(j.ok) await loadPersona();
+  }catch(e){ pnMsg("提议失败: "+e.message,"bad"); }
+  finally{ btn.disabled=false; }
+}
+
+async function clearPersona(){
+  if(!confirm("清空所有已记录的抱怨？已生成的建议不受影响。")) return;
+  try{
+    const j=await pnPost({action:"clear"});
+    pnMsg(j.message||(j.ok?"已清空":"清空失败"), j.ok?"ok":"bad");
+    if(j.ok) await loadPersona();
+  }catch(e){ pnMsg("清空失败: "+e.message,"bad"); }
+}
+
 async function digestNow(){
   const btn=$("#memDigest");
   btn.disabled=true; memMsg("正在让模型读这段时间的群聊…（可能要几十秒）");
@@ -2147,6 +2258,8 @@ $("#memDelete").onclick=deleteMemPerson;
 $("#memGroupSave").onclick=saveMemGroupNote;
 $("#memStyleSave").onclick=saveMemStyle;
 $("#memStyleDistill").onclick=distillStyle;
+$("#pnPropose").onclick=proposePersona;
+$("#pnClear").onclick=clearPersona;
 $("#memSearch").oninput=renderMemPeople;
 
 /* ---- 昵称映射 ---- */

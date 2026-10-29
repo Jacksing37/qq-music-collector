@@ -25,6 +25,7 @@ from nonebot.log import logger
 from nonebot_plugin_apscheduler import scheduler
 
 from . import banter as banter_mod
+from . import persona as persona_mod
 from . import style as style_mod
 from .bot_utils import safe_send_group, send_report
 from .config import group_overrides
@@ -297,6 +298,26 @@ async def job_style() -> None:
         logger.warning(f"[style] 定时学习有 {len(bad)} 个群失败：{detail}")
 
 
+async def job_persona() -> None:
+    """定期检查一遍「该不该提议改人设」。攒的抱怨不够就什么都不做。
+
+    注意它**不会改配置**：只落一份建议到 ``data/persona/proposals/``，等人去网页上看。
+    自动采纳不做——自激漂移是单调的，改坏了不会自己纠回来。
+    """
+    pcfg = service.config.persona
+    if not pcfg.enabled or pcfg.propose_hours <= 0:
+        return
+    res = await persona_mod.propose()
+    status = res.get("status")
+    if status == "ok":
+        logger.info(
+            f"[persona] 生成了 {len(res.get('edits') or [])} 条人设修改建议（基于 "
+            f"{(res.get('record') or {}).get('feedback_count', 0)} 条抱怨），去网页上看"
+        )
+    elif status == "error":
+        logger.warning(f"[persona] 提议失败：{res.get('why')}")
+
+
 async def job_banter() -> None:
     """主动搭话：非勿扰时段里自己冒个泡，接住群里最近的一段对话。
 
@@ -361,6 +382,7 @@ _JOB_FUNCS = {
     "descfix": job_descfix,
     "memory_digest": job_memory_digest,
     "style": job_style,
+    "persona": job_persona,
     "banter": job_banter,
 }
 
@@ -438,6 +460,14 @@ def _style_spec() -> Optional[tuple[str, str, dict]]:
     return ("style", "interval", {"hours": float(mem.style_hours)})
 
 
+def _persona_spec() -> Optional[tuple[str, str, dict]]:
+    """人设修订提议：进程级，按周检查。攒不够抱怨时这一跑几乎零成本（只读文件）。"""
+    pcfg = service.config.persona
+    if not pcfg.enabled or pcfg.propose_hours <= 0:
+        return None
+    return ("persona", "interval", {"hours": float(pcfg.propose_hours)})
+
+
 def _banter_spec() -> Optional[tuple[str, str, dict]]:
     """主动搭话：只排**第一次**，之后由任务自己在每次跑完时重排。
 
@@ -478,7 +508,7 @@ def reload_jobs() -> tuple[bool, str]:
 
     for extra in (
         _clean_spec(), _prune_spec(), _descfix_spec(), _memory_spec(),
-        _style_spec(), _banter_spec(),
+        _style_spec(), _persona_spec(), _banter_spec(),
     ):
         if extra is not None:
             specs.append(extra)

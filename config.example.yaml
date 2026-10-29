@@ -412,3 +412,16 @@ memory:
   style_chars: 800            # 注入预算（字）；独立于 inject_chars，不挤成员档案
   style_model: ''             # 蒸馏用哪个模型，留空 = 跟主模型一致
   style_max_tokens: 1200      # 蒸馏输出上限（JSON + 原话）
+
+# 人设修订：听群友抱怨「AI 味」，攒够了给出一条改 llm.system_prompt 的建议。
+# **只出建议，绝不自动改**——模型自己评价自己、再改自己，会单调地滑向「范文腔」。
+# 数据位置：data/persona/feedback.jsonl（抱怨流水）、data/persona/proposals/*.json（建议）
+persona:
+  enabled: true               # 总开关；关掉后不识别、不记录、也不提议
+  detect: true                # 是否实时识别抱怨（先正则粗筛，命中才调模型确认）
+  window_minutes: 3.0         # 只认「机器人刚说完话」这段时间内的抱怨
+  min_feedback: 5             # 攒够多少条新抱怨才提议；太小会让人设变成缝合怪
+  propose_hours: 168.0        # 多久检查一次该不该提议，默认一周；0 = 只手动
+  model: ''                   # 提议用哪个模型，留空 = 跟主模型一致
+  max_tokens: 2000            # 提议输出上限（JSON）
+  persona_limit: 2500         # 改完之后人设的总字数上限，超出的修改一律驳回

@@ -48,6 +48,7 @@ from .llm import disabled_reason as llm_disabled_reason  # noqa: E402
 from .llm import clip_tail, llm_bot  # noqa: E402
 from . import banter as banter_mod  # noqa: E402  被动回复后要重排搭话计时
 from . import memory as memory_mod  # noqa: E402
+from . import persona as persona_mod  # noqa: E402  听群友抱怨「AI 味」，只记不吭声
 from .models import PLATFORM_NAMES, Song  # noqa: E402
 from .naming import build_context, render_template, resolve_alias  # noqa: E402
 from .scheduler import reload_jobs  # noqa: E402
@@ -214,6 +215,20 @@ async def _listen_group_message(bot: Bot, event: GroupMessageEvent) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"[memory] 群{gid} 旁听落库失败: {exc}")
         return
+
+    # 「AI 味」抱怨：**先免费正则粗筛**，命中且机器人刚在群里说过话，才丢后台让模型确认。
+    # 放后台（不 await）是必须的：判官要一次几百 token 的请求，几秒钟，堵在这儿会
+    # 让这条消息的处理停摆；而这条路径上没有任何人等着它的结果。
+    pcfg = service.config.persona
+    if (
+        pcfg.enabled
+        and pcfg.detect
+        and persona_mod.recent_bot_reply(gid, float(pcfg.window_minutes) * 60)
+        and persona_mod.looks_like_complaint(text)
+    ):
+        service._spawn_bg(
+            persona_mod.note_feedback(gid, uid, nick, text, cfg=app_cfg.llm, pcfg=pcfg)
+        )
 
     key = (gid, str(uid))
     now = time.monotonic()
@@ -557,6 +572,8 @@ async def _llm_answer(
     # 它刚在群里说过话 → 主动搭话的计时重新起算。否则排到的那一轮可能紧接着
     # 就自己冒泡，群里看着像抢话；而且刚说完这一两句，可接的素材也还没跟上
     banter_mod.note_reply(group_id)
+    # 记下「它刚才说了什么」：后面群里要是有人嫌弃「AI 味」，判官得知道是哪句话惹的
+    persona_mod.note_bot_spoke(group_id, reply)
     return True, ""
 
 

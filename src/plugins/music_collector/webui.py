@@ -15,6 +15,7 @@ import ast
 import os
 import secrets
 import typing
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -42,6 +43,7 @@ from .config import (
 from . import logbuffer
 from . import llmtrace as llmtrace_mod
 from . import memory as memory_mod
+from . import persona as persona_mod
 from . import skills as skills_mod
 from . import style as style_mod
 from . import tools as tools_mod
@@ -80,6 +82,7 @@ SECTION_TITLES = {
     "logs": "运行日志",
     "llm": "机器人设置",
     "memory": "群记忆",
+    "persona": "人设修订",
 }
 
 #: 配置页分组的展示顺序。网易云登录紧跟「通用设置」，登录 / 重登 / 粘贴 cookie
@@ -685,6 +688,46 @@ FIELD_META["memory.style_max_tokens"] = (
     "蒸馏结果是 JSON（含原话），太小会被截断导致整轮作废",
     False,
 )
+FIELD_META["persona.enabled"] = (
+    "人设修订总开关",
+    "听群友抱怨「AI 味」，攒够了给出一条改人设的建议；**只出建议，不会自己改**",
+    False,
+)
+FIELD_META["persona.detect"] = (
+    "实时识别抱怨",
+    "关掉后只保留手动提议。先用正则粗筛再让模型确认，不会每条消息都调模型",
+    False,
+)
+FIELD_META["persona.window_minutes"] = (
+    "对照窗口（分钟）",
+    "只把「机器人刚说完话」这段时间内的抱怨算数，太久之后的可能与它无关",
+    False,
+)
+FIELD_META["persona.min_feedback"] = (
+    "提议门槛（条）",
+    "攒够多少条新抱怨才提议。太小会让人设变成各次抱怨的缝合怪",
+    False,
+)
+FIELD_META["persona.propose_hours"] = (
+    "检查间隔（小时）",
+    "多久看一次该不该提议，默认一周；0 = 只在网页上手动点",
+    False,
+)
+FIELD_META["persona.model"] = (
+    "提议用模型",
+    "留空 = 跟主模型一致；这一步要看懂人设、又想出改法，别用太小的模型",
+    False,
+)
+FIELD_META["persona.max_tokens"] = (
+    "提议输出上限",
+    "结果是 JSON，太小会被截断导致这一轮白跑",
+    False,
+)
+FIELD_META["persona.persona_limit"] = (
+    "人设总字数上限",
+    "改完之后人设最多多少字；超出的修改一律驳回，避免人设越改越胖",
+    False,
+)
 FIELD_META["llm.max_input_chars"] = (
     "提问字数上限",
     "单条提问最多取多少字送模型，超出截断；0 = 不限",
@@ -929,10 +972,11 @@ def build_schema() -> list[dict]:
 SCHEMA = build_schema()
 KEY_INDEX: dict[str, dict] = {f["key"]: f for s in SCHEMA for f in s["fields"]}
 
-#: ``llm`` / ``memory`` 两段单独挂在「机器人」页，**不再出现在配置页**——避免
-#: 同一个开关在两处都能改、改完互相覆盖。KEY_INDEX 仍然包含它们，所以 PATCH 接口
+#: ``llm`` / ``memory`` / ``persona`` 三段单独挂在「机器人」页，**不再出现在配置页**——
+#: 避免同一个开关在两处都能改、改完互相覆盖。KEY_INDEX 仍然包含它们，所以 PATCH 接口
 #: 照常能写。记忆跟大模型是一体的：没有模型就没有整理，分两页反而更难理解。
-BOT_SECTIONS = ("llm", "memory")
+#: 人设修订同理——它动的就是 ``llm.system_prompt``，跟「机器人设置」放一页最省心。
+BOT_SECTIONS = ("llm", "memory", "persona")
 BOT_SCHEMA = [s for s in SCHEMA if s["key"] in BOT_SECTIONS]
 CONFIG_SCHEMA = [s for s in SCHEMA if s["key"] not in BOT_SECTIONS]
 
@@ -1005,7 +1049,13 @@ def current_values(group_id: typing.Optional[int] = None) -> dict[str, object]:
 #: 改到这些前缀的配置后必须重建定时任务。定时任务里有一类是「注册时就把下次时刻
 #: 算死了」（主动搭话用 ``date`` 触发器、群记忆用 ``interval``），光改配置不重建，
 #: 新值要等旧的那次跑完、甚至要等下次重启才生效。
-_RELOAD_PREFIXES = ("window", "llm.banter", "memory.digest_hours", "memory.style_hours")
+_RELOAD_PREFIXES = (
+    "window",
+    "llm.banter",
+    "memory.digest_hours",
+    "memory.style_hours",
+    "persona.propose_hours",
+)
 
 
 def needs_job_reload(values: dict[str, object]) -> bool:
@@ -1943,6 +1993,93 @@ async def _api_memory(request: Request):
     return JSONResponse({"ok": False, "message": f"未知操作: {action}"}, status_code=400)
 
 
+# -------------------------------------------------------------------- 人设修订
+
+
+async def _api_persona(request: Request):
+    """人设修订：GET 看抱怨与建议，POST 生成建议 / 删建议 / 清空抱怨。
+
+    这里**没有「应用」动作**：采纳一条建议等于改 ``llm.system_prompt``，属于下一步的
+    活（diff 审核 + 版本回滚）。目前只在页面上把 old/new 摆出来，人自己复制去改。
+    """
+    if not _token_ok(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    if request.method == "GET":
+        pcfg = service.config.persona
+        rows = persona_mod.read_feedback(limit=30)
+        feedback = [
+            {
+                "ts": _fmt_ts(row.get("ts")),
+                "group_id": row.get("group_id"),
+                "nick": row.get("nick") or str(row.get("uid") or ""),
+                "text": row.get("text") or "",
+                "reply": row.get("reply") or "",
+            }
+            for row in reversed(rows)
+        ]
+        return JSONResponse({
+            "ok": True,
+            "enabled": bool(pcfg.enabled),
+            "detect": bool(pcfg.detect),
+            "stats": persona_mod.stats(),
+            "limits": {
+                "min_feedback": int(pcfg.min_feedback),
+                "window_minutes": float(pcfg.window_minutes),
+                "propose_hours": float(pcfg.propose_hours),
+                "persona_limit": int(pcfg.persona_limit),
+            },
+            "next_propose": _fmt_when(next_run_of("persona")),
+            "persona": (service.config.llm.system_prompt or "").strip(),
+            "feedback": feedback,
+            "latest": persona_mod.read_latest(),
+            "proposals": persona_mod.list_proposals(limit=8),
+            "root": str(persona_mod.persona_root()),
+        })
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "message": "请求体不是合法 JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "message": "请求体格式不对"}, status_code=400)
+    action = str(body.get("action") or "")
+
+    if action == "propose":
+        res = await persona_mod.propose(force=True)
+        status = res.get("status")
+        if status == "ok":
+            msg = f"生成了 {len(res.get('edits') or [])} 条修改建议，逐条看看要不要采纳"
+        elif status == "skipped":
+            msg = res.get("why") or "没有可提议的材料"
+        else:
+            msg = f"提议失败：{res.get('why') or '未知原因'}"
+        return JSONResponse(
+            {"ok": status == "ok", "message": msg, "detail": res},
+            status_code=200 if status == "ok" else 400,
+        )
+
+    if action == "delete":
+        gone = persona_mod.delete_proposal(str(body.get("name") or ""))
+        return JSONResponse(
+            {"ok": gone, "message": "已删除这份建议" if gone else "没有这份建议"},
+            status_code=200 if gone else 404,
+        )
+
+    if action == "clear":
+        try:
+            path = persona_mod.feedback_path()
+            if path.exists():
+                path.unlink()
+            return JSONResponse({"ok": True, "message": "抱怨记录已清空"})
+        except OSError as exc:
+            return JSONResponse(
+                {"ok": False, "message": f"清空失败：{exc}"}, status_code=400
+            )
+
+    return JSONResponse({"ok": False, "message": f"未知操作: {action}"}, status_code=400)
+
+
 # -------------------------------------------------------------------- 机器人（大模型）
 
 
@@ -2007,7 +2144,7 @@ async def _api_bot(request: Request):
     values = {
         k: v
         for k, v in current_values(None).items()
-        if k.startswith("llm.") or k.startswith("memory.")
+        if k.startswith("llm.") or k.startswith("memory.") or k.startswith("persona.")
     }
     return JSONResponse({
         "schema": BOT_SCHEMA,
@@ -2070,6 +2207,14 @@ def _fmt_when(value: object) -> str:
     """把 APScheduler 的 ``next_run_time`` 渲染成 ``10-25 05:31``；没有就空串。"""
     try:
         return f"{value:%m-%d %H:%M}" if value else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _fmt_ts(value: object) -> str:
+    """Unix 时间戳 → ``10-29 22:40``（按群时区）。转不动就空串。"""
+    try:
+        return datetime.fromtimestamp(float(value), service.resolver.tz).strftime("%m-%d %H:%M")
     except Exception:  # noqa: BLE001
         return ""
 
@@ -2177,6 +2322,7 @@ def register_webui() -> None:
     app.add_api_route("/api/music-admin/logs", _api_logs, methods=["GET", "POST"])
     app.add_api_route("/api/music-admin/llm-trace", _api_llm_trace, methods=["GET", "POST"])
     app.add_api_route("/api/music-admin/memory", _api_memory, methods=["GET", "POST"])
+    app.add_api_route("/api/music-admin/persona", _api_persona, methods=["GET", "POST"])
     logger.info("[music] WebUI 已挂载: http://<本机IP>:8080/music-admin  (需 token 访问)")
 
 

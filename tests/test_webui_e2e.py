@@ -79,14 +79,17 @@ def test_endpoints():
         assert ac.status_code == 200
         assert "logged_in" in ac.json()
 
-        # ---- 机器人页（大模型回复 + 群记忆）：独立一页，配置页不再出现这两段 ----
-        assert all(sec["key"] not in ("llm", "memory") for sec in c.json()["schema"])
+        # ---- 机器人页（大模型回复 + 群记忆 + 人设修订）：独立一页，配置页不再出现这几段 ----
+        assert all(
+            sec["key"] not in ("llm", "memory", "persona") for sec in c.json()["schema"]
+        )
         b = client.get("/api/music-admin/bot", headers=H)
         assert b.status_code == 200
         bj = b.json()
-        assert [sec["key"] for sec in bj["schema"]] == ["llm", "memory"]
+        assert [sec["key"] for sec in bj["schema"]] == ["llm", "memory", "persona"]
         assert any(k.startswith("llm.") for k in bj["values"])
         assert any(k.startswith("memory.") for k in bj["values"])
+        assert any(k.startswith("persona.") for k in bj["values"])
         assert "ready" in bj["status"] and "endpoint" in bj["status"]
         # 群记忆状态块（enabled / 整理节奏 / 预算 / 落盘目录）
         assert "memory" in bj["status"]
@@ -106,6 +109,15 @@ def test_endpoints():
         assert mg.status_code == 200
         assert "next_digest" in mg.json(), "群记忆详情少了下次整理时间"
         assert client.get("/api/music-admin/memory").status_code == 401
+
+        # ---- 人设修订接口：只读状态 + 抱怨流水，不带 token 要 401 ----
+        pn = client.get("/api/music-admin/persona", headers=H)
+        assert pn.status_code == 200
+        pj = pn.json()
+        assert pj["ok"] is True
+        assert "stats" in pj and "feedback" in pj and "limits" in pj
+        assert "next_propose" in pj, "人设修订少了下次检查时间"
+        assert client.get("/api/music-admin/persona").status_code == 401
 
         # ---- 上下文用量接口（机器人页那张卡的数据源）----
         cx = client.get("/api/music-admin/context", headers=H)
