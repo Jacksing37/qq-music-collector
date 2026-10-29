@@ -1081,11 +1081,14 @@ class LLMBot:
         - ``(None, "error: …")`` —— 调用失败，调用方可决定是否退回自我介绍
         """
         question = (text or "").strip()
+        quote = (quote or "").strip()
         # 只有真的开了视觉、且模型那边支持，才把图片发出去
         pics = []
         if cfg.vision:
             pics = [u for u in (images or []) if u][: max(0, cfg.max_images)]
-        if not question and not pics:
+        # 「引用了上面这条 + 只 @ 它，没写别的」是很常见的用法（想问「这个你怎么看」）。
+        # 这种消息**必须**交给模型——它有被引用的内容可读，退回自我介绍等于答非所问
+        if not question and not pics and not quote:
             return None, "empty"
         if cfg.max_input_chars > 0 and len(question) > cfg.max_input_chars:
             question = question[: cfg.max_input_chars].rstrip() + "…"
@@ -1097,7 +1100,15 @@ class LLMBot:
         # 纯文本版本：写历史、以及「上游不认图」降级时都用它，绝不带 URL。
         # 带上 QQ 号是有意的：模型要调 remember 记「这个人」时，必须有稳定标识，
         # 光靠昵称会撞名（群里两个「小明」太常见了）。
-        body = f"{speaker}({user_id})：{question}"
+        # 没有正文时**别留一个空冒号**：模型会当成「话说一半」，答出来更飘。
+        # 换成一句说明，它就知道自己是「只拿到引用/图片」而不是被问了半句
+        if question:
+            said = question
+        elif quote:
+            said = "（只引用了上面这条，没写别的）"
+        else:
+            said = "（只发了图片，没写文字）"
+        body = f"{speaker}({user_id})：{said}"
         if quote:
             body = f"{quote}\n{body}"
 

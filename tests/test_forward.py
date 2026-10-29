@@ -35,8 +35,10 @@ from nonebot.adapters.onebot.v11 import MessageSegment  # noqa: E402
 
 from music_collector.bot_utils import (  # noqa: E402
     describe_forward,
+    describe_forward_full,
     read_forward_nodes,
     render_forward,
+    render_forward_full,
 )
 from music_collector.config import LLMConfig  # noqa: E402
 from music_collector.llm import (  # noqa: E402
@@ -111,6 +113,20 @@ def test_forward() -> None:
           text.splitlines()[:2] == ["张三：明天几点出发", "李四：八点[图片]"], text)
     check("get_forward_msg 走了两次（message_id 失败后换 id）", len(bot.calls) == 2, str(bot.calls))
     check("退回参数名是 id", "id" in bot.calls[-1], str(bot.calls[-1]))
+
+    # 记录里的图片要能带出来：只给 [图片] 占位符的话，模型只能说「图我看不到」
+    async def with_images(max_images: int):
+        return await describe_forward_full(
+            ForwardBot(payload), [seg("forward", id="fwd-1")],
+            limit=30, max_chars=2000, max_images=max_images,
+        )
+
+    fwd_text, fwd_images = asyncio.run(with_images(4))
+    check("转发记录里的图片被带出",
+          fwd_images == ["http://example.com/a.jpg"], str(fwd_images))
+    check("带图时文字照样有 [图片] 占位", "[图片]" in fwd_text, fwd_text)
+    check("max_images=0 → 不收图", asyncio.run(with_images(0))[1] == [])
+    check("max_images=1 → 最多一张", len(asyncio.run(with_images(1))[1]) == 1)
 
     async def inline():
         bot = ForwardBot()
@@ -203,7 +219,7 @@ def test_chat_context() -> None:
 
 
 def test_llm_context() -> None:
-    print("\n[4] _llm_context：只取聊天记录，不碰网页")
+    print("\n[4] _llm_context：只取聊天记录（含图片），不碰网页")
     import types
 
     import music_collector as mc
@@ -215,16 +231,24 @@ def test_llm_context() -> None:
             seg("forward", id="fwd-9"),
         ],
     )
-    bot = ForwardBot({"messages": [{"sender": {"nickname": "甲"},
-                                    "content": [{"type": "text", "data": {"text": "记录内容"}}]}]})
+    bot = ForwardBot({"messages": [
+        {"sender": {"nickname": "甲"},
+         "content": [{"type": "text", "data": {"text": "记录内容"}}]},
+        {"sender": {"nickname": "乙"},
+         "content": [{"type": "image", "data": {"url": "http://example.com/f.jpg"}}]},
+    ]})
 
-    ctx = asyncio.run(mc._llm_context(bot, event, LLMConfig(), "看这个 https://example.com/a"))
+    ctx, ctx_images = asyncio.run(
+        mc._llm_context(bot, event, LLMConfig(), "看这个 https://example.com/a")
+    )
     check("聊天记录进了资料", "【群友转发的聊天记录】" in ctx and "记录内容" in ctx, ctx)
     check("链接不再被自动抓（资料里没有网页内容）", "网页内容" not in ctx, ctx)
+    check("转发记录里的图片也返回了",
+          ctx_images == ["http://example.com/f.jpg"], str(ctx_images))
 
-    off = asyncio.run(mc._llm_context(
+    off, off_images = asyncio.run(mc._llm_context(
         bot, event, LLMConfig(read_forward=False), "随便说说"))
-    check("开关关掉 → 空资料", off == "", off)
+    check("开关关掉 → 空资料、无图", off == "" and off_images == [], str((off, off_images)))
 
     # 「引用一条转发记录」再提问，内容在 event.reply 里
     quoted_ev = types.SimpleNamespace(
@@ -232,7 +256,7 @@ def test_llm_context() -> None:
         message=[seg("text", text="这是啥意思")],
         reply=types.SimpleNamespace(message=[seg("forward", id="fwd-r")]),
     )
-    quoted_ctx = asyncio.run(mc._llm_context(bot, quoted_ev, LLMConfig(), "这是啥意思"))
+    quoted_ctx, _ = asyncio.run(mc._llm_context(bot, quoted_ev, LLMConfig(), "这是啥意思"))
     check("被引用的转发记录也会展开", "【被引用的聊天记录】" in quoted_ctx, quoted_ctx)
 
 

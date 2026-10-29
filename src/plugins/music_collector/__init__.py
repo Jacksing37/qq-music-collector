@@ -28,7 +28,7 @@ from nonebot.rule import Rule
 require("nonebot_plugin_apscheduler")
 
 from .bot_utils import (  # noqa: E402
-    describe_forward,
+    describe_forward_full,
     message_preview,
     quote_prefix_and_images,
     read_message,
@@ -350,19 +350,28 @@ def _sender_nick(event: object) -> str:
     return str(getattr(event, "user_id", "") or "")
 
 
-async def _llm_context(bot: Bot, event: object, llm_cfg, text: str) -> str:
-    """准备模型「自己看不到」的那部分内容：合并转发的聊天记录、链接背后的网页正文。
+async def _llm_context(
+    bot: Bot, event: object, llm_cfg, text: str
+) -> tuple[str, list[str]]:
+    """准备模型「自己看不到」的那部分内容：合并转发的聊天记录。
 
-    两件事各有开关，**失败一律静默降级**（抓不到就当没有）：外链打不开是常态，
-    不该变成「群里没回应」。返回的文本只作用于这一次请求，不写进上下文历史。
+    两件事各有开关，**失败一律静默降级**（读不出来就当没有）：群友手滑转发一条
+    打不开的记录是常态，不该变成「群里没回应」。返回的文本只作用于这一次请求，
+    不写进上下文历史。
+
+    同时返回**转发记录里的图片链接**：只给文字的话，记录里的一张图只剩
+    ``[图片]`` 这个占位符，模型只能回「图我看不到」。数量上限用
+    ``llm.max_images``（和当前消息、引用消息共用一个额度，由 ``chat`` 统一截断）。
 
     只在真要回话的触发点调用（@机器人 / 非音乐链接），不扫全群消息——
     那样既是流量负担，也容易被站点拉黑。
     """
     blocks: list[str] = []
+    images: list[str] = []
     message = getattr(event, "message", None)
     reply = getattr(event, "reply", None)
     reply_message = getattr(reply, "message", None) if reply is not None else None
+    budget = max(0, int(getattr(llm_cfg, "max_images", 0) or 0))
 
     # ① 合并转发的聊天记录：群友「转发了一段聊天」再问「他们说的是啥」。
     # 也要看被引用的那条——常见操作是「引用一条转发记录 + 问这是啥」，
@@ -375,25 +384,29 @@ async def _llm_context(bot: Bot, event: object, llm_cfg, text: str) -> str:
             if source is None:
                 continue
             try:
-                record = await describe_forward(
+                record, pics = await describe_forward_full(
                     bot,
                     source,
                     limit=llm_cfg.forward_limit,
                     max_chars=llm_cfg.forward_chars,
+                    max_images=max(0, budget - len(images)) if budget else 0,
                 )
             except Exception as exc:  # noqa: BLE001 — 读不出来就当没有这段
-                record = ""
+                record, pics = "", []
                 logger.debug(f"[llm] 读取聊天记录失败: {exc}")
             if not record:
                 continue
             blocks.append(f"【{label}】\n{record}")
+            for url in pics:
+                if url and url not in images:
+                    images.append(url)
             rows = record.count("\n") + 1
             logger.info(
                 f"[llm] 群{getattr(event, 'group_id', '?')} 附带聊天记录 {rows} 条"
-                f"（{len(record)} 字）"
+                f"（{len(record)} 字、{len(pics)} 张图）"
             )
 
-    return "\n\n".join(blocks)
+    return "\n\n".join(blocks), images
 
 
 #: 背景的**硬上限**。``with_context`` 总共只放 4000 字且超了截**开头**，
@@ -599,8 +612,11 @@ async def _try_llm_reply(bot: Bot, event: GroupMessageEvent) -> bool:
         if url not in pics:
             pics.append(url)
 
-    # 转发记录 / 链接网页：模型原生看不到，得我们先取回来
-    context = await _llm_context(bot, event, llm_cfg, text)
+    # 转发记录：模型原生看不到，得我们先取回来；记录里的图片也一起带出
+    context, context_images = await _llm_context(bot, event, llm_cfg, text)
+    for url in context_images:
+        if url not in pics:
+            pics.append(url)
 
     ok, reason = await _llm_answer(bot, event, llm_cfg, text, pics, quote, context)
     if ok:
@@ -1102,7 +1118,10 @@ async def _reply_llm_link(bot: Bot, event: GroupMessageEvent) -> None:
     hint = (llm_cfg.link_hint or "").strip()
     question = f"{text}\n{hint}" if hint else text
     # 链接正文：这一步才是「真看了」和「只看标题瞎猜」的分界线
-    context = await _llm_context(bot, event, llm_cfg, text)
+    context, context_images = await _llm_context(bot, event, llm_cfg, text)
+    for url in context_images:
+        if url not in images:
+            images.append(url)
     ok, reason = await _llm_answer(bot, event, llm_cfg, question, images, context=context)
     if ok:
         logger.info(f"[llm] 群{event.group_id} 非音乐链接 → 已交给大模型接话")

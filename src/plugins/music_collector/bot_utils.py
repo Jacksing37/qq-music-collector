@@ -354,18 +354,37 @@ def render_forward(
 ) -> str:
     """把展开后的转发记录渲染成「昵称：内容」多行文本（超长自动收尾）。
 
+    只要文本；要图片用 :func:`render_forward_full`。
+    """
+    return render_forward_full(nodes, limit=limit, max_chars=max_chars)[0]
+
+
+def render_forward_full(
+    nodes: list[dict],
+    limit: int = FORWARD_LIMIT,
+    max_chars: int = FORWARD_CHARS,
+    max_images: int = 0,
+) -> tuple[str, list[str]]:
+    """渲染转发记录，返回 ``(文本, 图片链接)``。
+
     被截断时补一句「还有 N 条未展开」：模型知道「记录不止这些」，才不会
     把半段聊天当成全部、得出「他们没提过这事」这种结论。
+
+    ``max_images`` > 0 时顺带把记录里的图片链接收集出来（**最多这么多张**）。
+    这件事必须一起做：记录里一张图只留下 ``[图片]`` 占位符的话，模型只能回
+    「图我看不到」——而「转发了一段带图的聊天，问这图是什么意思」是很常见的用法。
+    只收**没被条数/字数截掉**的那些：截断部分本来就没给模型看。
     """
     if not nodes:
-        return ""
+        return "", []
     lines: list[str] = []
+    images: list[str] = []
     used = 0
     for idx, node in enumerate(nodes):
         if len(lines) >= max(1, limit):
             lines.append(f"…（还有 {len(nodes) - idx} 条未展开）")
             break
-        text, _ = read_message(_node_segments(node.get("content")))
+        text, node_images = read_message(_node_segments(node.get("content")))
         text = text.strip()
         who = (node.get("who") or "").strip()
         line = f"{who}：{text}" if who else text
@@ -377,7 +396,13 @@ def render_forward(
             break
         lines.append(line)
         used += len(line)
-    return "\n".join(lines)
+        if max_images > 0:
+            for url in node_images:
+                if len(images) >= max_images:
+                    break
+                if url and url not in images:
+                    images.append(url)
+    return "\n".join(lines), images
 
 
 async def describe_forward(
@@ -387,10 +412,21 @@ async def describe_forward(
     max_chars: int = FORWARD_CHARS,
 ) -> str:
     """消息里有合并转发就渲染成文本；没有返回空串。"""
+    return (await describe_forward_full(bot, message, limit, max_chars))[0]
+
+
+async def describe_forward_full(
+    bot: Bot,
+    message: Message | list,
+    limit: int = FORWARD_LIMIT,
+    max_chars: int = FORWARD_CHARS,
+    max_images: int = 0,
+) -> tuple[str, list[str]]:
+    """同 :func:`describe_forward`，但把记录里的图片链接一起带出来。"""
     nodes = await read_forward_nodes(bot, message)
     if not nodes:
-        return ""
-    return render_forward(nodes, limit=limit, max_chars=max_chars)
+        return "", []
+    return render_forward_full(nodes, limit=limit, max_chars=max_chars, max_images=max_images)
 
 
 def quote_prefix_and_images(

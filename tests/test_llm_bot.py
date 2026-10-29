@@ -32,7 +32,7 @@ import nonebot  # noqa: E402
 nonebot.init(driver="~fastapi")
 
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message  # noqa: E402
-from nonebot.adapters.onebot.v11.event import Sender  # noqa: E402
+from nonebot.adapters.onebot.v11.event import Reply, Sender  # noqa: E402
 
 from music_collector import handle_at  # noqa: E402
 from music_collector.config import (  # noqa: E402
@@ -289,6 +289,44 @@ async def test_chat_empty_and_clear() -> None:
     check("清空不存在的群返回 0", bot.clear_history(GID) == 0)
     await bot.chat(GID, 42, "张三", "在吗", cfg)
     check("清空全部", bot.clear_history(None) == 1 and bot.history_sizes() == {})
+
+
+# ---------------------------------------------------------------- 8b. 只引用不说话
+
+async def test_quote_only() -> None:
+    print("\n[8b] 「引用一条消息 + 只 @ 它」也要交给模型")
+    reset_llm()
+    cfg = config_manager.config.llm
+
+    # ① chat 层面：有引用、没正文，不算是空提问
+    calls: list = []
+    bot = make_bot("这歌挺上头", calls=calls)
+    reply, reason = await bot.chat(
+        GID, 42, "张三", "", cfg, quote="（引用 李四 的消息：这首叫啥）"
+    )
+    check("只有引用 → 不报 empty", reply is not None and reason == "", str(reason))
+    sent = calls[0][-1]["content"]
+    check("引用进了请求", "这首叫啥" in str(sent), str(sent)[:120])
+    check("给模型说明了「没写别的」", "只引用了上面这条" in str(sent), str(sent)[:160])
+    check("不留空冒号", not str(sent).rstrip().endswith("："), str(sent)[-40:])
+
+    # ② 真的空（没引用、没图）仍然算 empty，别让模型对着空气编
+    empty_bot = make_bot("x")
+    empty_reply, empty_reason = await empty_bot.chat(GID, 42, "张三", "  ", cfg)
+    check("真·空提问还是 empty", empty_reply is None and empty_reason == "empty", empty_reason)
+
+    # ③ 只有图没正文：给一句说明，别留空冒号
+    reset_llm()
+    cfg = config_manager.config.llm
+    cfg.vision = True
+    img_calls: list = []
+    img_bot = make_bot("这猫真胖", calls=img_calls)
+    img_reply, img_reason = await img_bot.chat(
+        GID, 42, "张三", "", cfg, images=["https://example.com/cat.jpg"]
+    )
+    check("只有图 → 有回复", img_reply is not None and img_reason == "", str(img_reason))
+    img_sent = img_calls[0][-1]["content"]
+    check("只有图时说明「没写文字」", "只发了图片" in str(img_sent), str(img_sent)[:160])
 
 
 # ---------------------------------------------------------------- 9. 配置约束
@@ -1316,8 +1354,30 @@ async def test_handle_at_routing() -> None:
     last_user = str(payload[-1].get("content") or "") if payload else ""
     check("背景拼进了这次请求", "刚才在聊哪家锅贴最好吃" in last_user, last_user[:120])
     check("背景带「不是在跟你说话」的说明", "不是在跟你说话" in last_user, last_user[:80])
-    check("背景排在提问前面", last_user.find("刚才在聊哪家锅贴") < last_user.find("刚才聊啥呢"),
+    check("背景排在提问前面",
+          last_user.find("刚才在聊哪家锅贴") < last_user.find("刚才聊啥呢"),
           last_user[:160])
+
+    # (j) 引用一条消息 + 只 @ 它（没写别的）→ 交给模型，不能退回自我介绍
+    reset_llm()
+    calls: list = []
+    mc.llm_bot = make_bot("这歌挺上头", calls=calls)
+    quoted = make_event("", user_id=2010)
+    quoted.reply = Reply(
+        time=0,
+        message_type="group",
+        message_id=901,
+        real_id=901,
+        sender=Sender(user_id=2011, nickname="李四", card="李四"),
+        message=Message("这首叫啥"),
+    )
+    bot = StubBot()
+    await handle_at(bot, quoted)
+    check("引用 + 只 @ → 走模型", len(bot.sent) == 1 and "这歌挺上头" in bot.sent[0], str(bot.sent))
+    check("引用 + 只 @ → 不退回自我介绍",
+          all("群音乐收集助手" not in s for s in bot.sent), str(bot.sent))
+    sent = str(calls[-1][-1].get("content") or "") if calls else ""
+    check("被引用的内容进了请求", "这首叫啥" in sent, sent[:120])
 
 
 async def main() -> None:
@@ -1329,6 +1389,7 @@ async def main() -> None:
     await test_chat_cooldown()
     await test_chat_truncation()
     await test_chat_empty_and_clear()
+    await test_quote_only()
     test_config_and_schema()
     test_sampling_and_thinking()
     await test_context_budget()
