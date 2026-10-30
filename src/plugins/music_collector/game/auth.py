@@ -35,6 +35,25 @@ def _cfg_get(cfg, name: str, default):
     return getattr(cfg, name, default)
 
 
+def _describe(exc: Exception) -> str:
+    """把协议端异常压成一句能看懂的原因（尽量带 retcode）。
+
+    NoneBot 的 ``ActionFailed`` 会把 OneBot 返回的 ``{retcode, message, wording}``
+    放在 ``.info`` 里。只报一个异常类名，排查时等于什么都没有。
+    """
+    info = getattr(exc, "info", None)
+    if isinstance(info, dict):
+        rc = info.get("retcode")
+        note = str(info.get("wording") or info.get("message") or "").strip()
+        bits = [f"retcode={rc}"] if rc is not None else []
+        if note:
+            bits.append(note[:60])
+        if bits:
+            return "(" + " ".join(bits) + ")"
+    text = str(exc).strip()
+    return f"({type(exc).__name__}{': ' + text[:60] if text else ''})"
+
+
 class GameAuth:
     def __init__(self, store: GameStore, cfg_fn: Callable[[], object]) -> None:
         self.store = store
@@ -77,35 +96,56 @@ class GameAuth:
             f"{ttl // 60} 分钟内有效，只能使用一次。\n"
             "（不是你本人操作的请忽略这条消息）"
         )
-        group_hint = int((await self.store.get_user(qq) or {}).get("source_group") or 0)
+        # 临时会话必须带群号。名单里没记来源群（粘贴导入的常见）时退到配置里的
+        # 默认群，否则这一步会被静默跳过——线上踩过：报「临时会话也没走通」，
+        # 其实压根没发。
+        group_hint = await self._group_hint(qq, cfg)
         sent, err = await self._send_dm(bot, qq, text, group_hint)
         if not sent:
             return False, (
-                "私聊验证码发不出去：机器人还不是你好友，且群临时会话也没走通"
+                "私聊验证码发不出去：机器人还不是你好友，群临时会话也没成功"
                 "（需要群主在群设置里允许「发起临时会话」）。"
-                f"最稳的办法是先加机器人为好友再试（错误：{err}）"
+                f"最稳的办法是先加机器人为好友再试（{err}）"
             )
         self._last_code_at[qq] = now
         return True, "验证码已私聊发给你，去 QQ 里看一下"
+
+    async def _group_hint(self, qq: int, cfg) -> int:
+        """临时会话用哪个群：名单里记的来源群 → 配置的 ``game.dm_group`` → 第一个有歌的群。"""
+        hint = int((await self.store.get_user(qq) or {}).get("source_group") or 0)
+        if hint:
+            return hint
+        hint = int(_cfg_get(cfg, "dm_group", 0) or 0)
+        if hint:
+            return hint
+        try:
+            from ..service import service as collect_service
+
+            groups = await collect_service.store.distinct_group_ids()
+        except Exception:  # noqa: BLE001 - 拿不到群号就不硬猜
+            return 0
+        return int(groups[0]) if groups else 0
 
     async def _send_dm(self, bot, qq: int, text: str, group_id: int = 0) -> tuple[bool, str]:
         """先好友私聊；不行再试**群临时会话**（OneBot 的 ``group_id`` 参数）。
 
         群里「允许发起临时会话」是这一条能成立的前提——它不是好友关系，所以在
         QQ 里会落在一个单独的「临时会话」窗口，但对验证码来说够用了。
+        失败原因带上协议端的 retcode，否则只有一个 ``ActionFailed`` 根本看不出
+        是「对方不是好友」还是「参数不支持」。
         """
         try:
             await bot.send_private_msg(user_id=qq, message=text)
             return True, ""
         except Exception as exc:  # noqa: BLE001 - 第一条不通才试第二条
-            first = f"{type(exc).__name__}"
+            first = _describe(exc)
         if not group_id:
-            return False, first
+            return False, f"好友私聊 {first}；没有可用群号，临时会话跳过"
         try:
             await bot.send_private_msg(user_id=qq, group_id=group_id, message=text)
             return True, ""
         except Exception as exc:  # noqa: BLE001
-            return False, f"{first} / 临时会话 {type(exc).__name__}"
+            return False, f"好友私聊 {first}；临时会话 {_describe(exc)}"
 
     # ------------------------------------------------------------ 验码
 

@@ -773,6 +773,9 @@ class GameConfig(BaseModel):
     code_ttl_minutes: int = Field(10, ge=1, le=60)
     #: 登录态有效期（天）
     session_days: int = Field(30, ge=1, le=365)
+    #: 发私聊验证码时用来发起「群临时会话」的群号。0 = 自动（优先用名单里记的来源群，
+    #: 再退到配置里的生效群）。玩家不是机器人好友时，这条是唯一能把码送到他手里的路
+    dm_group: int = Field(0, ge=0)
     #: 每题要排几个分享者
     guess_slots: int = Field(3, ge=1, le=3)
     #: 命中第 1/2/3 位各得多少分（与 guess_slots 对齐）

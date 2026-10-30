@@ -234,6 +234,11 @@ FIELD_META["game.room_idle_minutes"] = (
 )
 FIELD_META["game.code_ttl_minutes"] = ("验证码有效期(分)", "登录验证码多久失效", False)
 FIELD_META["game.session_days"] = ("登录态有效期(天)", "登录后多久不用要重新验证", False)
+FIELD_META["game.dm_group"] = (
+    "临时会话群号",
+    "发验证码时用哪个群发起「群临时会话」（玩家不是机器人好友时靠这条送达）。0 = 自动：先用名单里记的来源群，再退回第一个有歌的群",
+    False,
+)
 FIELD_META["game.guess_slots"] = ("每题排几人", "每题要按顺序排几个分享者，最多 3", False)
 FIELD_META["game.scores"] = (
     "得分档位", "命中第 1/2/3 位各得多少分，逗号分隔，如 3,2,1", False,

@@ -40,6 +40,7 @@ class Cfg:
     room_idle_minutes = 60
     code_ttl_minutes = 10
     session_days = 30
+    dm_group = 999001
     guess_slots = 3
     scores = [3, 2, 1]
     live_limit_per_min = 10
@@ -306,6 +307,14 @@ def test_dm_falls_back_to_group_session(tmp: Path):
             ok, msg = await auth.request_code(111)
             assert ok, msg
             assert len(calls) == 2 and calls[1].get("group_id") == 999001, calls
+
+            # 名单里没记来源群（粘贴导入）时，要用配置里的 dm_group，不能直接跳过
+            calls.clear()
+            auth._last_code_at.clear()
+            await st.add_users([(222, "阿二", 0)])
+            ok, msg = await auth.request_code(222)
+            assert ok, msg
+            assert calls[1].get("group_id") == 999001, calls
 
             calls.clear()
             auth._last_code_at.clear()
