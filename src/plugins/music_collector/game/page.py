@@ -49,6 +49,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent)}
   background:rgba(110,168,254,.15);color:var(--accent);margin-left:6px;vertical-align:middle}
 .tag.host{background:rgba(251,191,36,.16);color:var(--warn)}
 .tag.done{background:rgba(52,211,153,.16);color:var(--ok)}
+.tag.vip{background:rgba(251,191,36,.16);color:var(--warn)}
 .hd{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px}
 .code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:20px;letter-spacing:2px;font-weight:600}
 .plist{display:flex;flex-wrap:wrap;gap:8px}
@@ -322,11 +323,12 @@ function viewPlaying(st){
     const picks = PICKS[c.uid]||[];
     return `<div class="gcard" data-uid="${c.uid}">
       <div class="idx">第 ${i+1} 首</div>
-      <div class="title">${esc(c.title)}</div>
+      <div class="title">${esc(c.title)}${c.vip?'<span class="tag vip">VIP</span>':""}</div>
       <div class="artist">${esc(c.artists||"未知歌手")}
         <a href="${neteaseLink(c)}" target="_blank" rel="noreferrer" style="margin-left:8px;font-size:12px">去网易云听</a></div>
       ${c.netease_id?`<iframe class="player" loading="lazy" src="https://music.163.com/outchain/player?type=2&id=${esc(c.netease_id)}&auto=0&height=66" allow="autoplay"></iframe>`
         :`<div class="noaudio">这首没匹配到网易云的 id，内嵌播放器放不了，点上面的「去网易云听」。</div>`}
+      ${c.vip?`<div class="noaudio">VIP / 付费曲：内嵌播放器不带登录态，本来就放不出声，点「去网易云听」。</div>`:""}
       <div class="chips" data-chips="${c.uid}">${chipsHtml(c.uid, cands)}</div>
     </div>`;
   }).join("")}

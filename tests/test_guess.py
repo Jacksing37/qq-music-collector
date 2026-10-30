@@ -383,6 +383,40 @@ def test_login_keywords():
     assert not _is_login_text("")
 
 
+def test_tag_vip_flags():
+    """VIP / 付费专辑 / 下架的曲目要打标，卡片上才不会让人以为是页面坏了。"""
+    from src.plugins.music_collector.game import bridge
+
+    cards = [
+        R.Card(uid=1, title="A", platform="netease", song_id="1", netease_id="1"),
+        R.Card(uid=2, title="B", platform="netease", song_id="2", netease_id="2"),
+        R.Card(uid=3, title="C", platform="netease", song_id="3", netease_id="3"),
+        R.Card(uid=4, title="D", platform="qq", song_id="4"),
+    ]
+    api = bridge.collect_service.netease
+    orig = api.song_detail
+
+    async def fake_song_detail(ids):
+        return [
+            {"id": 1, "fee": 1},        # VIP
+            {"id": 2, "fee": 0},        # 免费
+            {"id": 3, "fee": 0, "st": -200},  # 已下架
+        ]
+
+    async def run():
+        api.song_detail = fake_song_detail
+        try:
+            n = await bridge.tag_vip(cards)
+        finally:
+            api.song_detail = orig
+        assert [c.vip for c in cards] == [True, False, True, False], [c.vip for c in cards]
+        assert n == 2
+        # 没有 id 的歌不该被标，也不该报错
+        assert cards[3].vip is False
+
+    asyncio.run(run())
+
+
 def test_parse_user_text():
     from src.plugins.music_collector.game.router import _parse_user_text
 
@@ -509,6 +543,7 @@ if __name__ == "__main__":
     test_dm_falls_back_to_group_session(tmp)
     test_issue_code_and_text(tmp)
     test_login_keywords()
+    test_tag_vip_flags()
     test_parse_user_text()
     test_list_windows(tmp)
     test_dispatch_flow(tmp)

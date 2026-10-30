@@ -53,6 +53,9 @@ class Card:
     duration: int = 0
     sharer_qq: int = 0
     sharer_name: str = ""
+    #: 网易云判定为 VIP / 付费专辑 / 已下架。内嵌播放器播不了这类歌（它不带登录态），
+    #: 卡片上要明确标出来，免得玩家以为是页面坏了
+    vip: bool = False
 
     @property
     def iframe_id(self) -> Optional[str]:
@@ -75,6 +78,7 @@ class Card:
             "platform": self.platform,
             "netease_id": self.iframe_id,
             "duration": self.duration,
+            "vip": self.vip,
         }
 
 

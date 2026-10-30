@@ -110,7 +110,43 @@ async def cards_from_window(group_id: int, window_key: str) -> list[Card]:
         ))
     if matched:
         _log(f"窗口 {group_id}/{window_key} 补匹配网易云 {matched} 首")
+    await tag_vip(cards)
     return cards
+
+
+async def tag_vip(cards: list[Card]) -> int:
+    """批量问网易云要一次歌曲详情，标出 VIP / 付费专辑 / 已下架的曲目。
+
+    为什么值得多这一次请求：内嵌播放器**不带登录态**，这类歌必然放不出声，玩家
+    只会以为页面坏了。一次 ``song_detail`` 最多能带几百个 id，摊到每首歌上几乎免费。
+    详情拿不到就当作不知道（不标），绝不因为没有标记而挡住答题。
+    """
+    ids = [c.iframe_id for c in cards if c.iframe_id]
+    if not ids:
+        return 0
+    uniq = list(dict.fromkeys(ids))
+    try:
+        rows = await collect_service.netease.song_detail(uniq)
+    except Exception as exc:  # noqa: BLE001 - 标记失败不影响出题
+        _log.warning(f"查网易云歌曲权限失败：{type(exc).__name__}")
+        return 0
+    fee = {str(r.get("id") or ""): r.get("fee") for r in rows or []}
+    status = {str(r.get("id") or ""): r.get("st") for r in rows or []}
+    n = 0
+    for card in cards:
+        key = str(card.iframe_id or "")
+        if key not in fee:
+            continue
+        f = fee[key]
+        try:
+            down = int(status.get(key) or 0) < 0
+        except (TypeError, ValueError):
+            down = False
+        # fee: 0=免费 1=VIP 4=付费专辑 8=低音质免费（试听）
+        card.vip = bool(down or f in (1, 4))
+        if card.vip:
+            n += 1
+    return n
 
 
 # ------------------------------------------------------------------ 现场收集
@@ -149,6 +185,7 @@ async def add_live_songs(room: Room, qq: int, nick: str, text: str) -> tuple[int
     added = 0
     dup = 0
     failed = 0
+    new_cards: list[Card] = []
     for link in links:
         try:
             song = await collect_service.providers.resolve(link)
@@ -179,8 +216,12 @@ async def add_live_songs(room: Room, qq: int, nick: str, text: str) -> tuple[int
         )
         if room.add_card(card):
             added += 1
+            new_cards.append(card)
         else:
             dup += 1
+
+    if new_cards:
+        await tag_vip(new_cards)
 
     parts = [f"新增 {added} 首"]
     if dup:
