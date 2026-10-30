@@ -150,6 +150,27 @@ def test_host_succession():
     assert room.host_qq == 2
 
 
+def test_shuffle_breaks_order():
+    """开场要打乱卡片与候选池顺序，否则「第一个候选」对着「第一张卡」等于送答案。"""
+    import random
+
+    mgr = _mgr()
+    room, _ = mgr.create(1, "甲", "multi")
+    for i in range(8):
+        room.add_card(_card(f"T{i}", 100 + i, f"人{i}"))
+    uids = [c.uid for c in room.cards]
+    cands_before = [c["qq"] for c in room.candidates()]
+    room.submit(1, {uids[0]: [100]}, 3)
+
+    random.seed(7)
+    room.shuffle_order()
+
+    assert sorted(c.uid for c in room.cards) == sorted(uids), "uid 不能变（答题记录按它存）"
+    assert [c["qq"] for c in room.candidates()] != cands_before, "候选池顺序应被打乱"
+    assert sorted(c["qq"] for c in room.candidates()) == sorted(cands_before)
+    assert room.players[1].answers == {}, "重开一局要清掉上一轮作答"
+
+
 def test_room_reap():
     mgr = _mgr()
     room, _ = mgr.create(1, "甲", "multi")
@@ -477,6 +498,7 @@ if __name__ == "__main__":
     test_dedupe_same_and_cross_platform()
     test_candidates_dedup()
     test_host_succession()
+    test_shuffle_breaks_order()
     test_room_reap()
     test_empty_room_reaped()
     test_max_players()

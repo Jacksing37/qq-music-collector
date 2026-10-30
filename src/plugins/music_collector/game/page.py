@@ -301,6 +301,12 @@ function chipsHtml(uid, cands){
   }).join("");
 }
 
+function neteaseLink(c){
+  if(c.netease_id) return `https://music.163.com/#/song?id=${encodeURIComponent(c.netease_id)}`;
+  const q = encodeURIComponent((c.title||"") + " " + (c.artists||""));
+  return `https://music.163.com/#/search/m/?s=${q}`;
+}
+
 function viewPlaying(st){
   const cards = st.cards||[];
   const cands = st.candidates||[];
@@ -317,9 +323,10 @@ function viewPlaying(st){
     return `<div class="gcard" data-uid="${c.uid}">
       <div class="idx">第 ${i+1} 首</div>
       <div class="title">${esc(c.title)}</div>
-      <div class="artist">${esc(c.artists||"未知歌手")}</div>
+      <div class="artist">${esc(c.artists||"未知歌手")}
+        <a href="${neteaseLink(c)}" target="_blank" rel="noreferrer" style="margin-left:8px;font-size:12px">去网易云听</a></div>
       ${c.netease_id?`<iframe class="player" loading="lazy" src="https://music.163.com/outchain/player?type=2&id=${esc(c.netease_id)}&auto=0&height=66" allow="autoplay"></iframe>`
-        :`<div class="noaudio">这首没匹配到网易云，放不了。${c.url?`<a href="${esc(c.url)}" target="_blank" rel="noreferrer">去原平台听</a>`:""}</div>`}
+        :`<div class="noaudio">这首没匹配到网易云的 id，内嵌播放器放不了，点上面的「去网易云听」。</div>`}
       <div class="chips" data-chips="${c.uid}">${chipsHtml(c.uid, cands)}</div>
     </div>`;
   }).join("")}

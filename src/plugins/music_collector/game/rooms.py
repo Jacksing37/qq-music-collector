@@ -109,6 +109,9 @@ class Room:
     archive: Optional[dict] = None
     uid_seq: int = 0
     seq_seq: int = 0
+    #: 候选池的展示顺序（存放 QQ 号）。**开场时打乱**——按「谁先分享」排会让
+    #: 玩家把候选顺序和卡片顺序对照着推，等于白送线索。
+    cand_order: list[int] = field(default_factory=list)
     #: 房间级锁：同一房间的动作串行执行，不同房间互不阻塞。
     #: 现场贴歌要联网解析（可能好几秒），用一把全局锁会把别的房间一起卡住。
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -155,6 +158,8 @@ class Room:
         self.uid_seq += 1
         card.uid = self.uid_seq
         self.cards.append(card)
+        if card.sharer_qq and card.sharer_qq not in self.cand_order:
+            self.cand_order.append(card.sharer_qq)
         self.touch()
         return True
 
@@ -164,23 +169,42 @@ class Room:
         for p in self.players.values():
             p.answers.pop(uid, None)
         if len(self.cards) != before:
+            alive = {c.sharer_qq for c in self.cards}
+            self.cand_order = [q for q in self.cand_order if q in alive]
             self.touch()
             return True
         return False
 
+    def shuffle_order(self) -> None:
+        """开场打乱：卡片顺序 + 候选池顺序。
+
+        两处都必须打乱，否则「候选池里第一个出现的名字」和「第一张卡」在原始数据里
+        是同一首歌，等于直接把答案递过去。``uid`` 不动——答题记录是按 uid 存的。
+        """
+        random.shuffle(self.cards)
+        random.shuffle(self.cand_order)
+        for p in self.players.values():
+            p.answers = {}
+            p.score = 0
+            p.hits = 0
+        self.touch()
+
     def candidates(self) -> list[dict]:
-        """候选池：本题库全部分享者，去重后按首次出现排序。
+        """候选池：本题库全部分享者，去重后按**打乱过的顺序**排列。
 
         这是全局同一份清单（每题都一样），所以它本身不泄露「哪首歌是谁的」。
         """
-        seen: dict[int, dict] = {}
+        present = {c.sharer_qq for c in self.cards if c.sharer_qq}
+        order = [q for q in self.cand_order if q in present]
+        # 防御：cand_order 理论上覆盖全部，漏了（老数据 / 手工改）就补在后面
+        order += [q for q in present if q not in order]
+        nick_of = {}
         for card in self.cards:
-            if card.sharer_qq and card.sharer_qq not in seen:
-                seen[card.sharer_qq] = {
-                    "qq": card.sharer_qq,
-                    "nick": card.sharer_name or str(card.sharer_qq),
-                }
-        return list(seen.values())
+            if card.sharer_qq and card.sharer_qq not in nick_of:
+                nick_of[card.sharer_qq] = card.sharer_name
+        return [
+            {"qq": q, "nick": nick_of.get(q) or str(q)} for q in order
+        ]
 
     # ---------------------------------------------------------------- 作答
 

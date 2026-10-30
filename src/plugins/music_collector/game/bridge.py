@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime
 
@@ -14,10 +15,19 @@ from ..models import Song
 from ..service import service as collect_service
 from .rooms import Card, Room, RoomError
 
+try:
+    from nonebot.log import logger as _log
+except Exception:  # pragma: no cover - 离线测试退化成标准库
+    import logging
+
+    _log = logging.getLogger("music_collector.game")
+
 #: 一次请求最多解析几首（防止有人一口气贴 200 条把解析器打满）
 MAX_LINKS_PER_REQUEST = 10
 #: 现场收集允许的最多题量，避免房间把内存撑爆
 MAX_CARDS = 200
+#: 进房间时最多给几首歌补做网易云匹配（每首约 1 秒，太多会让「选中窗口」卡很久）
+MAX_MATCH_PER_ROOM = 30
 
 
 # ------------------------------------------------------------------ 选题库
@@ -58,8 +68,31 @@ async def cards_from_window(group_id: int, window_key: str) -> list[Card]:
     """把某个历史窗口的歌搬成题目卡片。
 
     分享者信息在这里进内存（成为答案），但**不会**出现在下发给前端的快照里。
+
+    顺手给「还没匹配到网易云」的歌补一次匹配：没有 ``netease_id`` 就没有播放器，
+    卡片上只能干看歌名。历史窗口里这类歌多半是 QQ 音乐 / 酷狗的分享（线上实测
+    1197 首里 10 首），补一次能救回来大半。匹配成功的写回库里，第二次进就快了。
     """
     songs = await _store().list_songs(group_id, window_key)
+    pl = collect_service.cfg(group_id or None).playlist
+    need = [s for s in songs if not s.netease_id and s.platform != "netease"]
+    matched = 0
+    for song in need[:MAX_MATCH_PER_ROOM]:
+        try:
+            nid = await collect_service.archiver.match_netease_id(song, pl)
+        except Exception:  # noqa: BLE001 - 匹配失败就退化成外链，不算错
+            nid = None
+        if nid:
+            song.netease_id = nid
+            song.matched = True
+            matched += 1
+            if song.row_id is not None:
+                try:
+                    await _store().mark_matched(song.row_id, nid)
+                except Exception:  # noqa: BLE001
+                    pass
+        await asyncio.sleep(0.3)  # 网易云搜索有频控，别连发
+
     cards: list[Card] = []
     for s in songs:
         cards.append(Card(
@@ -75,6 +108,8 @@ async def cards_from_window(group_id: int, window_key: str) -> list[Card]:
             sharer_qq=int(s.sharer_id or 0),
             sharer_name=s.sharer_name,
         ))
+    if matched:
+        _log(f"窗口 {group_id}/{window_key} 补匹配网易云 {matched} 首")
     return cards
 
 

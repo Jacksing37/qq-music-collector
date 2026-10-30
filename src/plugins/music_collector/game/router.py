@@ -324,11 +324,8 @@ async def _dispatch(room: Room, qq: int, is_host: bool, action: str, body: dict)
         room.phase = PHASE_PLAYING
         room.result = None
         room.archive = None
-        for p in room.players.values():
-            p.answers = {}
-            p.score = 0
-            p.hits = 0
-        room.touch()
+        # 开场打乱：卡片顺序与候选池顺序都洗一遍（顺带清空上一轮的作答与分数）
+        room.shuffle_order()
         return "游戏开始，排好三个分享者后提交"
 
     if action == "submit":
