@@ -279,6 +279,45 @@ def test_auth_whitelist(tmp: Path):
     asyncio.run(run())
 
 
+def test_dm_falls_back_to_group_session(tmp: Path):
+    """好友私聊发不出去时，要用群临时会话再试一次（OneBot 的 group_id 参数）。"""
+    import src.plugins.music_collector.game.auth as A
+
+    async def run():
+        st = GameStore(tmp / "dm.db")
+        await st.init()
+        await st.add_users([(111, "阿一", 999001)])
+        auth = GameAuth(st, lambda: Cfg())
+        calls: list[dict] = []
+
+        class Bot:
+            def __init__(self, fail_all: bool = False) -> None:
+                self.fail_all = fail_all
+
+            async def send_private_msg(self, **kw):
+                calls.append(kw)
+                if self.fail_all or len(calls) == 1:
+                    raise RuntimeError("not friend")
+                return {"message_id": 1}
+
+        orig = A._pick_bot
+        try:
+            A._pick_bot = lambda: Bot()
+            ok, msg = await auth.request_code(111)
+            assert ok, msg
+            assert len(calls) == 2 and calls[1].get("group_id") == 999001, calls
+
+            calls.clear()
+            auth._last_code_at.clear()
+            A._pick_bot = lambda: Bot(fail_all=True)
+            ok, msg = await auth.request_code(111)
+            assert not ok and "临时会话" in msg, msg
+        finally:
+            A._pick_bot = orig
+
+    asyncio.run(run())
+
+
 def test_parse_user_text():
     from src.plugins.music_collector.game.router import _parse_user_text
 
@@ -401,6 +440,7 @@ if __name__ == "__main__":
     test_store_users(tmp)
     test_codes_and_sessions(tmp)
     test_auth_whitelist(tmp)
+    test_dm_falls_back_to_group_session(tmp)
     test_parse_user_text()
     test_list_windows(tmp)
     test_dispatch_flow(tmp)

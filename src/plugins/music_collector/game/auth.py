@@ -72,22 +72,40 @@ class GameAuth:
         bot = _pick_bot()
         if bot is None:
             return False, "机器人当前不在线，没法发私聊验证码，请稍后再试"
-        try:
-            await bot.send_private_msg(
-                user_id=qq,
-                message=(
-                    f"猜歌游戏登录验证码：{code}\n"
-                    f"{ttl // 60} 分钟内有效，只能使用一次。\n"
-                    "（不是你本人操作的请忽略这条消息）"
-                ),
-            )
-        except Exception as exc:  # noqa: BLE001 - 发不出去要给玩家一句人话
+        text = (
+            f"猜歌游戏登录验证码：{code}\n"
+            f"{ttl // 60} 分钟内有效，只能使用一次。\n"
+            "（不是你本人操作的请忽略这条消息）"
+        )
+        group_hint = int((await self.store.get_user(qq) or {}).get("source_group") or 0)
+        sent, err = await self._send_dm(bot, qq, text, group_hint)
+        if not sent:
             return False, (
-                "私聊验证码发不出去，通常是还没加机器人为好友。"
-                f"请先加好友再试（错误：{type(exc).__name__}）"
+                "私聊验证码发不出去：机器人还不是你好友，且群临时会话也没走通"
+                "（需要群主在群设置里允许「发起临时会话」）。"
+                f"最稳的办法是先加机器人为好友再试（错误：{err}）"
             )
         self._last_code_at[qq] = now
         return True, "验证码已私聊发给你，去 QQ 里看一下"
+
+    async def _send_dm(self, bot, qq: int, text: str, group_id: int = 0) -> tuple[bool, str]:
+        """先好友私聊；不行再试**群临时会话**（OneBot 的 ``group_id`` 参数）。
+
+        群里「允许发起临时会话」是这一条能成立的前提——它不是好友关系，所以在
+        QQ 里会落在一个单独的「临时会话」窗口，但对验证码来说够用了。
+        """
+        try:
+            await bot.send_private_msg(user_id=qq, message=text)
+            return True, ""
+        except Exception as exc:  # noqa: BLE001 - 第一条不通才试第二条
+            first = f"{type(exc).__name__}"
+        if not group_id:
+            return False, first
+        try:
+            await bot.send_private_msg(user_id=qq, group_id=group_id, message=text)
+            return True, ""
+        except Exception as exc:  # noqa: BLE001
+            return False, f"{first} / 临时会话 {type(exc).__name__}"
 
     # ------------------------------------------------------------ 验码
 
