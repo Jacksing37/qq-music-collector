@@ -40,6 +40,9 @@ button:disabled{opacity:.45;cursor:not-allowed}
 input,textarea,select{width:100%;background:var(--input);border:1px solid var(--card-bd);color:var(--txt);
   border-radius:10px;padding:11px 12px;font:inherit}
 input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent)}
+/* 原生下拉的弹层不吃 color-scheme：不显式上色就是白底白字，什么都看不清 */
+select{background-color:var(--bg2);color:var(--txt)}
+select option,select optgroup{background:var(--bg2);color:var(--txt)}
 .row{display:flex;gap:10px;flex-wrap:wrap}
 .row>*{flex:1 1 160px}
 .mt{margin-top:12px}
@@ -609,6 +612,9 @@ button:hover{border-color:var(--accent)}
 .btn-primary{background:linear-gradient(135deg,var(--accent),var(--accent2));border:none;color:#fff;font-weight:600}
 input,textarea,select{width:100%;background:var(--input);border:1px solid var(--card-bd);color:var(--txt);
   border-radius:10px;padding:10px 12px;font:inherit}
+/* 原生下拉的弹层不吃 color-scheme：不显式上色就是白底白字，什么都看不清 */
+select{background-color:var(--bg2);color:var(--txt)}
+select option,select optgroup{background:var(--bg2);color:var(--txt)}
 textarea{font-family:ui-monospace,Menlo,monospace;font-size:13px}
 .row{display:flex;gap:10px;flex-wrap:wrap}
 .row>*{flex:1 1 160px}
