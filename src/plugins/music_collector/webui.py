@@ -89,7 +89,7 @@ SECTION_TITLES = {
 #: 都在这一个分组里完成（它们原先散在独立的「网易云账号」页）。
 SECTION_ORDER = [
     "general", "netease", "window", "playlist", "card", "render",
-    "cache", "clear", "intro", "reply", "master", "logs",
+    "cache", "clear", "intro", "reply", "master", "game", "logs",
 ]
 
 # dotted_key -> (label, hint, multiline?)
@@ -209,6 +209,44 @@ for _k, _v in list(FIELD_META.items()):
         _label, _hint, _multi = _v
         _label = _label.replace("歌单", "总库歌单")
         FIELD_META["master." + _k[len("playlist."):]] = (_label, _hint, _multi)
+
+
+# -------------------------------------------------------------------- 猜歌字段元信息
+
+SECTION_TITLES["game"] = "猜歌小游戏"
+
+# 猜歌整段都是进程级设置：房间不按群划分，所以在「按群」视图里会被灰掉
+# （config.GLOBAL_ONLY_PREFIXES 里已经加了 game.）。
+FIELD_META["game.enabled"] = (
+    "猜歌总开关", "关掉后 /guess 页面与接口都返回 404（已开的房间也会失效）", False,
+)
+FIELD_META["game.whitelist_only"] = (
+    "仅限名单", "只允许「猜歌名单」里的 QQ 号登录；关掉后任何 QQ 号都能进（调试用）", False,
+)
+FIELD_META["game.allow_single"] = (
+    "开放单人模式", "允许自己一个人刷题（从历史窗口取题，不需要组队）", False,
+)
+FIELD_META["game.max_players"] = ("单房上限", "一个房间最多几个人", False)
+FIELD_META["game.room_idle_minutes"] = (
+    "房间空闲回收(分)",
+    "多久没有任何业务动作就回收房间。注意：WebSocket 心跳不算动作，否则房间永远不会过期",
+    False,
+)
+FIELD_META["game.code_ttl_minutes"] = ("验证码有效期(分)", "登录验证码多久失效", False)
+FIELD_META["game.session_days"] = ("登录态有效期(天)", "登录后多久不用要重新验证", False)
+FIELD_META["game.guess_slots"] = ("每题排几人", "每题要按顺序排几个分享者，最多 3", False)
+FIELD_META["game.scores"] = (
+    "得分档位", "命中第 1/2/3 位各得多少分，逗号分隔，如 3,2,1", False,
+)
+FIELD_META["game.live_limit_per_min"] = (
+    "现场贴歌限频", "现场收集时每人每分钟最多提交几次（防刷解析接口）", False,
+)
+FIELD_META["game.archive_by_host"] = (
+    "允许房主归档", "房主能否把现场收集的歌归档成网易云歌单（复用收集机器人的建歌单/简介逻辑）", False,
+)
+FIELD_META["game.public_base_url"] = (
+    "对外访问地址", "生成房间分享链接用，如 https://music.example.com；留空按请求头推断", False,
+)
 
 
 # -------------------------------------------------------------------- 运行日志字段元信息

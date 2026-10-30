@@ -417,6 +417,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
     <button class="nav" data-page="bot">🤖 机器人</button>
     <button class="nav" data-page="memory">🧠 群记忆</button>
     <button class="nav" data-page="aliases">✏ 昵称映射</button>
+    <a class="nav" href="/music-admin/guess" target="_blank" rel="noreferrer">🎲 猜歌名单</a>
     <button class="nav" data-page="admin">🛡 管理员</button>
     <button class="nav" data-page="logs">📜 运行日志</button>
   </aside>

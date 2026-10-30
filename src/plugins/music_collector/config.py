@@ -748,6 +748,43 @@ class PersonaConfig(BaseModel):
     persona_limit: int = Field(2500, ge=500, le=8000)
 
 
+class GameConfig(BaseModel):
+    """猜歌小游戏（网页端 ``/guess``）。
+
+    与收集主流程完全解耦：自己一套登录（白名单 QQ 号 + 机器人**私聊**验证码）、
+    自己的房间状态（内存态，进程重启即清空）。题目可以取自历史收集窗口，也可以
+    房间里现贴现解析；现贴的那批只在归档时才落到网易云歌单。
+
+    这一整段是**进程级**的（房间不按群划分），因此 ``GLOBAL_ONLY_PREFIXES`` 里
+    排除了它，网页端「按群」视图会把它们灰掉。
+    """
+
+    #: 总开关。关掉后 ``/guess`` 页面与全部接口都返回 404
+    enabled: bool = True
+    #: 只允许白名单里的 QQ 号登录；关掉后任何 QQ 号都能进（调试用）
+    whitelist_only: bool = True
+    #: 单人模式（自己一个人刷题）是否开放
+    allow_single: bool = True
+    #: 单个房间最多几人
+    max_players: int = Field(20, ge=2, le=100)
+    #: 房间多久没有任何**业务动作**就回收（分钟）。心跳不算动作
+    room_idle_minutes: int = Field(60, ge=1, le=1440)
+    #: 登录验证码有效期（分钟）
+    code_ttl_minutes: int = Field(10, ge=1, le=60)
+    #: 登录态有效期（天）
+    session_days: int = Field(30, ge=1, le=365)
+    #: 每题要排几个分享者
+    guess_slots: int = Field(3, ge=1, le=3)
+    #: 命中第 1/2/3 位各得多少分（与 guess_slots 对齐）
+    scores: list[int] = Field(default_factory=lambda: [3, 2, 1])
+    #: 现场收集：每人每分钟最多贴几次（防刷）
+    live_limit_per_min: int = Field(10, ge=1, le=60)
+    #: 是否允许房主把现场收集的歌归档成网易云歌单
+    archive_by_host: bool = True
+    #: 对外访问地址（生成房间链接用）。留空则按请求头推
+    public_base_url: str = ""
+
+
 class AppConfig(BaseModel):
     #: 总开关
     enabled: bool = True
@@ -778,6 +815,7 @@ class AppConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     persona: PersonaConfig = Field(default_factory=PersonaConfig)
+    game: GameConfig = Field(default_factory=GameConfig)
 
 
 #: 键名里含这些词的配置项属于敏感信息，写日志时打码，别把密码 / cookie / 密钥记进日志页
@@ -968,7 +1006,7 @@ GLOBAL_ONLY_KEYS: frozenset[str] = frozenset({
 #:   在网页端改；如果允许按群覆盖，会出现「按群改了 base_url 但 groups 没包含自己」
 #:   这种谁也说不清的组合，所以整段锁在全局层
 GLOBAL_ONLY_PREFIXES: tuple[str, ...] = (
-    "logs.", "cache.", "netease.", "llm.", "memory.", "persona.",
+    "logs.", "cache.", "netease.", "llm.", "memory.", "persona.", "game.",
 )
 
 

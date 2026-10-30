@@ -57,6 +57,7 @@ from .store import MASTER_KEY  # noqa: E402
 
 from . import commands as _commands  # noqa: E402,F401  仅为注册命令
 from . import webui as _webui  # noqa: E402,F401  配置管理 Web UI
+from . import game as _game  # noqa: E402,F401  猜歌小游戏（独立页面与登录）
 
 __plugin_meta__ = PluginMetadata(
     name="群音乐收集",
@@ -75,6 +76,9 @@ async def _startup() -> None:
     ok, info = reload_jobs()
     logger.info(f"[music] 插件初始化完成，定时任务{'已注册' if ok else '注册失败'}\n{info}")
     _webui.register_webui()
+    # 猜歌游戏：建自己的三张表 + 挂 /guess 与 /api/guess，并起房间回收巡检
+    await _game.setup()
+    _game.register_game()
 
 
 # ---------------------------------------------------------------- 消息监听
