@@ -141,8 +141,8 @@ function viewLogin(){
       <button id="login" class="btn-primary">进入</button>
     </div>
     <div class="msg" id="note"></div>
-    <p class="sub mt" style="margin-bottom:0">验证码由机器人<b>私聊</b>发送，需要先加机器人为好友。
-    名单由管理员维护，不在名单里会提示。</p>
+    <p class="sub mt" style="margin-bottom:0">没收到？<b>在 QQ 里私聊机器人发一句「登录」</b>，
+    机器人会直接把验证码回给你（不必先加好友）。名单由管理员维护，不在名单里会提示。</p>
   </div>`;
   const qqEl=document.getElementById("qq"), codeEl=document.getElementById("code");
   document.getElementById("send").onclick=async()=>{

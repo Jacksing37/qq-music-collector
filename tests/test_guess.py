@@ -41,6 +41,7 @@ class Cfg:
     code_ttl_minutes = 10
     session_days = 30
     dm_group = 999001
+    public_base_url = "https://m.example.com"
     guess_slots = 3
     scores = [3, 2, 1]
     live_limit_per_min = 10
@@ -327,6 +328,40 @@ def test_dm_falls_back_to_group_session(tmp: Path):
     asyncio.run(run())
 
 
+def test_issue_code_and_text(tmp: Path):
+    """玩家先私聊机器人那条路：只发码不推送，且共用冷却。"""
+    async def run():
+        st = GameStore(tmp / "i.db")
+        await st.init()
+        await st.add_users([(111, "阿一", 0)])
+        auth = GameAuth(st, lambda: Cfg())
+
+        ok, code, ttl, why = await auth.issue_code(111)
+        assert ok and len(code) == 6 and code.isdigit(), (code, why)
+        assert ttl == 600
+        text = auth.code_text(code, ttl)
+        assert code in text and "10 分钟" in text
+        assert "https://m.example.com/guess" in text, text
+
+        ok, _, _, why = await auth.issue_code(111)
+        assert not ok and "刚发过" in why, why
+
+        ok, _, _, why = await auth.issue_code(999)
+        assert not ok and "名单" in why, why
+
+    asyncio.run(run())
+
+
+def test_login_keywords():
+    from src.plugins.music_collector.game.handler import _is_login_text
+
+    assert _is_login_text("登录")
+    assert _is_login_text("LOGIN")
+    assert _is_login_text("给我个验证码吧")
+    assert not _is_login_text("你好")
+    assert not _is_login_text("")
+
+
 def test_parse_user_text():
     from src.plugins.music_collector.game.router import _parse_user_text
 
@@ -450,6 +485,8 @@ if __name__ == "__main__":
     test_codes_and_sessions(tmp)
     test_auth_whitelist(tmp)
     test_dm_falls_back_to_group_session(tmp)
+    test_issue_code_and_text(tmp)
+    test_login_keywords()
     test_parse_user_text()
     test_list_windows(tmp)
     test_dispatch_flow(tmp)

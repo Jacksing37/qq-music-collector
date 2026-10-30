@@ -76,38 +76,60 @@ class GameAuth:
 
     # ------------------------------------------------------------ 发码
 
-    async def request_code(self, qq: int) -> tuple[bool, str]:
+    async def issue_code(self, qq: int) -> tuple[bool, str, int, str]:
+        """生成验证码但**不发**，返回 ``(成功, 验证码, 有效秒数, 失败原因)``。
+
+        拆出来是给「玩家先私聊机器人」那条路用的：那种场合必须**在原会话里回**，
+        用 ``send_private_msg`` 主动发反而会被协议端拒（非好友）。
+        """
         ok, reason = await self.check_allowed(qq)
         if not ok:
-            return False, reason
+            return False, "", 0, reason
         now = time.time()
         last = self._last_code_at.get(qq, 0.0)
         if now - last < CODE_COOLDOWN:
             wait = int(CODE_COOLDOWN - (now - last)) + 1
-            return False, f"刚发过一条，{wait} 秒后再试"
+            return False, "", 0, f"刚发过一条，{wait} 秒后再试"
         cfg = self._cfg()
         ttl = int(_cfg_get(cfg, "code_ttl_minutes", 10)) * 60
         code = await self.store.new_code(qq, ttl)
+        self._last_code_at[qq] = now
+        return True, code, ttl, ""
+
+    def code_text(self, code: str, ttl: int) -> str:
+        """验证码消息的统一文案（网页主动发 / 玩家先私聊 两条路共用）。"""
+        lines = [
+            f"猜歌游戏登录验证码：{code}",
+            f"{ttl // 60} 分钟内有效，只能使用一次。",
+        ]
+        base = str(_cfg_get(self._cfg(), "public_base_url", "") or "").strip()
+        if base:
+            lines.append(f"打开 {base.rstrip('/')}/guess 填进去")
+        lines.append("（不是你本人操作的请忽略这条消息）")
+        return "\n".join(lines)
+
+    async def request_code(self, qq: int) -> tuple[bool, str]:
+        """网页点「发验证码」：由机器人**主动**私聊/临时会话推给玩家。"""
+        cfg = self._cfg()
         bot = _pick_bot()
         if bot is None:
             return False, "机器人当前不在线，没法发私聊验证码，请稍后再试"
-        text = (
-            f"猜歌游戏登录验证码：{code}\n"
-            f"{ttl // 60} 分钟内有效，只能使用一次。\n"
-            "（不是你本人操作的请忽略这条消息）"
-        )
+        ok, code, ttl, reason = await self.issue_code(qq)
+        if not ok:
+            return False, reason
         # 临时会话必须带群号。名单里没记来源群（粘贴导入的常见）时退到配置里的
         # 默认群，否则这一步会被静默跳过——线上踩过：报「临时会话也没走通」，
         # 其实压根没发。
         group_hint = await self._group_hint(qq, cfg)
-        sent, err = await self._send_dm(bot, qq, text, group_hint)
+        sent, err = await self._send_dm(bot, qq, self.code_text(code, ttl), group_hint)
         if not sent:
+            # 没送到就别占着冷却，否则玩家立刻重试会被"刚发过"挡住
+            self._last_code_at.pop(qq, None)
             return False, (
-                "私聊验证码发不出去：机器人还不是你好友，群临时会话也没成功"
-                "（需要群主在群设置里允许「发起临时会话」）。"
-                f"最稳的办法是先加机器人为好友再试（{err}）"
+                "私聊验证码发不出去（协议端要求先加好友）。"
+                "改用在 QQ 里**私聊机器人发一句「登录」**，机器人会在那个会话里回码。"
+                f"（{err}）"
             )
-        self._last_code_at[qq] = now
         return True, "验证码已私聊发给你，去 QQ 里看一下"
 
     async def _group_hint(self, qq: int, cfg) -> int:

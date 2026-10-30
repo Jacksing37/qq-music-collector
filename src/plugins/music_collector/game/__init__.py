@@ -11,5 +11,6 @@
 """
 
 from .router import register_game, setup
+from . import handler as _handler  # noqa: F401  私聊「登录」→ 回验证码（matcher 在 import 时注册）
 
 __all__ = ["setup", "register_game"]
