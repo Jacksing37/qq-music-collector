@@ -246,6 +246,12 @@ FIELD_META["game.scores"] = (
 FIELD_META["game.live_limit_per_min"] = (
     "现场贴歌限频", "现场收集时每人每分钟最多提交几次（防刷解析接口）", False,
 )
+FIELD_META["game.random_default_count"] = (
+    "总库抽题默认数量", "「从总库抽题」默认抽几首（每个分享者最多出一首）", False,
+)
+FIELD_META["game.random_max_count"] = (
+    "总库抽题上限", "「从总库抽题」一次最多抽几首，超出按上限截断", False,
+)
 FIELD_META["game.archive_by_host"] = (
     "允许房主归档", "房主能否把现场收集的歌归档成网易云歌单（复用收集机器人的建歌单/简介逻辑）", False,
 )

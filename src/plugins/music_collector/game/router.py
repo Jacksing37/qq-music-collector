@@ -298,6 +298,39 @@ async def _dispatch(room: Room, qq: int, is_host: bool, action: str, body: dict)
             for p in room.players.values():
                 p.answers = {}
             return f"题目已切换为「{room.label}」，共 {len(room.cards)} 首"
+        if kind == "master":
+            try:
+                gid = int(body.get("group_id") or 0)
+            except (TypeError, ValueError):
+                raise RoomError("群号不对") from None
+            if not gid:
+                raise RoomError("先选群，再抽题")
+            cfg = _cfg()
+            cap = max(1, int(getattr(cfg, "random_max_count", 20)))
+            try:
+                want = int(body.get("count") or getattr(cfg, "random_default_count", 5))
+            except (TypeError, ValueError):
+                raise RoomError("题量不对") from None
+            want = max(1, min(want, cap))
+            cards = await bridge.cards_from_master(store, gid, want)
+            if not cards:
+                raise RoomError("这个群的总库里没有能出题的歌（要既有分享者、又有网易云音源）")
+            room.cards = []
+            room.uid_seq = 0
+            for card in cards:
+                room.add_card(card)
+            room.source = {"kind": "master", "group_id": gid, "count": len(room.cards)}
+            room.label = f"总库随机 {len(room.cards)} 首"
+            room.phase = PHASE_SETUP
+            room.result = None
+            room.archive = None
+            room.cur_idx = 0
+            for p in room.players.values():
+                p.answers = {}
+            return (
+                f"已从群 {gid} 的总库随机抽 {len(room.cards)} 首，"
+                "分享者各不相同"
+            )
         if kind == "live":
             room.source = {"kind": "live"}
             room.label = "现场收集"

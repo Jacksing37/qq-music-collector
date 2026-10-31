@@ -782,6 +782,10 @@ class GameConfig(BaseModel):
     scores: list[int] = Field(default_factory=lambda: [3, 2, 1])
     #: 现场收集：每人每分钟最多贴几次（防刷）
     live_limit_per_min: int = Field(10, ge=1, le=60)
+    #: 「从总库抽题」默认抽几首（每个分享者最多出一首）
+    random_default_count: int = Field(5, ge=1, le=200)
+    #: 「从总库抽题」一次最多抽几首，超出按上限截断
+    random_max_count: int = Field(20, ge=1, le=200)
     #: 是否允许房主把现场收集的歌归档成网易云歌单
     archive_by_host: bool = True
     #: 对外访问地址（生成房间链接用）。留空则按请求头推

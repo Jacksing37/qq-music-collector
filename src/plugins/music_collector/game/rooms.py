@@ -570,6 +570,9 @@ class RoomManager:
             "label": room.label,
             "slots": slots,
             "scores": scores,
+            # 「从总库抽题」的默认题量与上限，页面直接拿去渲染输入框
+            "random_default": int(getattr(cfg, "random_default_count", 5)),
+            "random_max": int(getattr(cfg, "random_max_count", 20)),
             "candidates": room.candidates(),
             "cards": [c.public(i) for i, c in enumerate(room.cards)],
             "my_answers": {

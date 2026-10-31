@@ -45,6 +45,8 @@ class Cfg:
     guess_slots = 3
     scores = [3, 2, 1]
     live_limit_per_min = 10
+    random_default_count = 5
+    random_max_count = 20
     archive_by_host = True
 
 
@@ -553,6 +555,142 @@ def test_dispatch_flow(tmp: Path):
     asyncio.run(run())
 
 
+def test_random_master_draw(tmp: Path):
+    """总库抽题：每个分享者最多一首、必须有网易云音源、题量按上限截断。
+
+    造 5 个分享者各 2 首，外加两类**不该被抽中**的干扰项：
+    无分享者（sharer_id=0）和没有网易云 id 的酷狗分享。
+    """
+    import sqlite3
+
+    from src.plugins.music_collector.game import bridge
+    from src.plugins.music_collector.game.store import GameStore as GS
+    from src.plugins.music_collector.store import MASTER_KEY
+
+    db = tmp / "master.db"
+    async def run():
+        store = GS(db)
+        await store.init()
+        with sqlite3.connect(db) as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS songs (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " group_id INTEGER, window_key TEXT, platform TEXT, song_id TEXT,"
+                " title TEXT, artists TEXT, album TEXT, cover TEXT, url TEXT,"
+                " duration INTEGER, sharer_id INTEGER, sharer_name TEXT, created_at REAL,"
+                " netease_id TEXT, matched INTEGER DEFAULT 0, sort_order INTEGER DEFAULT 0,"
+                " src_window TEXT DEFAULT '')"
+            )
+            rows = []
+            for i, qq in enumerate((111, 222, 333, 444, 555)):
+                for k in (1, 2):  # 每人两首
+                    rows.append((900001, MASTER_KEY, "netease", str(1000 + i * 10 + k),
+                                 f"歌{qq}-{k}", "歌手", qq, f"分享者{qq}", time.time(),
+                                 str(2000 + i * 10 + k)))
+            # 干扰项 1：没有分享者的歌
+            rows.append((900001, MASTER_KEY, "netease", "9001", "无主歌", "歌手", 0, "",
+                         time.time(), "3001"))
+            # 干扰项 2：酷狗分享、没匹配到网易云 id
+            rows.append((900001, MASTER_KEY, "kugou", "9002", "酷狗歌", "歌手", 666, "阿六",
+                         time.time(), ""))
+            # 干扰项 3：别的群的总库，不该被抽到
+            rows.append((900002, MASTER_KEY, "netease", "9003", "别群歌", "歌手", 777, "阿七",
+                         time.time(), "3003"))
+            conn.executemany(
+                "INSERT INTO songs (group_id, window_key, platform, song_id, title, artists,"
+                " sharer_id, sharer_name, created_at, netease_id)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                rows,
+            )
+            conn.commit()
+
+        got = await store.random_master_songs(900001, 3)
+        assert len(got) == 3, got
+        sharers = [int(r["sharer_id"]) for r in got]
+        assert len(set(sharers)) == 3, f"分享者应互不相同：{sharers}"
+        assert all(sharers), got
+        assert all(str(r["netease_id"] or "").strip() for r in got), got
+        assert all(int(r["group_id"]) == 900001 for r in got), got
+        assert 0 not in sharers and 666 not in sharers and 777 not in sharers, sharers
+
+        # 要得比分享者还多：只返回实际有的（5 个），不会重复同一个人
+        got = await store.random_master_songs(900001, 20)
+        assert len(got) == 5, [int(r["sharer_id"]) for r in got]
+        assert len({int(r["sharer_id"]) for r in got}) == 5
+
+        # 走 bridge：共享者信息进卡片（是答案），且卡片有播放 id
+        cards = await bridge.cards_from_master(store, 900001, 2)
+        assert len(cards) == 2, cards
+        assert all(c.sharer_qq and c.sharer_name for c in cards), cards
+        assert all(c.iframe_id for c in cards), cards
+
+    asyncio.run(run())
+
+
+def test_master_source_dispatch(tmp: Path):
+    """房主切「总库抽题」：数量按上限截断、没选群要报错、房间状态要重置。"""
+    from src.plugins.music_collector.game import router as RT
+
+    async def run():
+        mgr = _mgr()
+        RT.manager = mgr
+        RT.store = GameStore(tmp / "m.db")
+        await RT.store.init()
+        RT.auth = GameAuth(RT.store, lambda: Cfg())
+        room, _ = mgr.create(1, "甲", "multi")
+        mgr.join(room, 2, "乙")
+        room.add_card(_card("旧题", 111, "阿一"))
+        room.cur_idx = 1
+
+        async def fake_cards(_store, gid, count):
+            return [_card(f"抽{ i }", 900 + i, f"人{i}") for i in range(count)]
+
+        real = bridge_cards()
+        RT.bridge.cards_from_master = fake_cards
+        try:
+            # 没选群
+            try:
+                await RT._dispatch(room, 1, True, "select_source", {"kind": "master", "count": 3})
+            except R.RoomError as exc:
+                assert "群" in str(exc), exc
+            else:
+                raise AssertionError("没选群应该报错")
+
+            msg = await RT._dispatch(
+                room, 1, True, "select_source", {"kind": "master", "group_id": 1, "count": 3})
+            assert room.source["kind"] == "master" and room.source["count"] == 3, (msg, room.source)
+            assert len(room.cards) == 3 and room.cur_idx == 0, (len(room.cards), room.cur_idx)
+            assert "总库随机" in room.label, room.label
+
+            # 超过上限：截断到 random_max_count
+            cap = int(getattr(RT._cfg(), "random_max_count", 20))
+            await RT._dispatch(
+                room, 1, True, "select_source", {"kind": "master", "group_id": 1, "count": cap + 50})
+            assert room.source["count"] <= cap, room.source
+
+            # 空总库不建空局
+            async def empty(_store, gid, count):
+                return []
+
+            RT.bridge.cards_from_master = empty
+            try:
+                await RT._dispatch(
+                    room, 1, True, "select_source", {"kind": "master", "group_id": 1, "count": 3})
+            except R.RoomError:
+                pass
+            else:
+                raise AssertionError("总库为空应该报错")
+        finally:
+            RT.bridge.cards_from_master = real
+
+    asyncio.run(run())
+
+
+def bridge_cards():
+    from src.plugins.music_collector.game import router as RT
+
+    return RT.bridge.cards_from_master
+
+
 def test_config_defaults():
     cfg = AppConfig().game
     assert cfg.enabled and cfg.whitelist_only and cfg.guess_slots == 3
@@ -563,7 +701,8 @@ def test_config_defaults():
 def test_schema_has_game_section():
     keys = [f["key"] for s in W.SCHEMA for f in s["fields"]]
     for key in ("game.enabled", "game.room_idle_minutes", "game.scores",
-                "game.guess_slots", "game.archive_by_host"):
+                "game.guess_slots", "game.archive_by_host",
+                "game.random_default_count", "game.random_max_count"):
         assert key in keys, f"schema 缺少 {key}"
     assert "game.enabled" not in [s["key"] for s in W.BOT_SCHEMA]
     # 整段是进程级配置，网页「按群」视图要把它灰掉
@@ -594,6 +733,8 @@ if __name__ == "__main__":
     test_tag_vip_flags()
     test_parse_user_text()
     test_list_windows(tmp)
+    test_random_master_draw(tmp)
+    test_master_source_dispatch(tmp)
     test_dispatch_flow(tmp)
     test_config_defaults()
     test_schema_has_game_section()

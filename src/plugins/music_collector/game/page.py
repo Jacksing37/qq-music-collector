@@ -259,13 +259,17 @@ function viewSetup(st){
   return `
   ${st.is_host?`<div class="card">
     <h2>选题目</h2>
-    <p class="sub">可以拿某个历史收集窗口当题目，也可以让大家现场贴歌。</p>
+    <p class="sub">可以拿某个历史收集窗口当题目，从该群总库随机抽几首（分享者各不相同），也可以让大家现场贴歌。</p>
     <div class="row">
       <select id="grp"><option value="">选择群…</option></select>
       <select id="win"><option value="">选择窗口…</option></select>
     </div>
     <div class="row mt">
       <button id="useWin">用这个窗口</button>
+      <input id="rndCount" type="number" inputmode="numeric" min="1"
+             max="${st.random_max||20}" value="${st.random_default||5}" style="width:82px"
+             aria-label="抽几首">
+      <button id="useRnd">从总库抽这么多首</button>
       <button id="useLive" class="${live?"btn-primary":""}">现场收集</button>
     </div>
     <div class="msg" id="note2"></div>
@@ -499,6 +503,18 @@ function bindSourcePicker(st){
     if(!grp.value||!win.value){ setNote("先选群和窗口","err",2); return; }
     const opt=win.selectedOptions[0];
     act(st,"select_source",{kind:"window",group_id:Number(grp.value),window_key:win.value,label:opt?opt.dataset.label:""});
+  };
+  // 从总库抽题：题量夹在 [1, random_max] 之间，群必须选
+  const rndCount=document.getElementById("rndCount");
+  const useRnd=document.getElementById("useRnd");
+  if(useRnd) useRnd.onclick=()=>{
+    if(!grp.value){ setNote("先在左边选群","err",2); return; }
+    const cap=Number(st.random_max||20);
+    let n=Math.floor(Number(rndCount&&rndCount.value||st.random_default||5));
+    if(!isFinite(n)||n<1) n=1;
+    if(n>cap){ n=cap; if(rndCount) rndCount.value=String(cap); }
+    setNote("抽题中…","",2);
+    act(st,"select_source",{kind:"master",group_id:Number(grp.value),count:n});
   };
 }
 

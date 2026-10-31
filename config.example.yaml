@@ -446,5 +446,8 @@ game:
   guess_slots: 3              # 每题要排几个分享者（最多 3，因为只有 3 个档位分）
   scores: [3, 2, 1]           # 命中第 1/2/3 位各得多少分
   live_limit_per_min: 10      # 现场收集：每人每分钟最多贴几次（防刷）
+  # 「从总库抽题」默认抽几首 / 一次最多几首（每个分享者最多出一首，题目互不同人）
+  random_default_count: 5
+  random_max_count: 20
   archive_by_host: true       # 允许房主把现场收集的歌归档成网易云歌单
   public_base_url: ''         # 对外地址（生成房间链接用），留空按请求头推断

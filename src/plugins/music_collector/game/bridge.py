@@ -114,6 +114,39 @@ async def cards_from_window(group_id: int, window_key: str) -> list[Card]:
     return cards
 
 
+async def cards_from_master(game_store, group_id: int, count: int) -> list[Card]:
+    """从某个群的**总库**里随机抽几首当题目，每个分享者只出一首。
+
+    「总库」是跨窗口的合集，抽到的歌横跨一两年，适合房主懒得挑窗口时随手来一局。
+    VIP / 付费 / 已下架的照旧由 :func:`tag_vip` 标在卡片上、不过滤——和历史窗口
+    题库保持一致（玩家看得见提示，也就知道为什么没声）。
+
+    ``game_store`` 由调用方传入（router 持有那个实例），与 :func:`list_windows`
+    同一套约定。
+    """
+    rows = await game_store.random_master_songs(group_id, count)
+    cards = [
+        Card(
+            uid=0,
+            title=r["title"],
+            artists=r["artists"] or "",
+            cover=r["cover"] or "",
+            url=r["url"] or "",
+            platform=r["platform"] or "",
+            song_id=str(r["song_id"] or ""),
+            netease_id=(r["netease_id"] or None),
+            duration=int(r["duration"] or 0),
+            sharer_qq=int(r["sharer_id"] or 0),
+            sharer_name=r["sharer_name"] or "",
+        )
+        for r in rows
+    ]
+    if cards:
+        await tag_vip(cards)
+    _log(f"从群 {group_id} 总库随机抽题 {len(cards)} 首")
+    return cards
+
+
 async def tag_vip(cards: list[Card]) -> int:
     """批量问网易云要一次歌曲详情，标出 VIP / 付费专辑 / 已下架的曲目。
 
@@ -317,6 +350,7 @@ def _game_cfg():
 __all__ = [
     "list_windows",
     "cards_from_window",
+    "cards_from_master",
     "add_live_songs",
     "archive_room",
     "MAX_CARDS",

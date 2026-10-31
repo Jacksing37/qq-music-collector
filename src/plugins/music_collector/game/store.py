@@ -245,6 +245,47 @@ class GameStore:
 
     # ------------------------------------------------------- 只读：收集窗口
 
+    async def random_master_songs(self, group_id: int, limit: int) -> list[dict]:
+        """从某个群的总库里随机抽歌，**每个分享者最多一首**。
+
+        出题用：一局里让不同分享者的歌各来一首，候选池才有区分度（同一人分享的
+        两首歌，答案是同一个人，等于白送一题）。
+
+        只取「有分享者 + 有网易云 id」的行——没有 netease_id 就没有播放器，
+        出这种题只能干看歌名，玩家没法猜。
+
+        去重放在 Python 侧做：``GROUP BY`` 配裸列取哪一行在 SQLite 里是未定义的，
+        这里要的是「每个分享者随机一首」，显式遍历才说得清。
+        """
+        from ..store import MASTER_KEY
+
+        limit = max(1, int(limit))
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, group_id, platform, song_id, title, artists, cover, url,"
+                "       duration, sharer_id, sharer_name, netease_id"
+                " FROM songs"
+                " WHERE window_key=? AND group_id=? AND sharer_id>0"
+                "   AND trim(coalesce(sharer_name,''))<>''"
+                "   AND (trim(coalesce(netease_id,''))<>''"
+                "        OR (platform='netease' AND trim(coalesce(song_id,''))<>''))"
+                " ORDER BY RANDOM()",
+                (MASTER_KEY, int(group_id)),
+            ) as cur:
+                rows = await cur.fetchall()
+        picked: list[dict] = []
+        seen: set[int] = set()
+        for row in rows:
+            sid = int(row["sharer_id"] or 0)
+            if sid in seen:
+                continue
+            seen.add(sid)
+            picked.append(dict(row))
+            if len(picked) >= limit:
+                break
+        return picked
+
     async def window_stats(self) -> list[dict]:
         """列出各群各窗口的曲目概况，供房主「选题库」下拉用。
 
