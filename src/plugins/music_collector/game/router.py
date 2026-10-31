@@ -244,6 +244,23 @@ async def _api_room_action(request: Request):
     })
 
 
+def _advance_locked(room: Room, idx_before: int) -> str:
+    """交完当前这首之后推进：全员答完就翻页，翻到末尾直接结算。
+
+    调用方必须已持有 ``room.lock``；结算只算内存里的答案，**不碰网络**。
+    """
+    if not room.all_submitted():
+        return f"已提交，还有 {room.left_current()} 人没答"
+    done = room.advance_if_ready()
+    if done:
+        room.settle(_cfg().guess_slots, list(_cfg().scores))
+        return f"第 {idx_before + 1} 首答完，题目已过完，成绩揭晓"
+    return (
+        f"第 {idx_before + 1} 首全员答完，"
+        f"进入第 {room.cur_idx + 1} 首（共 {len(room.cards)} 首）"
+    )
+
+
 async def _dispatch(room: Room, qq: int, is_host: bool, action: str, body: dict) -> str:
     """所有房间动作的唯一入口。返回一句给玩家看的话。
 
@@ -277,6 +294,7 @@ async def _dispatch(room: Room, qq: int, is_host: bool, action: str, body: dict)
             room.phase = PHASE_SETUP
             room.result = None
             room.archive = None
+            room.cur_idx = 0
             for p in room.players.values():
                 p.answers = {}
             return f"题目已切换为「{room.label}」，共 {len(room.cards)} 首"
@@ -286,6 +304,7 @@ async def _dispatch(room: Room, qq: int, is_host: bool, action: str, body: dict)
             room.phase = PHASE_SETUP
             room.result = None
             room.archive = None
+            room.cur_idx = 0
             return "已切到现场收集，大家把歌曲链接贴进来吧"
         raise RoomError("题库类型不对")
 
@@ -326,21 +345,36 @@ async def _dispatch(room: Room, qq: int, is_host: bool, action: str, body: dict)
         room.archive = None
         # 开场打乱：卡片顺序与候选池顺序都洗一遍（顺带清空上一轮的作答与分数）
         room.shuffle_order()
-        return "游戏开始，排好三个分享者后提交"
+        return f"游戏开始，共 {len(room.cards)} 首，一首一首来"
 
     if action == "submit":
         if room.phase != PHASE_PLAYING:
             raise RoomError("现在不是作答阶段")
-        answers = body.get("answers")
-        if not isinstance(answers, dict):
+        card = room.cur_card()
+        if card is None:
+            raise RoomError("题目已经答完了")
+        # ``picks`` 是现在这一首的三个名字；老的整套 ``answers`` 也认（只取当前这首）
+        picks = body.get("picks")
+        if picks is None:
+            answers = body.get("answers")
+            if isinstance(answers, dict):
+                picks = answers.get(str(card.uid), answers.get(card.uid, []))
+        if not isinstance(picks, list):
             raise RoomError("答案格式不对")
-        room.submit(qq, answers, _cfg().guess_slots)
-        # 全员交卷即自动开牌（单人模式下就是自己交完立刻结算）
-        if room.all_submitted():
+        idx_before = room.cur_idx
+        room.submit_song(qq, picks, _cfg().guess_slots)
+        return _advance_locked(room, idx_before)
+
+    if action == "skip_song":
+        if not is_host:
+            raise RoomError("只有房主能跳过这首")
+        if room.phase != PHASE_PLAYING:
+            raise RoomError("现在不是作答阶段")
+        idx_before = room.cur_idx
+        if room.skip_current():
             room.settle(_cfg().guess_slots, list(_cfg().scores))
-            return "全员已提交，成绩已揭晓"
-        left = sum(1 for p in room.players.values() if not p.answers)
-        return f"已提交，还有 {left} 人没交"
+            return "题目已过完，成绩已揭晓"
+        return f"房主跳过了第 {idx_before + 1} 首，现在是第 {room.cur_idx + 1} 首"
 
     if action == "settle":
         if not is_host:
@@ -380,6 +414,12 @@ async def _api_room_leave(request: Request):
         return JSONResponse({"ok": True})
     async with _lock:
         empty = manager.leave(room, qq)
+        # 人走了一条，当前这首可能就「全员答完」了，不能干等着
+        if not empty and room.phase == PHASE_PLAYING:
+            async with room.lock:
+                if room.all_submitted():
+                    if room.advance_if_ready():
+                        room.settle(_cfg().guess_slots, list(_cfg().scores))
     if empty or room.mode == "single":
         manager.drop(room.code)
     else:

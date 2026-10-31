@@ -10,6 +10,9 @@
 3. **房主 = 在座玩家里 ``seq`` 最小的那位**。用户说的「房主退出后第二个进来的人接任」
    就是这条，用加入序号判定，不做数组下标——转让之后下标会乱。
 4. **断线重连靠 player token**。同一个 QQ 带对 token 就恢复原身份与已提交答案。
+5. **一次只看一道题**。``cur_idx`` 指向当前在答的那首，全员答完（弃答的空列表也算）
+   才 +1，走到末尾自动结算。页面只显示「还剩几个人没答」这个人数字——**谁交了是
+   猜身份的线索**，不能列名字。
 """
 
 from __future__ import annotations
@@ -116,6 +119,9 @@ class Room:
     #: 候选池的展示顺序（存放 QQ 号）。**开场时打乱**——按「谁先分享」排会让
     #: 玩家把候选顺序和卡片顺序对照着推，等于白送线索。
     cand_order: list[int] = field(default_factory=list)
+    #: 逐题作答：现在在答第几首（``playing`` 阶段有效）。全员答完这一首就 +1，
+    #: 走到末尾即结算。开新局 / 换题库都要归零，否则下标会和题目错位。
+    cur_idx: int = 0
     #: 房间级锁：同一房间的动作串行执行，不同房间互不阻塞。
     #: 现场贴歌要联网解析（可能好几秒），用一把全局锁会把别的房间一起卡住。
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -142,6 +148,7 @@ class Room:
         self.phase = PHASE_SETUP if self.cards else PHASE_LOBBY
         self.result = None
         self.archive = None
+        self.cur_idx = 0
         for p in self.players.values():
             p.answers = {}
             p.score = 0
@@ -187,6 +194,7 @@ class Room:
         """
         random.shuffle(self.cards)
         random.shuffle(self.cand_order)
+        self.cur_idx = 0
         for p in self.players.values():
             p.answers = {}
             p.score = 0
@@ -212,8 +220,39 @@ class Room:
 
     # ---------------------------------------------------------------- 作答
 
+    def cur_card(self) -> Optional[Card]:
+        """现在在答哪一首；最后一首也答完之后返回 ``None``（等结算）。"""
+        if 0 <= self.cur_idx < len(self.cards):
+            return self.cards[self.cur_idx]
+        return None
+
+    def left_current(self) -> int:
+        """当前这首还有几个人没答。
+
+        **只输出人数，不输出名单**——谁交了是别人猜身份的线索，页面上一律不显示。
+        """
+        card = self.cur_card()
+        if card is None:
+            return 0
+        return sum(1 for p in self.players.values() if card.uid not in p.answers)
+
+    def submit_song(self, qq: int, picks: list, slots: int) -> None:
+        """交**当前这一首**。
+
+        空列表也算答完（等于弃答）——否则一个人不想选就永远等不齐，
+        「全员答完才进下一首」会把整局卡死。
+        """
+        card = self.cur_card()
+        if card is None:
+            raise RoomError("题目已经答完了")
+        self.players[qq].answers[card.uid] = _clean_picks(picks, slots)
+        self.touch()
+
     def submit(self, qq: int, answers: dict[int, list[int]], slots: int) -> None:
-        player = self.players[qq]
+        """一次性交整套答案（老接口，测试与将来「补录」用）。
+
+        正常流程走 :meth:`submit_song`：一题一交，交完等全员。
+        """
         valid_uids = {c.uid for c in self.cards}
         cleaned: dict[int, list[int]] = {}
         for raw_uid, picks in answers.items():
@@ -223,21 +262,33 @@ class Room:
                 continue
             if uid not in valid_uids or not isinstance(picks, list):
                 continue
-            row: list[int] = []
-            # 先去重再截断：前端若传来 [A,A,B,C] 这种，直接切前三个会丢掉 C
-            for q in picks:
-                try:
-                    q = int(q)
-                except (TypeError, ValueError):
-                    continue
-                if q not in row:
-                    row.append(q)
-            cleaned[uid] = row[:slots]
-        player.answers = cleaned
+            cleaned[uid] = _clean_picks(picks, slots)
+        self.players[qq].answers = cleaned
         self.touch()
 
     def all_submitted(self) -> bool:
-        return all(p.answers for p in self.players.values()) and bool(self.players)
+        """当前这首是否全员答完。
+
+        判据是「``answers`` 里有没有这个 uid」，不能看列表真假——弃答也是空列表。
+        """
+        card = self.cur_card()
+        if card is None or not self.players:
+            return False
+        return all(card.uid in p.answers for p in self.players.values())
+
+    def advance_if_ready(self) -> bool:
+        """全员答完当前这首就翻到下一首。返回 ``True`` 表示已经到头，该结算了。"""
+        if not self.all_submitted():
+            return False
+        self.cur_idx += 1
+        self.touch()
+        return self.cur_idx >= len(self.cards)
+
+    def skip_current(self) -> bool:
+        """房主跳过当前这首（有人掉线 / 挂机时的兜底）。返回 ``True`` 表示已经到头。"""
+        self.cur_idx += 1
+        self.touch()
+        return self.cur_idx >= len(self.cards)
 
     # ---------------------------------------------------------------- 结算
 
@@ -301,6 +352,24 @@ class Room:
             if card.sharer_qq == qq:
                 return card.sharer_name or str(qq)
         return str(qq)
+
+
+def _clean_picks(picks: object, slots: int) -> list[int]:
+    """整理一份作答：去重 + 截到 ``slots`` 位。
+
+    先去重再截断——前端若传来 ``[A,A,B,C]``，直接切前三个会把 C 丢掉。
+    """
+    row: list[int] = []
+    if not isinstance(picks, list):
+        return row
+    for q in picks:
+        try:
+            q = int(q)
+        except (TypeError, ValueError):
+            continue
+        if q not in row:
+            row.append(q)
+    return row[:slots]
 
 
 def _ranking(players: list[Player]) -> list[dict]:
@@ -461,7 +530,21 @@ class RoomManager:
         slots = int(getattr(cfg, "guess_slots", 3))
         scores = list(getattr(cfg, "scores", [3, 2, 1]))
         me = room.players.get(viewer)
-        submitted = sum(1 for p in room.players.values() if p.answers)
+        card = room.cur_card() if room.phase == PHASE_PLAYING else None
+        left = room.left_current() if card is not None else 0
+        cur = None
+        if card is not None:
+            cur = {
+                "idx": room.cur_idx,
+                "uid": card.uid,
+                "card": card.public(room.cur_idx),
+                "total": len(room.cards),
+                # 只给人数，不给谁还没答
+                "left": left,
+                "answered": bool(me is not None and card.uid in me.answers),
+                "picks": list(me.answers.get(card.uid, [])) if me is not None else [],
+            }
+        total = len(room.players)
         payload = {
             "code": room.code,
             "mode": room.mode,
@@ -475,7 +558,8 @@ class RoomManager:
                     "qq": p.qq,
                     "nick": p.nick,
                     "online": p.online,
-                    "submitted": bool(p.answers),
+                    # 「交了没」指**当前这一首**：逐题作答下，整卷提交的概念已经没了
+                    "submitted": bool(card is not None and card.uid in p.answers),
                     "score": p.score,
                     "is_host": p.qq == room.host_qq,
                     "is_me": p.qq == viewer,
@@ -491,8 +575,10 @@ class RoomManager:
             "my_answers": {
                 str(uid): picks for uid, picks in (me.answers.items() if me else [])
             },
-            "submitted": submitted,
-            "total": len(room.players),
+            # 当前这首的作答进度（页面只显示 cur.left 这个人数字）
+            "cur": cur,
+            "submitted": (total - left) if card is not None else 0,
+            "total": total,
             "archive": room.archive,
         }
         if room.phase == PHASE_SETTLED and room.result is not None:

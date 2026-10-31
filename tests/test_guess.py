@@ -105,6 +105,53 @@ def test_pick_validation():
     assert 9999 not in room.players[1].answers
 
 
+def test_per_song_flow():
+    """一次只看一道题：全员答完当前这首才进下一首，到末尾自动结算。
+
+    弃答（空列表）也要算「答完」，不然一个人不选就把整局卡死。
+    """
+    mgr = _mgr()
+    room, _ = mgr.create(1, "甲", "multi")
+    mgr.join(room, 2, "乙")
+    mgr.join(room, 3, "丙")
+    for i in range(3):
+        room.add_card(_card(f"T{i}", 100 + i, f"人{i}"))
+    room.phase = R.PHASE_PLAYING
+    room.cur_idx = 0
+    first_uid = room.cards[0].uid
+
+    assert room.cur_card().uid == first_uid
+    assert room.left_current() == 3
+
+    room.submit_song(1, [100], 3)
+    assert not room.advance_if_ready(), "只有一个人答完，不该翻页"
+    assert room.cur_idx == 0
+    assert room.left_current() == 2, "没答的人数要算得出来（页面只显示这个数）"
+
+    room.submit_song(2, [], 3)  # 弃答
+    assert room.left_current() == 1
+    assert not room.advance_if_ready()
+
+    room.submit_song(3, [100, 200], 3)
+    assert room.all_submitted()
+    assert not room.advance_if_ready(), "后面还有题，不该结算"
+    assert room.cur_idx == 1, "全员答完要自动翻到下一首"
+    assert room.left_current() == 3, "新的一首从零开始数"
+    assert room.players[2].answers[first_uid] == [], "弃答要留一条空记录"
+
+    # 快照里只给「还剩几人」，不给名单
+    snap = mgr.state(room, 2)
+    assert set(snap["cur"]) == {"idx", "uid", "card", "total", "left", "answered", "picks"}
+    assert snap["cur"]["left"] == 3 and snap["cur"]["idx"] == 1
+
+    # 房主可以跳过（有人掉线/挂机的兜底）
+    assert not room.skip_current()
+    assert room.cur_idx == 2
+    assert room.skip_current(), "最后一首跳过后应当到头（该结算）"
+    room.settle(3, [3, 2, 1])
+    assert room.phase == R.PHASE_SETTLED
+
+
 # ---------------------------------------------------------------- 题目
 
 
@@ -529,6 +576,7 @@ if __name__ == "__main__":
     test_scoring_and_ranking()
     test_same_score_ties()
     test_pick_validation()
+    test_per_song_flow()
     test_dedupe_same_and_cross_platform()
     test_candidates_dedup()
     test_host_succession()

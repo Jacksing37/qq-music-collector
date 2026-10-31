@@ -237,7 +237,7 @@ function viewRoom(){
     <h2>房间里的人（${st.total}）</h2>
     <div class="plist" id="plist">${st.players.map(p=>`
       <span class="pill ${p.online?"":"off"} ${p.is_me?"me":""}">
-        ${esc(p.nick)}${p.is_host?' <span class="tag host">房主</span>':""}${p.submitted?' <span class="tag done">已交</span>':""}${p.is_me?" (我)":""}
+        ${esc(p.nick)}${p.is_host?' <span class="tag host">房主</span>':""}${p.is_me?" (我)":""}
         ${(st.is_host&&!p.is_host)?`<a href="#" data-transfer="${p.qq}" style="margin-left:6px;font-size:12px">转让</a>`:""}
       </span>`).join("")}</div>
     <div class="msg" id="note"></div>
@@ -321,32 +321,42 @@ function clientPlayUrl(id){
 }
 
 function viewPlaying(st){
-  const cards = st.cards||[];
-  const cands = st.candidates||[];
-  const done = Object.keys(PICKS).filter(k=>(PICKS[k]||[]).length).length;
+  const cur = st.cur;
+  const total = (st.cards||[]).length;
+  if(!cur){
+    return `<div class="card">
+      <h2>作答</h2>
+      <p class="sub">这一局的题都答完了，等房主结算。</p>
+    </div>`;
+  }
+  const c = cur.card||{};
   return `
   <div class="card">
-    <h2>作答（<span id="doneCount">${done}</span>/${cards.length}）</h2>
-    <p class="sub">每首歌按顺序点 ${st.slots} 个名字；点错了再点一下就撤销。选中后角标是名次。</p>
-    <div class="bar"><i id="progBar" style="width:${cards.length?Math.round(done*100/cards.length):0}%"></i></div>
-    <div class="sub">已提交 <span id="subCount">${st.submitted}</span>/${st.total} 人</div>
+    <h2>第 ${cur.idx+1} / ${total} 首</h2>
+    <p class="sub">这一首按顺序点 ${st.slots} 个名字；点错了再点一下就撤销。<b>全员答完自动进下一首。</b></p>
+    <div class="bar"><i id="progBar" style="width:${total?Math.round(cur.idx*100/total):0}%"></i></div>
+    <div class="sub" id="waitLine">${waitText(cur)}</div>
   </div>
-  ${cards.map((c,i)=>{
-    const picks = PICKS[c.uid]||[];
-    return `<div class="gcard" data-uid="${c.uid}">
-      <div class="idx">第 ${i+1} 首</div>
-      <div class="title">${esc(c.title)}${c.vip?'<span class="tag vip">VIP</span>':""}</div>
-      <div class="artist">${esc(c.artists||"未知歌手")}
-        <a href="${neteaseLink(c)}" target="_blank" rel="noreferrer" style="margin-left:8px;font-size:12px">去网易云听</a>
-        ${c.netease_id?`<a href="${clientPlayUrl(c.netease_id)}" style="margin-left:10px;font-size:12px"
-          title="需要装了网易云客户端；点完约 5 秒才开播（客户端要先解析）；QQ/微信内置浏览器常拦截这类链接，用系统浏览器打开更稳">去客户端听</a>`:""}</div>
-      ${c.netease_id?`<iframe class="player" loading="lazy" src="https://music.163.com/outchain/player?type=2&id=${esc(c.netease_id)}&auto=0&height=66" allow="autoplay"></iframe>`
-        :`<div class="noaudio">这首没匹配到网易云的 id，内嵌播放器放不了，点上面的「去网易云听」。</div>`}
-      ${c.vip?`<div class="noaudio">VIP / 付费曲：内嵌播放器不带登录态，本来就放不出声。点「去客户端听」（客户端里有会员就能放），或「去网易云听」。</div>`:""}
-      <div class="chips" data-chips="${c.uid}">${chipsHtml(c.uid, cands)}</div>
-    </div>`;
-  }).join("")}
-  <button class="btn-primary btn-big" id="submit">提交</button>`;
+  <div class="gcard" data-uid="${cur.uid}">
+    <div class="title">${esc(c.title||"")}${c.vip?'<span class="tag vip">VIP</span>':""}</div>
+    <div class="artist">${esc(c.artists||"未知歌手")}
+      <a href="${neteaseLink(c)}" target="_blank" rel="noreferrer" style="margin-left:8px;font-size:12px">去网易云听</a>
+      ${c.netease_id?`<a href="${clientPlayUrl(c.netease_id)}" style="margin-left:10px;font-size:12px"
+        title="需要装了网易云客户端；点完约 5 秒才开播（客户端要先解析）；QQ/微信内置浏览器常拦截这类链接，用系统浏览器打开更稳">去客户端听</a>`:""}</div>
+    ${c.netease_id?`<iframe class="player" loading="lazy" src="https://music.163.com/outchain/player?type=2&id=${esc(c.netease_id)}&auto=0&height=66" allow="autoplay"></iframe>`
+      :`<div class="noaudio">这首没匹配到网易云的 id，内嵌播放器放不了，点上面的「去网易云听」。</div>`}
+    ${c.vip?`<div class="noaudio">VIP / 付费曲：内嵌播放器不带登录态，本来就放不出声。点「去客户端听」（客户端里有会员就能放），或「去网易云听」。</div>`:""}
+    <div class="chips" data-chips="${cur.uid}">${chipsHtml(cur.uid, st.candidates||[])}</div>
+  </div>
+  <button class="btn-primary btn-big" id="submit">${cur.answered?"改一下（重新提交）":"提交这首"}</button>
+  ${st.is_host?`<button class="btn-sm btn-ghost mt" id="skip"
+    title="有人掉线/挂机时用：不等他，直接翻到下一首">跳过这首（房主）</button>`:""}`;
+}
+
+/* 「还剩几个人没答」只给人数。谁交了是猜身份的线索，不能列名字。 */
+function waitText(cur){
+  const left = (cur&&cur.left)||0;
+  return left>0 ? `还有 <b>${left}</b> 人未答` : "都答完了，马上进下一首…";
 }
 
 function viewSettled(st){
@@ -414,7 +424,11 @@ function bindRoom(st){
     finally{ BUSY=false; }
   });
   on("#start", ()=>act(st,"start"));
-  on("#submit", ()=>submitAnswers(st));
+  on("#submit", ()=>submitSong(st));
+  on("#skip", ()=>{
+    if(!confirm("跳过当前这首？没答的人这首记 0 分。")) return;
+    act(st,"skip_song");
+  });
   on("#next", ()=>act(st,"reset"));
   on("#archive", async()=>{
     if(!confirm("把这一局的曲目归档成网易云歌单？")) return;
@@ -455,17 +469,19 @@ function togglePick(uid, qq){
     box.innerHTML = chipsHtml(uid, (S&&S.candidates)||[]);
     bindChips(box);
   }
-  updateProgress();
 }
 
+/* 只动「还剩几人」这类轻量元素，不重建卡片——重建 iframe 会打断正在放的歌。 */
 function updateProgress(){
-  const total = (S&&S.cards||[]).length;
-  const done = Object.keys(PICKS).filter(k=>(PICKS[k]||[]).length).length;
-  const dc=document.getElementById("doneCount"); if(dc) dc.textContent=done;
+  const cur = S && S.cur;
+  if(!cur) return;
+  const total = ((S&&S.cards)||[]).length;
   const bar=document.getElementById("progBar");
-  if(bar) bar.style.width=(total?Math.round(done*100/total):0)+"%";
-  const sc=document.getElementById("subCount");
-  if(sc && S) sc.textContent=S.submitted;
+  if(bar) bar.style.width=(total?Math.round(cur.idx*100/total):0)+"%";
+  const wl=document.getElementById("waitLine");
+  if(wl) wl.innerHTML=waitText(cur);
+  const btn=document.getElementById("submit");
+  if(btn) btn.textContent = cur.answered?"改一下（重新提交）":"提交这首";
 }
 
 function bindSourcePicker(st){
@@ -502,34 +518,35 @@ async function act(st,action,extra,keepNote){
   return null;
 }
 
-async function submitAnswers(st){
-  const answers={};
-  Object.keys(PICKS).forEach(uid=>{ if((PICKS[uid]||[]).length) answers[uid]=PICKS[uid]; });
-  if(!Object.keys(answers).length){ note("至少排一首再提交","err"); return; }
-  const unanswered=(st.cards||[]).length-Object.keys(answers).length;
-  if(unanswered>0 && !confirm(`还有 ${unanswered} 首没排，这些题会得 0 分。确定提交？`)) return;
-  await act(st,"submit",{answers});
+async function submitSong(st){
+  const cur = S && S.cur;
+  if(!cur){ note("这一局的题都答完了","err"); return; }
+  const picks = PICKS[cur.uid]||[];
+  if(!picks.length && !confirm("一个名字都没选，这首会记 0 分。确定交？")) return;
+  await act(st,"submit",{picks});
 }
 
 /* ---------------------------------------------------------------- 状态 */
 function applyState(next){
   if(!next) return;
   const prev = S;
-  const sameCards = prev && prev.phase==="playing" && next.phase==="playing"
-    && (prev.cards||[]).length===(next.cards||[]).length
-    && (prev.cards||[]).every((c,i)=>next.cards[i]&&c.uid===next.cards[i].uid);
+  const prevUid = prev && prev.cur ? prev.cur.uid : null;
+  const curUid = next.cur ? next.cur.uid : null;
   S = next;
-  if(next.phase==="playing"){
-    if(!prev || prev.phase!=="playing"){
+  if(next.phase==="playing" && next.cur){
+    // 换了一首才清本地选择；同一首的进度变化不能把玩家点好的名字冲掉
+    if(curUid!==prevUid){
       PICKS={};
-      const mine=next.my_answers||{};
-      Object.keys(mine).forEach(k=>{ PICKS[k]=mine[k]; });
+      const mine=next.cur.picks||[];
+      if(mine.length) PICKS[curUid]=mine.slice();
     }
   } else {
     PICKS={};
   }
-  // 只是「有人交卷」这种小变化：不动 DOM 主体，避免 iframe 重载打断播放
-  if(sameCards){ lightUpdate(); return; }
+  // 同一首里只是「有人交了 / 我改了答案」：不动 DOM 主体，免得 iframe 重载打断播放
+  if(prev && prev.phase==="playing" && next.phase==="playing" && prevUid===curUid){
+    lightUpdate(); return;
+  }
   render();
 }
 
@@ -539,7 +556,7 @@ function lightUpdate(){
   if(box && S){
     box.innerHTML=S.players.map(p=>`
       <span class="pill ${p.online?"":"off"} ${p.is_me?"me":""}">
-        ${esc(p.nick)}${p.is_host?' <span class="tag host">房主</span>':""}${p.submitted?' <span class="tag done">已交</span>':""}${p.is_me?" (我)":""}
+        ${esc(p.nick)}${p.is_host?' <span class="tag host">房主</span>':""}${p.is_me?" (我)":""}
       </span>`).join("");
   }
 }
