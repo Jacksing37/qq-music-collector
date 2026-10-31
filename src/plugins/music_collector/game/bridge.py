@@ -109,7 +109,7 @@ async def cards_from_window(group_id: int, window_key: str) -> list[Card]:
             sharer_name=s.sharer_name,
         ))
     if matched:
-        _log(f"窗口 {group_id}/{window_key} 补匹配网易云 {matched} 首")
+        _log.info(f"窗口 {group_id}/{window_key} 补匹配网易云 {matched} 首")
     await tag_vip(cards)
     return cards
 
@@ -143,7 +143,7 @@ async def cards_from_master(game_store, group_id: int, count: int) -> list[Card]
     ]
     if cards:
         await tag_vip(cards)
-    _log(f"从群 {group_id} 总库随机抽题 {len(cards)} 首")
+    _log.info(f"从群 {group_id} 总库随机抽题 {len(cards)} 首")
     return cards
 
 
