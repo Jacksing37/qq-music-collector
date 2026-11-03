@@ -124,6 +124,9 @@ def test_strip_leading_at():
     # 连续两个开头的 @ 都剥
     body, dropped = M.strip_leading_at("@菜老名 @Luvu53lfplz 你俩都别跑", ["菜老名", "Luvu53lfplz"])
     assert body == "你俩都别跑", body
+    # 昵称打错一个字母也要剥（线上真事：@Luvu53elfplz vs Luvu53lfplz）
+    body, dropped = M.strip_leading_at("@Luvu53elfplz 废？", ["Luvu53lfplz"])
+    assert body == "废？", body
     # 没有候选名字（例如不 @ 任何人时）就不剥
     body, dropped = M.strip_leading_at("@菜老名 你好", [])
     assert body == "@菜老名 你好" and dropped == ""

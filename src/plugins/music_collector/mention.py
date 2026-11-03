@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -225,6 +226,18 @@ def strip_leading_at(text: str, names: Iterable[str]) -> tuple[str, str]:
             if len(rest) >= len(name) and _norm(rest[: len(name)]) == _norm(name):
                 if len(name) > len(hit):
                     hit = name
+        if not hit:
+            # 精确匹配不上再来一次「模糊匹配」：模型把昵称打错一个字母很常见
+            # （线上真事：@Luvu53elfplz vs Luvu53lfplz），不剥的话又是「真 @ + 错字 @」
+            token = rest.split()[0] if rest.split() else ""
+            token = token.strip(" ：:，,、（()）[]【】")
+            if token:
+                for name in cand:
+                    if abs(len(token) - len(name)) > 2:
+                        continue
+                    if SequenceMatcher(None, _norm(token), _norm(name)).ratio() >= 0.8:
+                        hit = token
+                        break
         if not hit:
             break
         body = rest[len(hit):].lstrip(" ：:，,、")
