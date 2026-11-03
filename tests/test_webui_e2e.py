@@ -2,10 +2,14 @@
 
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, ".")
 
 os.environ["MUSIC_WEBUI_TOKEN"] = "smoke-token"
+# 单独跑时也别碰真实 data/（这组用例会写配置、清 api_key）
+if not os.environ.get("MUSIC_DATA_DIR"):
+    os.environ["MUSIC_DATA_DIR"] = tempfile.mkdtemp(prefix="music-test-data-")
 
 import nonebot  # noqa: E402
 

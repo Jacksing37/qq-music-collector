@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 import tempfile
 import time
@@ -26,6 +27,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src" / "plugins"))
+# 单独跑（不经过 run_all.py）时也必须把 data/ 挪到临时目录：这组用例会改 llm 配置
+# 并把 api_key 清空，踩到真实 data/config.yaml 就等于把线上机器人改成 smoke-model。
+if not os.environ.get("MUSIC_DATA_DIR"):
+    os.environ["MUSIC_DATA_DIR"] = tempfile.mkdtemp(prefix="music-test-data-")
 
 import nonebot  # noqa: E402
 
