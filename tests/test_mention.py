@@ -124,6 +124,13 @@ def test_strip_leading_at():
     # 连续两个开头的 @ 都剥
     body, dropped = M.strip_leading_at("@菜老名 @Luvu53lfplz 你俩都别跑", ["菜老名", "Luvu53lfplz"])
     assert body == "你俩都别跑", body
+    # 昵称是空的时候，模型会照 QQ 号写（线上真事：22:29 那条「@3513457107 光让菜老名传话…」）
+    body, dropped = M.strip_leading_at("@3513457107 光让菜老名传话算什么", ["", "3513457107"])
+    assert body == "光让菜老名传话算什么", body
+    assert dropped == "3513457107"
+    # 但 QQ 号只认精确相等：差一位就是另一个人，不许剥
+    body, dropped = M.strip_leading_at("@3513457108 你说啥", ["3513457107"])
+    assert body == "@3513457108 你说啥", body
     # 昵称打错一个字母也要剥（线上真事：@Luvu53elfplz vs Luvu53lfplz）
     body, dropped = M.strip_leading_at("@Luvu53elfplz 废？", ["Luvu53lfplz"])
     assert body == "废？", body

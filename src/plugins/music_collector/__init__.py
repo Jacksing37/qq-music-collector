@@ -653,12 +653,15 @@ async def _llm_answer(
     else:
         at_qqs = []
     if at_qqs:
-        nick_of_at = {int(user_id): _sender_nick(event)}
+        # 要剥的名字：昵称、别名**还有 QQ 号本身**。QQ 号必须算进来——NapCat 的 at 段
+        # 经常不带 name，候选里 nick 是空的，模型就只能照着 QQ 号写「@3513457107」
+        names_for: dict[int, list[str]] = {}
+        names_for.setdefault(int(user_id), []).extend([_sender_nick(event), str(user_id)])
         for tgt in mention_targets:
-            nick_of_at.setdefault(int(tgt.qq), tgt.nick)
-        reply, dropped = mention_mod.strip_leading_at(
-            reply, [nick_of_at.get(qq, "") for qq in at_qqs]
-        )
+            bucket = names_for.setdefault(int(tgt.qq), [])
+            bucket.extend([tgt.nick, *tgt.aliases, str(tgt.qq)])
+        strip_names = [n for qq in at_qqs for n in names_for.get(int(qq), []) if str(n or "").strip()]
+        reply, dropped = mention_mod.strip_leading_at(reply, strip_names)
         if dropped:
             logger.info(f"[mention] 群{group_id} 正文开头的「@{dropped}」已去掉（已经真 @ 过他）")
 

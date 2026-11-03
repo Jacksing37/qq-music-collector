@@ -233,6 +233,10 @@ def strip_leading_at(text: str, names: Iterable[str]) -> tuple[str, str]:
             token = token.strip(" ：:，,、（()）[]【】")
             if token:
                 for name in cand:
+                    # 纯数字（QQ 号）不走模糊：两个十位号码差一位相似度也有 0.9，
+                    # 那是**两个人**，剥错就把别人写的话删了
+                    if token.isdigit() or str(name).isdigit():
+                        continue
                     if abs(len(token) - len(name)) > 2:
                         continue
                     if SequenceMatcher(None, _norm(token), _norm(name)).ratio() >= 0.8:
