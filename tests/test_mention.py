@@ -133,7 +133,7 @@ def _ctx(targets, cap=3):
 def test_handler_records_and_caps():
     async def run():
         targets = _targets()
-        ctx = _ctx(targets)
+        ctx = _ctx(targets, cap=2)   # 上限压到 2，第三个才验得出拒绝
         out = await T._handle_mention({"who": "Luvu53lfplz"}, ctx)
         assert ctx.mentions == [QUOTED], ctx.mentions
         assert "已记下" in out, out
@@ -156,7 +156,7 @@ def test_handler_records_and_caps():
 def test_handler_rejects_outsider():
     async def run():
         targets = _targets()
-        ctx = _ctx(targets)
+        ctx = _ctx(targets, cap=2)   # 上限压到 2，第三个才验得出拒绝
         out = await T._handle_mention({"who": "路人甲"}, ctx)
         assert ctx.mentions == [], "名单外的人不许被记下"
         assert "这次能 @ 的人" in out, "拒绝时要把名单回给模型"
