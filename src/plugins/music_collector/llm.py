@@ -1062,6 +1062,8 @@ class LLMBot:
         context: str = "",
         background: str = "",
         mem: Optional[MemoryConfig] = None,
+        persist: bool = True,
+        memory_group: Optional[int] = None,
     ) -> tuple[Optional[str], str]:
         """生成一条回复。
 
@@ -1072,6 +1074,10 @@ class LLMBot:
         请求、不写进上下文历史；分开传是为了日志里能分别记账——排查「答得驴唇不对
         马嘴」时，最要紧的就是看它当时读到的背景到底是什么。
         ``mem`` 是记忆配置（不传就用默认值，指向 ``data/memory``）。
+
+        ``persist`` / ``memory_group`` 只给网页「聊天测试」用：``persist=False`` 时不把
+        这轮对话写进 ``chat_log``（否则测试内容会变成记忆整理的素材）；``memory_group``
+        指定「只借用某个群的档案」，而历史与记录仍留在测试用的虚拟群里。
 
         返回 ``(回复文本, 原因)``：
 
@@ -1165,7 +1171,8 @@ class LLMBot:
             # 工具一开就是「agent 模式」：能力边界（不许装技能、不许写文件）由代码
             # 追加在系统提示词末尾，用户改人设也删不掉。群成员档案插在人设之后，
             # 硬规则之前——档案再长也盖不掉能力边界。
-            memory_text = memory_mod.render_for_prompt(memory_cfg, group_id)
+            memory_gid = int(memory_group) if memory_group is not None else group_id
+            memory_text = memory_mod.render_for_prompt(memory_cfg, memory_gid)
             system = system_text(
                 cfg,
                 tools_mod.TOOL_RULES if cfg.tools else "",
@@ -1304,7 +1311,7 @@ class LLMBot:
             # 落库**不受 history_rounds 限制**：即使关了上下文，这些对话仍然是
             # 记忆整理任务的素材。写库失败只记一条日志，绝不拖累「已经把回复发出去了」
             # 这个结果。
-            if self._store is not None:
+            if persist and self._store is not None:
                 try:
                     await self._store.append_chat(
                         group_id, user_id, speaker, "user", body[:item_limit], kind="chat"

@@ -56,7 +56,14 @@ input[type=checkbox]{width:18px;height:18px;accent-color:var(--accent)}
 .sidebar{width:210px;flex:0 0 210px;background:var(--side);border-right:1px solid var(--card-bd);
   padding:14px 10px;position:sticky;top:57px;height:calc(100vh - 57px);overflow:auto}
 .sidebar .brand{padding:6px 10px 12px;font-size:14px;color:var(--muted);font-weight:600}
-.nav{display:block;width:100%;text-align:left;margin-bottom:6px;background:transparent;border:none;color:var(--txt)}
+/* 导航项：同一条样式要同时喂给 <button> 和 <a>（猜歌名单是外链），所以 padding /
+   圆角 / 光标都得显式写出来——只靠 button 的默认样式，<a> 会瘦一圈、hover 也没反馈。
+   border 用透明而不是 none：.nav.active 加上 1px 边框时高度不会跳。 */
+.nav{display:block;width:100%;text-align:left;margin-bottom:6px;background:transparent;
+  border:1px solid transparent;border-radius:10px;padding:8px 14px;color:var(--txt);
+  font:inherit;line-height:1.55;cursor:pointer;text-decoration:none;transition:.18s}
+/* 外链项永远不是「当前页」，给个视觉分隔，免得和上面的页面按钮混成一排 */
+.nav.nav-ext{margin-top:14px}
 .nav:hover{background:var(--input);transform:none}
 .nav.active{background:linear-gradient(135deg,rgba(110,168,254,.18),rgba(167,139,250,.18));
   border:1px solid var(--card-bd);color:var(--txt);font-weight:600}
@@ -244,6 +251,20 @@ button:disabled{opacity:.5;cursor:not-allowed}
 #botNav{top:var(--cfg-stick)}
 #page-bot .cfg-sec{scroll-margin-top:calc(var(--cfg-stick) + 72px)}
 
+/* ---- 聊天测试 ---- */
+.chatlog{display:flex;flex-direction:column;gap:10px;min-height:120px;max-height:52vh;
+  overflow-y:auto;padding:2px 4px 2px 2px}
+.chat-empty{color:var(--muted);font-size:13px;text-align:center;padding:26px 0}
+.chatmsg{max-width:min(680px,92%);padding:9px 13px;border-radius:14px;font-size:14px;line-height:1.62;
+  white-space:pre-wrap;word-break:break-word;border:1px solid var(--card-bd)}
+.chatmsg.me{align-self:flex-end;background:linear-gradient(135deg,rgba(110,168,254,.22),rgba(167,139,250,.22))}
+.chatmsg.bot{align-self:flex-start;background:var(--input)}
+.chatmsg.sys{align-self:center;max-width:100%;background:transparent;border:none;color:var(--muted);font-size:12px}
+.chatmsg .meta{display:block;margin-top:6px;font-size:11px;color:var(--muted)}
+#chatInput{min-height:76px}
+.tracebox{font-size:12px;color:var(--muted);white-space:pre-wrap;word-break:break-word;
+  font-family:ui-monospace,monospace;background:var(--input);border:1px solid var(--card-bd);
+  border-radius:12px;padding:10px 12px;max-height:300px;overflow:auto}
 /* ---- 群记忆 ---- */
 /* ---- 上下文用量（机器人页） ---- */
 .ctx-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:14px 0 0}
@@ -313,6 +334,8 @@ button:disabled{opacity:.5;cursor:not-allowed}
   .nav{flex:0 0 auto;width:auto;margin-bottom:0;white-space:nowrap;padding:7px 13px;
     border:1px solid var(--card-bd);border-radius:999px;font-size:13px;background:var(--input)}
   .nav:hover{transform:none}
+  /* 手机上是横向胶囊条，外链那点上下间距在这里反而会撑高 */
+  .nav.nav-ext{margin-top:0}
   .content{padding:14px 12px 110px}
   .page{max-width:100%}
   .card{padding:14px 14px;border-radius:16px}
@@ -416,10 +439,12 @@ button:disabled{opacity:.5;cursor:not-allowed}
     <button class="nav" data-page="config">⚙ 配置</button>
     <button class="nav" data-page="bot">🤖 机器人</button>
     <button class="nav" data-page="memory">🧠 群记忆</button>
+    <button class="nav" data-page="chat">💬 聊天测试</button>
     <button class="nav" data-page="aliases">✏ 昵称映射</button>
-    <a class="nav" href="/music-admin/guess" target="_blank" rel="noreferrer">🎲 猜歌名单</a>
     <button class="nav" data-page="admin">🛡 管理员</button>
     <button class="nav" data-page="logs">📜 运行日志</button>
+    <a class="nav nav-ext" href="/music-admin/guess" target="_blank" rel="noreferrer"
+       title="在新标签页打开猜歌名单（玩家侧页面）">🎲 猜歌名单</a>
   </aside>
 
   <main class="content">
@@ -639,6 +664,39 @@ button:disabled{opacity:.5;cursor:not-allowed}
       </div>
     </section>
 
+    <!-- 聊天测试 -->
+    <section id="page-chat" class="page hidden">
+      <div class="card">
+        <h2><span class="dot"></span>聊天测试 · 直接跟模型说话</h2>
+        <p class="muted">走的是机器人<b>同一套</b>流程：人设、群记忆、思考模式、工具、降级重试都按当前配置来，
+          所以这里看到的就是群里会看到的效果。唯一的区别是副作用全关——<b>不写对话库、不占冷却、不会发到任何群</b>，随便试。</p>
+        <div class="row">
+          <label class="chk"><input type="checkbox" id="chatTools" checked> 允许调用工具</label>
+          <label class="muted">工具轮数：<input id="chatRounds" type="number" min="0" max="8" value="5" style="width:86px"></label>
+          <label class="muted">借用群档案：<select id="chatGid" style="width:auto;min-width:150px"><option value="0">不借用</option></select></label>
+          <div class="spacer"></div>
+          <button id="chatReset" title="只清这个测试会话的上下文，不碰任何真实群">🧹 清空上下文</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="chatlog" id="chatLog"><div class="chat-empty">还没有对话。下面输入一句试试（Ctrl+Enter 发送）。</div></div>
+        <textarea id="chatInput" rows="3" placeholder="像在群里那样问它一句话…"></textarea>
+        <div class="row" style="margin-top:10px">
+          <button class="btn-primary" id="chatSend">发送</button>
+          <span class="muted" id="chatStatus"></span>
+        </div>
+      </div>
+
+      <div class="card" id="chatTraceCard" style="display:none">
+        <h2><span class="dot"></span>这次请求经过了什么</h2>
+        <p class="muted">system 提示词多少字、历史几条、工具 schema 几个、调了几次工具、每步做了什么——
+          排查「提示词改了却没生效」「工具怎么没被调用」就看这里。</p>
+        <div class="tracebox" id="chatTrace"></div>
+      </div>
+    </section>
+
+
     <!-- 昵称映射 -->
     <section id="page-aliases" class="page hidden">
       <div class="card">
@@ -838,11 +896,12 @@ function switchPage(name){
   if(name==="config") loadConfig();
   if(name==="bot"){ loadBot(); syncBotNav(); loadContext(CTXU.gid||0); }
   if(name==="memory") loadMemory();
+  if(name==="chat") loadChat();
   if(name==="aliases") loadAliases();
   if(name==="admin") loadAdmin();
   if(name==="logs"){ loadLogs(); startLogTimer(); }
 }
-document.querySelectorAll(".nav").forEach(b=> b.onclick=()=>switchPage(b.dataset.page));
+document.querySelectorAll(".nav").forEach(b=>{ if(b.dataset.page) b.onclick=()=>switchPage(b.dataset.page); });
 
 /* ---- 概览 ---- */
 async function loadStatus(){
@@ -1990,6 +2049,116 @@ function renderContext(d){
 $("#ctxReload").onclick=()=>loadContext(parseInt($("#ctxGroup").value||"0",10)||0);
 $("#ctxGroup").onchange=()=>loadContext(parseInt($("#ctxGroup").value||"0",10)||0);
 
+
+/* ---- 聊天测试 ---- */
+let CHAT_MSGS = [];        // {role:"me"|"bot"|"sys", text, meta}
+let CHAT_BUSY = false;
+let CHAT_READY = false;
+
+function paintChat(){
+  const box = $("#chatLog"); if(!box) return;
+  if(!CHAT_MSGS.length){
+    box.innerHTML = `<div class="chat-empty">还没有对话。下面输入一句试试（Ctrl+Enter 发送）。</div>`;
+    return;
+  }
+  box.innerHTML = CHAT_MSGS.map(m=>{
+    const cls = m.role==="me" ? "me" : (m.role==="bot" ? "bot" : "sys");
+    return `<div class="chatmsg ${cls}">${esc(m.text)}${m.meta?`<span class="meta">${esc(m.meta)}</span>`:""}</div>`;
+  }).join("");
+  box.scrollTop = box.scrollHeight;
+}
+
+async function loadChatGroups(){
+  const sel = $("#chatGid"); if(!sel) return;
+  try{
+    const j = await (await api("/api/music-admin/memory")).json();
+    const groups = ((j&&j.groups)||[]).filter(g=>Number(g.group_id)>0);
+    sel.innerHTML = `<option value="0">不借用</option>` + groups.map(g=>{
+      const n = (g.people!=null) ? g.people : (g.count!=null ? g.count : "");
+      return `<option value="${g.group_id}">群 ${g.group_id}${n!==""?`（${n} 人）`:""}</option>`;
+    }).join("");
+  }catch(e){ /* 列不出来就只保留「不借用」，不影响测试 */ }
+}
+
+async function loadChat(){
+  if(!CHAT_READY){ CHAT_READY = true; await loadChatGroups(); paintChat(); }
+  const t=$("#chatInput"); if(t) t.focus();
+}
+
+async function sendChat(){
+  const ta=$("#chatInput"); if(!ta) return;
+  const text=(ta.value||"").trim();
+  if(!text || CHAT_BUSY) return;
+  CHAT_BUSY=true; ta.value="";
+  CHAT_MSGS.push({role:"me", text}); paintChat();
+  $("#chatStatus").textContent="模型思考中…";
+  $("#chatSend").disabled=true;
+  try{
+    const body={
+      text,
+      tools: !!($("#chatTools") && $("#chatTools").checked),
+      rounds: Number(($("#chatRounds")&&$("#chatRounds").value)||0)||0,
+      memory_group: Number(($("#chatGid")&&$("#chatGid").value)||0)||0,
+    };
+    const r = await api("/api/music-admin/chat-test",{method:"POST",
+      headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+    const j = await r.json();
+    if(!j.ok){
+      CHAT_MSGS.push({role:"sys", text:"⚠ "+(j.message||"调用失败")});
+    }else{
+      const t=j.trace||{};
+      const bits=[];
+      if(j.elapsed_ms!=null) bits.push((j.elapsed_ms/1000).toFixed(1)+"s");
+      if(j.model) bits.push(j.model);
+      bits.push(j.tools ? ("工具 "+(t.tool_calls||0)+" 次") : "未开工具");
+      CHAT_MSGS.push({role:"bot", text:j.reply||"（空回复）", meta:bits.join(" · ")});
+      if(!j.reply && j.reason) CHAT_MSGS.push({role:"sys", text:"结束原因："+j.reason});
+      paintChatTrace(j);
+    }
+  }catch(e){
+    CHAT_MSGS.push({role:"sys", text:"⚠ 请求失败："+e.message});
+  }finally{
+    CHAT_BUSY=false;
+    $("#chatSend").disabled=false;
+    $("#chatStatus").textContent="";
+    paintChat();
+  }
+}
+
+function paintChatTrace(j){
+  const t=j.trace||{};
+  const lines=[];
+  lines.push("模型："+(t.model||j.model||"—")+(t.thinking?("　思考："+t.thinking):""));
+  lines.push("system 提示词："+(t.system_chars||0)+" 字");
+  lines.push("历史："+(t.history_msgs||0)+" 条 / "+(t.history_chars||0)+" 字");
+  lines.push("工具：schema "+(t.tool_schemas||0)+" 个，本轮调用 "+(t.tool_calls||0)+" 次");
+  const u=t.usage||{}; const uk=Object.keys(u);
+  if(uk.length) lines.push("token："+uk.map(k=>k+"="+u[k]).join("，"));
+  lines.push("耗时："+Math.round(t.elapsed_ms||j.elapsed_ms||0)+" ms");
+  const steps=t.steps||[];
+  if(steps.length){ lines.push("", "【经过】"); steps.forEach(s=>lines.push("· "+s)); }
+  if(t.reasoning){ lines.push("", "【思考内容】", t.reasoning); }
+  if(t.error){ lines.push("", "【错误】"+t.error); }
+  $("#chatTrace").textContent=lines.join("\n");
+  $("#chatTraceCard").style.display="";
+}
+
+async function resetChat(){
+  if(!confirm("清空这个测试会话的上下文？（只影响测试，不碰任何真实群）")) return;
+  try{
+    await api("/api/music-admin/bot/history",{method:"POST",
+      headers:{"Content-Type":"application/json"}, body:JSON.stringify({group_id:-1})});
+    CHAT_MSGS=[]; paintChat();
+    $("#chatTrace").textContent=""; $("#chatTraceCard").style.display="none";
+    toast("测试上下文已清空","ok");
+  }catch(e){ toast("清空失败："+e.message,"bad"); }
+}
+
+$("#chatSend").onclick=sendChat;
+$("#chatReset").onclick=resetChat;
+$("#chatInput").addEventListener("keydown",(e)=>{
+  if((e.ctrlKey||e.metaKey) && e.key==="Enter"){ e.preventDefault(); sendChat(); }
+});
 
 /* ---- 群记忆 ---- */
 let MEM = {groups:[], people:[], gid:0, uid:"", noteChars:8000, loaded:false};

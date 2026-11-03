@@ -14,6 +14,7 @@ from __future__ import annotations
 import ast
 import os
 import secrets
+import time
 import typing
 from datetime import datetime
 from pathlib import Path
@@ -2331,6 +2332,87 @@ async def _api_bot_history(request: Request):
     where = f"群 {gid}" if gid is not None else "全部群"
     return JSONResponse({"ok": True, "message": f"已清空{where}的对话上下文（{n} 个群）"})
 
+#: 「聊天测试」用的虚拟群号。真实 QQ 群号都是正数，用负数保证永远撞不上，
+#: 这样测试对话的历史、上下文用量、LLM 调用记录都自成一份，不污染任何真群。
+CHAT_TEST_GID = -1
+
+
+async def _api_chat_test(request: Request):
+    """网页「聊天测试」：直接用机器人那一套配置跟模型对话。
+
+    和群里唯一的区别是**副作用全关**：``persist=False`` 不写 ``chat_log``（否则测试
+    内容会变成群记忆的整理素材）、``cooldown=0`` 不占冷却、群号是负数虚拟群、回复
+    也不发到任何地方。所以这里可以随便试提示词和工具。
+
+    ``memory_group`` 让人可以「只借用某个群的档案」，但历史仍留在虚拟群里——
+    否则测试几句就会把真群的上下文冲掉。
+    """
+    if not _token_ok(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    text = str(body.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"ok": False, "message": "先说点什么"}, status_code=400)
+
+    app_cfg = effective_config(None)
+    use_tools = bool(body.get("tools", True))
+    cfg = app_cfg.llm.model_copy(update={"cooldown": 0, "tools": use_tools})
+    try:
+        rounds = int(body.get("rounds") or 0)
+    except (TypeError, ValueError):
+        rounds = 0
+    if rounds > 0:
+        cfg = cfg.model_copy(update={"tool_rounds": min(8, rounds)})
+    try:
+        mem_gid = int(body.get("memory_group") or 0)
+    except (TypeError, ValueError):
+        mem_gid = 0
+
+    started = time.monotonic()
+    try:
+        reply, reason = await llm_bot.chat(
+            CHAT_TEST_GID,
+            0,
+            "网页测试",
+            text,
+            cfg,
+            mem=app_cfg.memory,
+            persist=False,
+            memory_group=mem_gid if mem_gid > 0 else None,
+        )
+    except Exception as exc:  # noqa: BLE001 — 测试页不该 500，错误也是结果
+        logger.warning(f"[music] 聊天测试调用失败: {exc}")
+        return JSONResponse({"ok": False, "message": f"调用失败：{exc}"})
+    elapsed = int((time.monotonic() - started) * 1000)
+
+    trace = {}
+    try:
+        found = llmtrace_mod.snapshot(limit=1, group_id=CHAT_TEST_GID)
+        if found:
+            t0 = found[0]
+            trace = {k: t0.get(k) for k in (
+                "steps", "tool_calls", "tool_schemas", "system_chars",
+                "history_msgs", "history_chars", "usage", "reasoning",
+                "elapsed_ms", "ok", "error", "model", "thinking",
+            )}
+    except Exception as exc:  # noqa: BLE001 — 记录拿不到不影响这次回复
+        logger.debug(f"[music] 取聊天测试记录失败: {exc}")
+
+    return JSONResponse({
+        "ok": True,
+        "reply": reply or "",
+        "reason": reason or "",
+        "elapsed_ms": elapsed,
+        "model": cfg.model,
+        "tools": bool(cfg.tools),
+        "trace": trace,
+    })
+
 
 def register_webui() -> None:
     """在 NoneBot 的 FastAPI 应用上挂载管理界面。于插件启动钩子里调用。"""
@@ -2361,6 +2443,7 @@ def register_webui() -> None:
     app.add_api_route("/api/music-admin/context", _api_context, methods=["GET"])
     app.add_api_route("/api/music-admin/bot/test", _api_bot_test, methods=["POST"])
     app.add_api_route("/api/music-admin/bot/history", _api_bot_history, methods=["POST"])
+    app.add_api_route("/api/music-admin/chat-test", _api_chat_test, methods=["POST"])
     app.add_api_route("/api/music-admin/config", _api_patch, methods=["PATCH"])
     app.add_api_route("/api/music-admin/groups", _api_groups, methods=["GET"])
     app.add_api_route("/api/music-admin/status", _api_status, methods=["GET"])
