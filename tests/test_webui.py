@@ -3,6 +3,7 @@
 不依赖 HTTP，直接验证纯函数与 config_manager 写入路径。
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -13,7 +14,69 @@ import nonebot
 nonebot.init(driver="~fastapi")  # noqa: E402
 
 from src.plugins.music_collector import webui as W  # noqa: E402
+from src.plugins.music_collector import webui_frontend as F  # noqa: E402
 from src.plugins.music_collector.config import AppConfig, config_manager  # noqa: E402
+
+#: 手写 HTML 里必须显式闭合的骨架标签。``input``/``br``/``img`` 这类不管。
+_STRUCT_TAGS = ("div", "section", "main", "aside", "nav", "ul", "ol",
+                "details", "form", "table")
+
+
+def _scan_dom(text: str):
+    """扫 DASHBOARD_HTML 的骨架闭合，返回 ``(配对, 错误)``。
+
+    为什么值得测：一个多余的 ``</div>`` 浏览器不会报错，只是把后面的内容甩到
+    ``.page`` 外面。2026-11-04 那次线上 bug 就是这么来的——``#page-chat`` 里多了
+    一个 ``</div>``，section 被提前关掉，对话记录和输入框掉到 ``<body>`` 直下，
+    于是**每个页面底部都挂着一个聊天输入框**，靠肉眼很难发现。
+    """
+    body = re.sub(r"<script\b.*?</script>", "", text, flags=re.S | re.I)
+    tag_re = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9]*)\b([^>]*)>", re.S)
+    stack: list[tuple[str, int]] = []
+    pairs: list[tuple[str, int, int, str]] = []
+    errors: list[str] = []
+    for m in tag_re.finditer(body):
+        closing, tag, attrs = m.group(1), m.group(2).lower(), m.group(3) or ""
+        if tag not in _STRUCT_TAGS or attrs.rstrip().endswith("/"):
+            continue
+        if not closing:
+            stack.append((tag, m.start()))
+            continue
+        if not stack:
+            errors.append(f"多余的 </{tag}>（第 {m.start()} 字符）")
+            continue
+        open_tag, pos = stack.pop()
+        if open_tag != tag:
+            errors.append(f"<{open_tag}>（第 {pos} 字符）被 </{tag}> 关掉")
+        pairs.append((open_tag, pos, m.end(), body[pos:m.end()][:200]))
+    for tag, pos in stack:
+        errors.append(f"没有闭合的 <{tag}>（第 {pos} 字符）")
+    return body, pairs, errors
+
+
+def test_dashboard_html_is_well_formed():
+    """骨架必须闭合正确，且每张卡片都在某个 ``.page`` 里（否则会全站可见）。"""
+    body, pairs, errors = _scan_dom(F.DASHBOARD_HTML)
+    assert not errors, "DASHBOARD_HTML 骨架闭合有问题：\n" + "\n".join(errors[:8])
+
+    pages = [(start, end) for tag, start, end, snippet in pairs
+             if tag == "section" and re.search(r'class="[^"]*\bpage\b', snippet[:120])]
+    assert len(pages) >= 8, f"页面 section 只认出 {len(pages)} 个"
+
+    cards = [m.start() for m in re.finditer(r'<div[^>]*class="[^"]*\bcard\b', body)]
+    leaked = [p for p in cards if not any(a < p < e for a, e in pages)]
+    assert not leaked, (
+        "这些 card 掉到 .page 外面了（会出现在每一个页面上）："
+        + ", ".join(repr(body[p:p + 60]) for p in leaked[:4])
+    )
+
+    # 聊天测试页的输入区必须真的在这一页里
+    chat = next((s, e) for tag, s, e, snip in pairs
+                if tag == "section" and 'id="page-chat"' in snip[:120])
+    for eid in ("chatLog", "chatInput", "chatSend", "chatTraceCard", "chatReset"):
+        pos = body.find(f'id="{eid}"')
+        assert pos != -1, f"找不到 #{eid}"
+        assert chat[0] < pos < chat[1], f"#{eid} 跑到 #page-chat 外面去了"
 
 
 def _all_keys():
@@ -159,6 +222,7 @@ if __name__ == "__main__":
     import tempfile
 
     _tmp = Path(tempfile.mkdtemp())
+    test_dashboard_html_is_well_formed()
     test_build_schema_covers_known_keys()
     test_enum_options_detected()
     test_coerce_value_types()

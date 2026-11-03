@@ -681,6 +681,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
           <input id="chatQuoteQq" placeholder="引用者QQ" style="width:130px">
           <input id="chatQuoteText" placeholder="被引用的那句话（留空=不模拟）" style="flex:1;min-width:180px">
         </div>
+        <div class="row end" style="margin-top:8px">
           <button id="chatReset" title="只清这个测试会话的上下文，不碰任何真实群">🧹 清空上下文</button>
         </div>
       </div>
