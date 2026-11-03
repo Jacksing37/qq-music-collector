@@ -264,7 +264,7 @@ intro:
     本期：{window}（{state}），已收集 {count} 首。
     发送 /music help 查看全部命令。
   cooldown: 10          # 同一群冷却秒数，0=不限频
-  at_sender: true       # 回复时是否 @ 提问者
+  at_sender: true           # 回复时 @ 提问者（模型用 mention 点了人时以模型为准）
   skip_commands: true   # 消息带 /music 命令时不发自我介绍
   skip_music: true      # 消息带音乐分享时不发自我介绍（那是分享不是提问）
   always_reply: true    # 收集关闭 / 不在收集期时，是否仍然回应自我介绍
@@ -358,7 +358,9 @@ llm:
   skill_timeout: 20.0         # 技能脚本超时秒数，超时直接 kill
   max_input_chars: 500        # 单条提问最多取多少字，0=不限
   max_reply_chars: 800        # 回复最多发多少字，0=不限（超长自动分条）
-  at_sender: true             # 回复时 @ 提问者
+  at_sender: true           # 回复时 @ 提问者（模型用 mention 点了人时以模型为准）
+  mention_enabled: true     # 让模型自己决定 @ 谁（mention 工具）；只认本次出现的人
+  mention_max: 3            # 一条回复最多 @ 几个
   fallback_intro: true        # 调用失败时退回内置自我介绍（关掉则静默）
   # ---- 附加触发（除了 @机器人，还有两种该接话的场合）----
   poke_reply: true            # 群友戳一戳机器人时让模型回一句

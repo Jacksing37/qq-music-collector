@@ -36,6 +36,7 @@ from typing import Awaitable, Callable, Optional
 from nonebot.log import logger
 
 from . import memory as memory_mod
+from . import mention as mention_mod
 from . import skills as skill_mod
 from . import webtool
 from . import websearch as websearch_mod
@@ -49,7 +50,7 @@ DEFAULT_TOOL_CHARS = 2000
 #: 安装类工具不小心上线」而不是为了省事。
 ALLOWED_TOOL_NAMES = frozenset(
     {"fetch_url", "web_search", "list_skills", "use_skill", "read_skill_file",
-     "run_skill_script", "remember", "recall", "forget"}
+     "run_skill_script", "mention", "remember", "recall", "forget"}
 )
 
 #: 模型臆造出来的「装/写/删」类工具名。命中就回 :data:`INSTALL_DENIED`。
@@ -75,6 +76,8 @@ TOOL_RULES = (
     "碰到会过时效、或你拿不准的事实（新闻、价格、比分、谁的现任职位、软件版本、"
     "某个事件的前因后果），**先用 web_search 搜一下再答**，别凭记忆硬编；"
     "搜不到就说搜不到，不要编造搜索结果的细节。"
+    "要 @ 群友就调 mention（正文里写「@某某」不会被 @）。只在「这个人必须看到这条回复」时用，"
+    "拿不准就别 @；引用谁的话问看法就 @ 谁，只是拿它当背景就别 @。"
     "技能正文里让你「读取 references/xxx.md」这类附属文件时，用 read_skill_file 按路径读，"
     "不要凭想象编它的内容。"
     "你**没有**安装/卸载/修改技能的权限，也没有写其他文件、执行任意命令的权限。"
@@ -109,6 +112,11 @@ class ToolContext:
     #: 当前提问者的群昵称。``remember`` 不指定 who 时靠它给档案填昵称，
     #: 否则新档案会是一个只有 QQ 号的空壳，模型下次认不出来
     nick: str = ""
+    #: 本次「可以 @ 的人」（:class:`mention.Target`）。只有这里面的 QQ 点得动——
+    #: 「拿不准就不 @」就是靠这份小名单写死的：名单外的人模型知道名字也 @ 不出去
+    mention_targets: list = field(default_factory=list)
+    #: 模型通过 mention 工具记下的要 @ 的 QQ（去重、保序、有上限）
+    mentions: list[int] = field(default_factory=list)
     skills: list = field(default_factory=list)
 
 
@@ -303,6 +311,65 @@ WEB_SEARCH = Tool(
     handler=_handle_web_search,
 )
 
+
+# ---------------------------------------------------------------- @ 人
+
+async def _handle_mention(args: dict, ctx: ToolContext) -> str:
+    """记下「这条回复要 @ 谁」。**只记账，不发送**——发送在 ``_llm_answer`` 里统一做。
+
+    校验全部按「本次候选名单」来：名单里没有的人，模型说破天也点不动。
+    """
+    who = str(args.get("who") or "").strip()
+    targets = list(ctx.mention_targets or [])
+    if not targets:
+        return (
+            "这条消息里没有可以 @ 的人（只能 @ 本次出现过的人）。"
+            "别 @ 了，直接正常回答，也不要自己写「@某某」的文字。"
+        )
+    cap = max(1, int(getattr(ctx.cfg, "mention_max", 3) or 3))
+
+    qq, err = mention_mod.resolve(who, targets)
+    if not qq:
+        return f"{err}。\n{mention_mod.render_hint(targets)}\n名单外的名字 @ 不出去，别改成文字 @。"
+    if int(qq) in ctx.mentions:
+        return "已经记下过了，不用重复 @ 同一个人。"
+    if len(ctx.mentions) >= cap:
+        return f"一条回复最多 @ {cap} 个人，已经够了，别再点了。"
+
+    ctx.mentions.append(int(qq))
+    target = next((t for t in targets if t.qq == int(qq)), None)
+    logger.info(f"[mention] 群{ctx.group_id} 记下 @{qq}")
+    return (
+        f"已记下：这条回复开头会 @ {target.display if target else qq}。"
+        "继续写正文就行，别再重复调这个工具。"
+    )
+
+
+MENTION = Tool(
+    name="mention",
+    description=(
+        "在这条回复里真的 @ 一个人（群里那种蓝字提醒）。**它会弹提醒，是打扰不是装饰**。"
+        "只在你能明确指出「这个人必须看到这条回复」时才用；**判断不了就别用** —— "
+        "宁可不 @，也不要把不相干的人拉进对话。"
+        "该用：对方引用某人的话问「你怎么看 / 他是不是…」→ @ 被引用的那个人；"
+        "对方点名让某人回答、或让你评价某人 → @ 那个人。"
+        "不该用：引用只是拿它当背景素材；只是普通聊天；只是回答提问者自己。"
+        "一次回复最多 @ 3 个，可以连续调多次。"
+        "**要 @ 就先调这个工具：一旦开始写正文就没有工具可用了。**"
+        "只能点【这次能 @ 的人】里出现的人；不要自己写「@某某」的文字，那不会被 @。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "who": {
+                "type": "string",
+                "description": "昵称、别名或 QQ 号；重名时用「昵称(QQ号)」",
+            },
+        },
+        "required": ["who"],
+    },
+    handler=_handle_mention,
+)
 
 # ---------------------------------------------------------------- 技能
 
@@ -587,6 +654,7 @@ def build(
     user_id: int = 0,
     nick: str = "",
     mem: Optional[MemoryConfig] = None,
+    mention_targets: Optional[list] = None,
 ) -> tuple[list[Tool], ToolContext]:
     """按配置组装这次请求可用的工具，以及共享上下文。
 
@@ -609,6 +677,7 @@ def build(
         group_id=int(group_id),
         user_id=int(user_id),
         nick=str(nick or ""),
+        mention_targets=list(mention_targets or []),
     )
     tools: list[Tool] = []
     if not cfg.tools:
@@ -619,6 +688,8 @@ def build(
         # 搜索依赖「打开网页」的能力（摘要不够时再去 fetch_url 读细节），
         # 所以 web_tool 关掉时搜索也一起不给——否则模型搜到网址却打不开
         tools.append(WEB_SEARCH)
+    if cfg.mention_enabled and ctx.mention_targets:
+        tools.append(MENTION)
     if memory_cfg.enabled:
         tools.extend([REMEMBER, RECALL, FORGET])
     if cfg.skills:

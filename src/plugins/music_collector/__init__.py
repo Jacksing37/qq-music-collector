@@ -48,6 +48,7 @@ from .llm import disabled_reason as llm_disabled_reason  # noqa: E402
 from .llm import clip_tail, llm_bot  # noqa: E402
 from . import banter as banter_mod  # noqa: E402  被动回复后要重排搭话计时
 from . import memory as memory_mod  # noqa: E402
+from . import mention as mention_mod  # noqa: E402  回复里 @ 谁，由模型自己点
 from . import persona as persona_mod  # noqa: E402  听群友抱怨「AI 味」，只记不吭声
 from .models import PLATFORM_NAMES, Song  # noqa: E402
 from .naming import build_context, render_template, resolve_alias  # noqa: E402
@@ -531,6 +532,78 @@ async def _llm_background(event: object, llm_cfg, text: str = "") -> str:
     return "【群里刚才在聊的，不是在跟你说话，判断语境用】\n" + text
 
 
+def _at_targets(message, self_ids: set[str]) -> list[tuple[int, str]]:
+    """这条消息里被 @ 的人 ``[(qq, 昵称), …]``（跳过机器人自己）。"""
+    out: list[tuple[int, str]] = []
+    for seg in message or ():
+        try:
+            if seg.type != "at":
+                continue
+            data = seg.data or {}
+            raw = str(data.get("qq") or "").strip()
+            if not raw.isdigit() or raw in self_ids:
+                continue
+            qq = int(raw)
+            if any(q == qq for q, _ in out):
+                continue
+            out.append((qq, str(data.get("name") or "").strip()))
+        except Exception:  # noqa: BLE001 — 消息段千奇百怪，坏一段不该影响回话
+            continue
+    return out
+
+
+def _mention_targets(event: object, llm_cfg, text: str, quote: str, group_id: int) -> list:
+    """本次「可以 @ 的人」。
+
+    **名单外的名字点不到**——这就是「拿不准就不 @」写死的地方：模型只能从
+    「提问者 / 被引用那条的发送者 / 消息里被 @ 的人 / 正文里点名的群档案」里挑。
+    """
+    if not bool(getattr(llm_cfg, "mention_enabled", True)):
+        return []
+    self_id = int(getattr(event, "self_id", 0) or 0)
+    self_ids = {str(self_id)} if self_id else set()
+
+    people: list[dict] = []
+    if group_id:
+        try:
+            mem = service.cfg(group_id).memory
+            for person in memory_mod.list_people(mem, group_id):
+                if not str(person.uid).isdigit():
+                    continue
+                people.append({
+                    "qq": int(person.uid),
+                    "nick": person.nick,
+                    "aliases": list(person.names()),
+                })
+        except Exception as exc:  # noqa: BLE001 — 档案坏了不影响回话
+            logger.debug(f"[mention] 群{group_id} 读取档案失败: {exc}")
+
+    quoted = getattr(event, "reply", None)
+    quote_qq, quote_nick = 0, ""
+    if quoted is not None:
+        try:
+            quote_qq = int(getattr(quoted, "user_id", 0) or 0)
+        except (TypeError, ValueError):
+            quote_qq = 0
+        rep_sender = getattr(quoted, "sender", None)
+        if rep_sender is not None:
+            quote_nick = str(
+                getattr(rep_sender, "card", "")
+                or getattr(rep_sender, "nickname", "")
+                or ""
+            ).strip()
+
+    return mention_mod.build_targets(
+        sender_qq=int(getattr(event, "user_id", 0) or 0),
+        sender_nick=_sender_nick(event),
+        quote_qq=quote_qq,
+        quote_nick=quote_nick,
+        at_qqs=_at_targets(getattr(event, "message", None), self_ids),
+        text=f"{text}\n{quote}",
+        people=people,
+        self_qq=self_id,
+    )
+
 async def _llm_answer(
     bot: Bot,
     event: object,
@@ -549,6 +622,10 @@ async def _llm_answer(
     user_id = int(getattr(event, "user_id", 0) or 0)
     # 群友闲聊不进问答历史，这里把那一段补上（走 background，不进历史、不占历史预算）
     background = await _llm_background(event, llm_cfg, text)
+    # 这次能 @ 谁：提问者 / 被引用那条的发送者 / 消息里被 @ 的人 / 正文里点名的群档案。
+    # 名单外的名字模型点不到（「拿不准就不 @」写死在这份小名单里）
+    mention_targets = _mention_targets(event, llm_cfg, text, quote, group_id)
+    mentions: list[int] = []
     reply, reason = await llm_bot.chat(
         group_id,
         user_id,
@@ -562,12 +639,20 @@ async def _llm_answer(
         background=background,
         # 记忆配置挂在 AppConfig 顶层（memory: 段），llm_cfg 里没有它
         mem=service.cfg(group_id).memory if group_id else None,
+        mention_targets=mention_targets,
+        mention_out=mentions,
     )
     if not reply:
         return False, reason
     parts = split_text(reply)
     first = Message()
-    if llm_cfg.at_sender:
+    # 模型自己点了人（mention 工具）就以它为准；它没点才按配置兜底 @ 提问者。
+    # 两者都上会变成「@提问者 @被评价的人」两个提醒，群里看着像拉人对峙
+    if mentions:
+        for qq in mentions:
+            first += MessageSegment.at(int(qq))
+            first += MessageSegment.text(" ")
+    elif llm_cfg.at_sender:
         first += MessageSegment.at(user_id)
     first += MessageSegment.text(" " + parts[0])
     await safe_send_group(bot, group_id, first)

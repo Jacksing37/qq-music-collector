@@ -29,6 +29,7 @@ import httpx
 from . import llmtrace as llmtrace_mod
 from . import memory as memory_mod
 from . import tools as tools_mod
+from . import mention as mention_mod
 from .config import LLMConfig, MemoryConfig
 
 logger = logging.getLogger("music_collector.llm")
@@ -1064,6 +1065,8 @@ class LLMBot:
         mem: Optional[MemoryConfig] = None,
         persist: bool = True,
         memory_group: Optional[int] = None,
+        mention_targets: Optional[list] = None,
+        mention_out: Optional[list] = None,
     ) -> tuple[Optional[str], str]:
         """生成一条回复。
 
@@ -1074,6 +1077,9 @@ class LLMBot:
         请求、不写进上下文历史；分开传是为了日志里能分别记账——排查「答得驴唇不对
         马嘴」时，最要紧的就是看它当时读到的背景到底是什么。
         ``mem`` 是记忆配置（不传就用默认值，指向 ``data/memory``）。
+
+        ``mention_targets`` 是本次「可以 @ 的人」（:mod:`mention`），只有名单里的人点得动；
+        模型通过 ``mention`` 工具记下的 QQ 会写回 ``mention_out``（调用方据此拼 at 段）。
 
         ``persist`` / ``memory_group`` 只给网页「聊天测试」用：``persist=False`` 时不把
         这轮对话写进 ``chat_log``（否则测试内容会变成记忆整理的素材）；``memory_group``
@@ -1124,11 +1130,18 @@ class LLMBot:
             group_id, user_id, speaker, cfg, question=body, background=background
         )
         started = time.monotonic()
+        # 提前声明：_done 里要读它（冷却等早退路径上还没赋值，闭包会 NameError）
+        tool_ctx = None
 
         # 背景和参考资料都只作用于这次请求，拼成一段给模型看；但记录里分开存
         extra = context
         if background:
             extra = f"{background}\n\n{context}" if context else background
+        # 「这次能 @ 的人」只作用于本次请求（不进历史）。不给这份清单，模型只能瞎猜名字，
+        # 猜错就被 mention 工具打回——白费一轮
+        mention_hint = mention_mod.render_hint(list(mention_targets or []))
+        if mention_hint:
+            extra = f"{mention_hint}\n\n{extra}" if extra else mention_hint
 
         def _done(reply_text, why: str = "", think: str = ""):
             """收口：归档这条调用记录，再原样返回给调用方。
@@ -1145,6 +1158,9 @@ class LLMBot:
                         f"[llm] 群{group_id} 回复里残留工具调用标记（{marks} 行）→ 已剥离"
                     )
                 reply_text = cleaned
+            if mention_out is not None:
+                mention_out[:] = list(getattr(tool_ctx, "mentions", []) or [])
+            trace["mentions"] = list(mention_out or [])
             llmtrace_mod.finish(
                 trace,
                 reply=reply_text or "",

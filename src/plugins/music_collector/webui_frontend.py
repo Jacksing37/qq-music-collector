@@ -674,7 +674,13 @@ button:disabled{opacity:.5;cursor:not-allowed}
           <label class="chk"><input type="checkbox" id="chatTools" checked> 允许调用工具</label>
           <label class="muted">工具轮数：<input id="chatRounds" type="number" min="0" max="8" value="5" style="width:86px"></label>
           <label class="muted">借用群档案：<select id="chatGid" style="width:auto;min-width:150px"><option value="0">不借用</option></select></label>
-          <div class="spacer"></div>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <span class="muted">模拟引用：</span>
+          <input id="chatQuoteNick" placeholder="引用者昵称" style="width:140px">
+          <input id="chatQuoteQq" placeholder="引用者QQ" style="width:130px">
+          <input id="chatQuoteText" placeholder="被引用的那句话（留空=不模拟）" style="flex:1;min-width:180px">
+        </div>
           <button id="chatReset" title="只清这个测试会话的上下文，不碰任何真实群">🧹 清空上下文</button>
         </div>
       </div>
@@ -2097,7 +2103,10 @@ async function sendChat(){
     const body={
       text,
       tools: !!($("#chatTools") && $("#chatTools").checked),
-      rounds: Number(($("#chatRounds")&&$("#chatRounds").value)||0)||0,
+      memory_group: Number(($("#chatGid")&&$("#chatGid").value)||0)||0,
+      quote: (($("#chatQuoteText")&&$("#chatQuoteText").value)||"").trim(),
+      quote_nick: (($("#chatQuoteNick")&&$("#chatQuoteNick").value)||"").trim(),
+      quote_qq: Number(($("#chatQuoteQq")&&$("#chatQuoteQq").value)||0)||0,
       memory_group: Number(($("#chatGid")&&$("#chatGid").value)||0)||0,
     };
     const r = await api("/api/music-admin/chat-test",{method:"POST",
@@ -2112,6 +2121,8 @@ async function sendChat(){
       if(j.model) bits.push(j.model);
       bits.push(j.tools ? ("工具 "+(t.tool_calls||0)+" 次") : "未开工具");
       CHAT_MSGS.push({role:"bot", text:j.reply||"（空回复）", meta:bits.join(" · ")});
+      const ms=(j.mentions||[]);
+      if(ms.length) CHAT_MSGS.push({role:"sys", text:"这条回复会 @"+ms.map(m=>m.nick?`${m.nick}(${m.qq})`:m.qq).join("、")});
       if(!j.reply && j.reason) CHAT_MSGS.push({role:"sys", text:"结束原因："+j.reason});
       paintChatTrace(j);
     }
@@ -2135,6 +2146,10 @@ function paintChatTrace(j){
   const u=t.usage||{}; const uk=Object.keys(u);
   if(uk.length) lines.push("token："+uk.map(k=>k+"="+u[k]).join("，"));
   lines.push("耗时："+Math.round(t.elapsed_ms||j.elapsed_ms||0)+" ms");
+  const mt=j.mention_targets||[];
+  lines.push("这次能 @ 的人：" + (mt.length ? mt.map(x=>`${x.nick||x.qq}(${x.qq})·${x.why}`).join("；") : "（没有）"));
+  const ms=j.mentions||[];
+  if(ms.length) lines.push("这条 @ 了：" + ms.map(x=>`${x.nick||x.qq}(${x.qq})`).join("、"));
   const steps=t.steps||[];
   if(steps.length){ lines.push("", "【经过】"); steps.forEach(s=>lines.push("· "+s)); }
   if(t.reasoning){ lines.push("", "【思考内容】", t.reasoning); }

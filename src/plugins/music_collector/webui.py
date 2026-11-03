@@ -44,6 +44,7 @@ from .config import (
 from . import logbuffer
 from . import llmtrace as llmtrace_mod
 from . import memory as memory_mod
+from . import mention as mention_mod
 from . import persona as persona_mod
 from . import skills as skills_mod
 from . import style as style_mod
@@ -786,6 +787,20 @@ FIELD_META["llm.max_input_chars"] = (
 FIELD_META["llm.max_reply_chars"] = (
     "回复字数上限",
     "回复最多发多少字，超出截断并加省略号；0 = 不限（超长会自动分条发送）",
+    False,
+)
+FIELD_META["llm.mention_enabled"] = (
+    "让模型自己决定 @ 谁",
+    "给它一个 mention 工具：引用某人的话问「你怎么看」、或点名让某人回答时，"
+    "它能自己 @ 对人（以前只会按「@ 提问者」的开关走）。"
+    "<br>⚠️ <b>只认本次出现的人</b>：提问者、被引用的那位、消息里被 @ 的人、正文里点名的群友——"
+    "名单外的人模型知道名字也 @ 不出去。这条就是把「拿不准就别 @」写死在代码里，"
+    "误 @ 会把不相干的人拽进对话。",
+    False,
+)
+FIELD_META["llm.mention_max"] = (
+    "一条回复最多 @ 几个",
+    "多个对象时（比如既回提问者又点评被引用的人）才用得上。3 个够用，多了就是刷屏",
     False,
 )
 FIELD_META["llm.at_sender"] = (
@@ -2372,7 +2387,38 @@ async def _api_chat_test(request: Request):
         mem_gid = int(body.get("memory_group") or 0)
     except (TypeError, ValueError):
         mem_gid = 0
+    # 可选的「模拟引用」：只为了能在这里复现「引用某人一句 + 你怎么看」这类场景，
+    # 不然 @ 人的判断没法在网页上验
+    quote_text = str(body.get("quote") or "").strip()
+    quote_nick = str(body.get("quote_nick") or "").strip()
+    try:
+        quote_qq = int(body.get("quote_qq") or 0)
+    except (TypeError, ValueError):
+        quote_qq = 0
+    quote = f"（引用 {quote_nick or quote_qq or '对方'} 的消息：{quote_text}）" if quote_text else ""
 
+    # 候选名单：借用的那个群的档案 + 模拟引用的人。名单外的名字点不到
+    mention_targets: list = []
+    try:
+        people = []
+        if mem_gid > 0:
+            for person in memory_mod.list_people(app_cfg.memory, mem_gid):
+                if str(person.uid).isdigit():
+                    people.append({
+                        "qq": int(person.uid),
+                        "nick": person.nick,
+                        "aliases": list(person.names()),
+                    })
+        mention_targets = mention_mod.build_targets(
+            quote_qq=quote_qq,
+            quote_nick=quote_nick,
+            text=f"{text}\n{quote}",
+            people=people,
+        )
+    except Exception as exc:  # noqa: BLE001 — 候选建不出来就按「没人可 @」处理
+        logger.debug(f"[music] 聊天测试候选名单构建失败: {exc}")
+
+    mentions: list[int] = []
     started = time.monotonic()
     try:
         reply, reason = await llm_bot.chat(
@@ -2381,9 +2427,12 @@ async def _api_chat_test(request: Request):
             "网页测试",
             text,
             cfg,
+            quote=quote,
             mem=app_cfg.memory,
             persist=False,
             memory_group=mem_gid if mem_gid > 0 else None,
+            mention_targets=mention_targets,
+            mention_out=mentions,
         )
     except Exception as exc:  # noqa: BLE001 — 测试页不该 500，错误也是结果
         logger.warning(f"[music] 聊天测试调用失败: {exc}")
@@ -2410,6 +2459,12 @@ async def _api_chat_test(request: Request):
         "elapsed_ms": elapsed,
         "model": cfg.model,
         "tools": bool(cfg.tools),
+        # 这条回复真要 @ 谁（at 段是在真实群里拼的，这里只回 QQ + 昵称方便核对）
+        "mentions": [
+            {"qq": q, "nick": next((t.nick for t in mention_targets if t.qq == q), "")}
+            for q in mentions
+        ],
+        "mention_targets": [{"qq": t.qq, "nick": t.nick, "why": t.why} for t in mention_targets],
         "trace": trace,
     })
 

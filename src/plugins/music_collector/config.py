@@ -606,6 +606,10 @@ class LLMConfig(BaseModel):
     max_reply_chars: int = Field(800, ge=0, le=4000)
     #: 回复时是否 @ 提问者
     at_sender: bool = True
+    #: 是否允许模型自己决定 @ 谁（调 mention 工具）。关掉后只按上面的 at_sender 走
+    mention_enabled: bool = True
+    #: 一条回复最多 @ 几个人。**只认本次上下文里出现过的人**，名单外的名字点不到
+    mention_max: int = Field(3, ge=1, le=5)
     #: 大模型调用失败时，退回内置自我介绍（避免「@了没反应」）
     fallback_intro: bool = True
 
