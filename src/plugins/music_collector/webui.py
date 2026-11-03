@@ -2475,6 +2475,9 @@ async def _api_chat_test(request: Request):
             for q in mentions
         ],
         "mention_targets": [{"qq": t.qq, "nick": t.nick, "why": t.why} for t in mention_targets],
+        # 「模拟引用」这次到底带没带。页面上那三个框只对一条生效、发完就清，
+        # 回一个布尔让前端明说一声——否则「引用是不是真的生效了」只能靠猜
+        "quote_used": bool(quote),
         "trace": trace,
     })
 

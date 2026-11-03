@@ -218,11 +218,32 @@ def test_netease_section_and_secret_fields():
     assert W.KEY_INDEX["netease.phone"]["secret"] is False
 
 
+def test_chat_test_quote_inputs_clean():
+    """「模拟引用」那三个框必须是空默认值、并关掉浏览器自动填充。
+
+    线上反馈：那三个框会自己冒出别处的数据。它们只有 placeholder、没有 name，
+    Chrome 自动填充 / 密码管理器 / 表单恢复会把它们当「姓名·电话」填上，
+    于是测试带着一段根本没写的引用跑，看 trace 就像「凭空多出来的数据」。
+    """
+    body = F.DASHBOARD_HTML
+    for eid in ("chatQuoteNick", "chatQuoteQq", "chatQuoteText"):
+        m = re.search(r'<input[^>]*id="%s"[^>]*>' % eid, body)
+        assert m, f"找不到 #{eid}"
+        tag = m.group(0)
+        assert 'autocomplete="off"' in tag, f"#{eid} 少了 autocomplete=off：{tag}"
+        assert "value=" not in tag, f"#{eid} 不该带默认值：{tag}"
+    # 只对「下一条」生效：发完必须清掉，否则后面每一句都还带着它
+    assert "scrubChatQuote(true)" in body, "模拟引用发完没有清空"
+    # 工具轮数原先只画在界面上、请求里根本没带这个字段
+    assert 'id="chatRounds"' in body and "rounds: Number(" in body, "工具轮数没发出去"
+
+
 if __name__ == "__main__":
     import tempfile
 
     _tmp = Path(tempfile.mkdtemp())
     test_dashboard_html_is_well_formed()
+    test_chat_test_quote_inputs_clean()
     test_build_schema_covers_known_keys()
     test_enum_options_detected()
     test_coerce_value_types()

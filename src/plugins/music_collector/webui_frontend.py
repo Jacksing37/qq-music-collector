@@ -675,11 +675,18 @@ button:disabled{opacity:.5;cursor:not-allowed}
           <label class="muted">工具轮数：<input id="chatRounds" type="number" min="0" max="8" value="5" style="width:86px"></label>
           <label class="muted">借用群档案：<select id="chatGid" style="width:auto;min-width:150px"><option value="0">不借用</option></select></label>
         </div>
-        <div class="row" style="margin-top:8px">
-          <span class="muted">模拟引用：</span>
-          <input id="chatQuoteNick" placeholder="引用者昵称" style="width:140px">
-          <input id="chatQuoteQq" placeholder="引用者QQ" style="width:130px">
-          <input id="chatQuoteText" placeholder="被引用的那句话（留空=不模拟）" style="flex:1;min-width:180px">
+        <!-- 模拟引用：只作用于「下一次发送」，发完自动清空。
+             这三个框只有 placeholder、没有 name，浏览器（Chrome 自动填充 /
+             密码管理器 / 表单恢复）会把它们当成「姓名·电话」塞进别处的数据；
+             autocomplete=off + JS 侧只清「用户没亲手改过」的，见 scrubChatQuote()。 -->
+        <div class="row" style="margin-top:8px" autocomplete="off">
+          <span class="muted">模拟引用（只对下一条生效）：</span>
+          <input id="chatQuoteNick" placeholder="引用者昵称" style="width:140px"
+                 autocomplete="off" spellcheck="false" autocapitalize="off">
+          <input id="chatQuoteQq" placeholder="引用者QQ" style="width:130px" inputmode="numeric"
+                 autocomplete="off" spellcheck="false" autocapitalize="off">
+          <input id="chatQuoteText" placeholder="被引用的那句话（留空=不模拟）" style="flex:1;min-width:180px"
+                 autocomplete="off" spellcheck="false">
         </div>
         <div class="row end" style="margin-top:8px">
           <button id="chatReset" title="只清这个测试会话的上下文，不碰任何真实群">🧹 清空上下文</button>
@@ -2087,8 +2094,27 @@ async function loadChatGroups(){
   }catch(e){ /* 列不出来就只保留「不借用」，不影响测试 */ }
 }
 
+//: 「模拟引用」的三个框。默认必须是空的——它们是「这一次发送」的临时参数，
+//: 浏览器自动填充（Chrome/密码管理器/表单恢复）会往里塞别处的数据，
+//: 于是测试会带着一段你根本没写的引用跑，排查时看到的就是「凭空多出来的数据」。
+const CHAT_QUOTE_IDS = ["chatQuoteNick","chatQuoteQq","chatQuoteText"];
+
+function scrubChatQuote(force){
+  CHAT_QUOTE_IDS.forEach(id=>{
+    const el=$("#"+id); if(!el) return;
+    if(force || !el.dataset.touched){ el.value=""; delete el.dataset.touched; }
+  });
+}
+
+CHAT_QUOTE_IDS.forEach(id=>{
+  const el=$("#"+id); if(!el) return;
+  // 用户亲手敲过就标记上，之后不再自动清（换个页面回来看还在）
+  el.addEventListener("input", ()=>{ el.dataset.touched="1"; });
+});
+
 async function loadChat(){
   if(!CHAT_READY){ CHAT_READY = true; await loadChatGroups(); paintChat(); }
+  scrubChatQuote();
   const t=$("#chatInput"); if(t) t.focus();
 }
 
@@ -2104,11 +2130,11 @@ async function sendChat(){
     const body={
       text,
       tools: !!($("#chatTools") && $("#chatTools").checked),
+      rounds: Number(($("#chatRounds")&&$("#chatRounds").value)||0)||0,
       memory_group: Number(($("#chatGid")&&$("#chatGid").value)||0)||0,
       quote: (($("#chatQuoteText")&&$("#chatQuoteText").value)||"").trim(),
       quote_nick: (($("#chatQuoteNick")&&$("#chatQuoteNick").value)||"").trim(),
       quote_qq: Number(($("#chatQuoteQq")&&$("#chatQuoteQq").value)||0)||0,
-      memory_group: Number(($("#chatGid")&&$("#chatGid").value)||0)||0,
     };
     const r = await api("/api/music-admin/chat-test",{method:"POST",
       headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
@@ -2126,6 +2152,9 @@ async function sendChat(){
       if(ms.length) CHAT_MSGS.push({role:"sys", text:"这条回复会 @"+ms.map(m=>m.nick?`${m.nick}(${m.qq})`:m.qq).join("、")});
       if(!j.reply && j.reason) CHAT_MSGS.push({role:"sys", text:"结束原因："+j.reason});
       paintChatTrace(j);
+      // 「模拟引用」只对这一条生效：发完就清，否则下一句会莫名其妙继续带着它
+      scrubChatQuote(true);
+      if(j.quote_used) CHAT_MSGS.push({role:"sys", text:"本条带了模拟引用"});
     }
   }catch(e){
     CHAT_MSGS.push({role:"sys", text:"⚠ 请求失败："+e.message});
