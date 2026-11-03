@@ -190,7 +190,12 @@ def render_hint(targets: list[Target]) -> str:
     if not targets:
         return ""
     rows = [f"- {t.display}（{t.why}）" if t.why else f"- {t.display}" for t in targets]
-    return "【这次能 @ 的人】\n" + "\n".join(rows)
+    return (
+        "【这次能 @ 的人】\n"
+        + "\n".join(rows)
+        + "\n（如果这条回复是在回应或评价上面某个人、或者他需要看到你的回答，"
+        "先调 mention 点他；名单外的名字点不到，也不许自己写「@某某」的文字。）"
+    )
 
 
 def summary(targets: list[Target], qqs: Iterable[int]) -> str:

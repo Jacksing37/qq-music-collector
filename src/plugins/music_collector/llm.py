@@ -1142,6 +1142,8 @@ class LLMBot:
         mention_hint = mention_mod.render_hint(list(mention_targets or []))
         if mention_hint:
             extra = f"{mention_hint}\n\n{extra}" if extra else mention_hint
+            # 网页「LLM 调用」里能看见这次到底给了哪些人——排查「它怎么没 @」的第一眼
+            llmtrace_mod.step(trace, f"🎯 可 @ 名单 {len(mention_targets or [])} 人")
 
         def _done(reply_text, why: str = "", think: str = ""):
             """收口：归档这条调用记录，再原样返回给调用方。
