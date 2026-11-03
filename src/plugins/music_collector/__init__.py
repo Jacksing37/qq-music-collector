@@ -644,16 +644,31 @@ async def _llm_answer(
     )
     if not reply:
         return False, reason
+    # 这次真要 at 谁：模型点了人就用它的，没点才按配置兜底 @ 提问者。
+    # 顺手把正文开头那段「手写 @昵称」剥掉——否则会变成「真 @ + 文字 @」同一个人两次
+    if mentions:
+        at_qqs = [int(q) for q in mentions]
+    elif llm_cfg.at_sender:
+        at_qqs = [int(user_id)]
+    else:
+        at_qqs = []
+    if at_qqs:
+        nick_of_at = {int(user_id): _sender_nick(event)}
+        for tgt in mention_targets:
+            nick_of_at.setdefault(int(tgt.qq), tgt.nick)
+        reply, dropped = mention_mod.strip_leading_at(
+            reply, [nick_of_at.get(qq, "") for qq in at_qqs]
+        )
+        if dropped:
+            logger.info(f"[mention] 群{group_id} 正文开头的「@{dropped}」已去掉（已经真 @ 过他）")
+
     parts = split_text(reply)
     first = Message()
     # 模型自己点了人（mention 工具）就以它为准；它没点才按配置兜底 @ 提问者。
     # 两者都上会变成「@提问者 @被评价的人」两个提醒，群里看着像拉人对峙
-    if mentions:
-        for qq in mentions:
-            first += MessageSegment.at(int(qq))
-            first += MessageSegment.text(" ")
-    elif llm_cfg.at_sender:
-        first += MessageSegment.at(user_id)
+    for qq in at_qqs:
+        first += MessageSegment.at(int(qq))
+        first += MessageSegment.text(" ")
     first += MessageSegment.text(" " + parts[0])
     await safe_send_group(bot, group_id, first)
     for extra in parts[1:]:

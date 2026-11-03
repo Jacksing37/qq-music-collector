@@ -109,6 +109,25 @@ def test_resolve_rejects():
     assert qq is None and "对不上" in err, err
 
 
+def test_strip_leading_at():
+    """正文开头手写的 @昵称 要剥掉——不然会「真 @ + 文字 @」同一个人两次（线上真发生过）。"""
+    # 名对得上：剥掉，正文保留
+    body, dropped = M.strip_leading_at("@菜老名 发这种表情包是想勾引本小姐？", ["菜老名"])
+    assert body == "发这种表情包是想勾引本小姐？", body
+    assert dropped == "菜老名"
+    # 名字对不上：不动
+    body, dropped = M.strip_leading_at("@路人甲 你谁啊", ["菜老名"])
+    assert body == "@路人甲 你谁啊" and dropped == "", (body, dropped)
+    # 句子中间的 @ 不动
+    body, dropped = M.strip_leading_at("哈？@菜老名 你说啥", ["菜老名"])
+    assert body.startswith("哈？@菜老名"), body
+    # 连续两个开头的 @ 都剥
+    body, dropped = M.strip_leading_at("@菜老名 @Luvu53lfplz 你俩都别跑", ["菜老名", "Luvu53lfplz"])
+    assert body == "你俩都别跑", body
+    # 没有候选名字（例如不 @ 任何人时）就不剥
+    body, dropped = M.strip_leading_at("@菜老名 你好", [])
+    assert body == "@菜老名 你好" and dropped == ""
+
 def test_resolve_duplicate_names():
     """同名多人：拒绝并要求用 昵称(QQ号) 指定。"""
     people = [
@@ -221,6 +240,7 @@ if __name__ == "__main__":
     test_resolve_forms()
     test_resolve_rejects()
     test_resolve_duplicate_names()
+    test_strip_leading_at()
     test_handler_records_and_caps()
     test_handler_rejects_outsider()
     test_handler_without_targets()

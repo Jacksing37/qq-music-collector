@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -197,6 +198,41 @@ def render_hint(targets: list[Target]) -> str:
         "先调 mention 点他；名单外的名字点不到，也不许自己写「@某某」的文字。）"
     )
 
+
+def strip_leading_at(text: str, names: Iterable[str]) -> tuple[str, str]:
+    """把正文**开头**那串手写的 ``@昵称`` 去掉，返回 ``(新正文, 被去掉的名字)``。
+
+    为什么要去：模型很爱在开头写一个 ``@某某``（纯文字），而发送时我们又可能真的
+    给同一个人加了 at 段——两样叠在一起，群里就是「同一个人被 @ 两次」（线上真发生过：
+    21:54 那条「[真@菜老名] @菜老名 发这种装可爱的表情包…」）。
+
+    只在**开头**去，且只去名字对得上 ``names``（这次真要 at 的人）的那些：模型在句子
+    中间提别人、或 @ 一个我们没打算 at 的人，都不动。
+    """
+    body = str(text or "")
+    cand = [str(n).strip() for n in (names or ()) if str(n or "").strip()]
+    if not cand:
+        return body, ""
+    dropped: list[str] = []
+    for _ in range(3):                       # 最多连剥三个（「@A @B 正文」）
+        stripped = body.lstrip()
+        if not stripped.startswith("@"):
+            break
+        rest = stripped[1:]
+        hit = ""
+        for name in cand:
+            # 按原串切同样长度再比，避免全半角/大小写差异把切片位置弄错
+            if len(rest) >= len(name) and _norm(rest[: len(name)]) == _norm(name):
+                if len(name) > len(hit):
+                    hit = name
+        if not hit:
+            break
+        body = rest[len(hit):].lstrip(" ：:，,、")
+        # 「@菜老名(2531546239) 正文」这种带 QQ 的写法：括号那一截也一起剥
+        body = re.sub(r"^[（(]\s*@?\s*\d{5,12}\s*[)）]", "", body).lstrip(" ：:，,、")
+        if hit not in dropped:
+            dropped.append(hit)
+    return body, "、".join(dropped)
 
 def summary(targets: list[Target], qqs: Iterable[int]) -> str:
     """把已记下的 QQ 变成一句人话（日志 / 追踪用）。"""
