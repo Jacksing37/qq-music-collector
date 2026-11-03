@@ -1221,6 +1221,35 @@ class Store:
                 total -= len(rows.pop(0)["content"] or "")
         return [dict(r) for r in rows]
 
+    async def chat_questions(
+        self, group_id: int, *, since: float = 0.0, limit: int = 200
+    ) -> list[dict]:
+        """取 ``kind='chat'`` 里**群友的提问**（``user_id`` + 整条 ``content``）。
+
+        只给「群聊背景」去重用：凡是 @ 机器人说的话都会落两条——旁听
+        ``listen`` 一条、问答 ``chat`` 一条。问答那条已经带着「昵称(QQ号)：」
+        进了对话历史，旁听那条要是再进背景，同一句就变成「既不是跟你说话、
+        又是问你的」，模型只能瞎猜是谁说的、在说什么。
+
+        ``content`` 是 ``[引用]\n昵称(QQ号)：正文`` 的样子，所以调用方判重
+        用 ``endswith``（正文在最后），不要用相等。
+        """
+        sql = (
+            "SELECT user_id, content FROM chat_log "
+            "WHERE group_id=? AND kind='chat' AND role='user'"
+        )
+        params: list[object] = [int(group_id)]
+        if since > 0:
+            sql += " AND created_at>=?"
+            params.append(float(since))
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, params) as cur:
+                rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
     async def pending_digest(
         self, group_id: int, *, limit: int = 300, since: float = 0.0
     ) -> list[dict]:

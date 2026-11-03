@@ -1092,6 +1092,117 @@ async def test_background_incident() -> None:
         service.store = old_store
 
 
+async def test_background_no_cross_person() -> None:
+    """线上事故复现（2026-11-04 00:25，群 1053096807）：把 A 说的话当成 B 说的。
+
+    现场：
+    - 22:58 啊？(2531546239) @它「你觉得他能把等身大的手办顶上天吗？」
+    - 00:24:37 它刚回过别人一句（界限）
+    - 00:25:07 Pumpkin(3072915848) @它「好好说话」
+    它回的是「是杂鱼你自己顶不动手办还嫌人家嘴硬吧」——把 啊？ 87 分钟前的
+    手办话题安到了 Pumpkin 头上。
+
+    两个成因各一条断言：
+    1. 回补（``bg_chat_min_rows``）越过了中间那几轮问答，把 87 分钟前的旧闲聊
+       拖进背景（> ``_BG_BACKFILL_MINUTES``）——现在只补紧挨界限的那一截；
+    2. 那句其实也是「问它的」（``kind='chat'`` 里有同一条），却作为「别人的
+       闲聊」在背景里又出现一遍——现在按「同人 + 正文相同」剔掉。
+    """
+    print("\n[15c] 线上「把 A 说的话当成 B 说的」复现")
+    from music_collector import _BG_BACKFILL_MINUTES, _llm_background
+    from music_collector.store import Store
+
+    tmp = Path(tempfile.mkdtemp(prefix="bg_person_"))
+    store = Store(tmp / "person.db")
+    await store.init()
+    old_store = service.store
+    gid, owner, pumpkin = 9303, 2531546239, 3072915848
+    now = datetime.now().timestamp()
+    cfg = LLMConfig(bg_chat=True, bg_chat_max=30, bg_chat_chars=2000,
+                    bg_chat_minutes=120, bg_chat_min_rows=15)
+
+    class _Ev:
+        group_id = gid
+        user_id = pumpkin
+
+    try:
+        service.store = store
+        check("回补窗口不该放过一小时前的闲聊", _BG_BACKFILL_MINUTES <= 15.0,
+              str(_BG_BACKFILL_MINUTES))
+
+        # 87 分钟前：啊？的话（旁听 + 问答各一条，线上就是这么存的）
+        await store.append_chat(gid, owner, "啊？", "user",
+                                "你觉得他能把等身大的手办顶上天吗？", kind="listen",
+                                created_at=now - 87 * 60)
+        await store.append_chat(gid, owner, "啊？", "user",
+                                "啊？(2531546239)：你觉得他能把等身大的手办顶上天吗？",
+                                kind="chat", created_at=now - 87 * 60)
+        # 3 分钟前：另一句同样「问过它的」（该去重）+ 一条真正没人问过它的闲聊
+        await store.append_chat(gid, owner, "啊？", "user", "那你说说看", kind="listen",
+                                created_at=now - 180)
+        await store.append_chat(gid, owner, "啊？", "user",
+                                "啊？(2531546239)：那你说说看", kind="chat",
+                                created_at=now - 180)
+        await store.append_chat(gid, 1961647582, "自巾", "user", "锁来", kind="listen",
+                                created_at=now - 170)
+        # 60 秒前它刚说过话 = 界限
+        await store.append_chat(gid, 0, "", "assistant", "有啊，湿得能把你们全泡烂~",
+                                kind="chat", created_at=now - 60)
+        # 当前这句提问本身（旁听 + 即将落的问答）
+        await store.append_chat(gid, pumpkin, "Pumpkin", "user", "好好说话",
+                                kind="listen", created_at=now - 5)
+
+        bg = await _llm_background(_Ev(), cfg, "好好说话")
+        check("不把一小时前别人的话题拖进背景", "手办" not in bg, bg or "（空）")
+        check("已经作为提问进过历史的那句不再当闲聊重喂", "那你说说看" not in bg, bg or "（空）")
+        check("别人的正常闲聊照带", "锁来" in bg, bg or "（空）")
+        check("当前提问本身不进背景", "好好说话" not in bg, bg or "（空）")
+        check("每行写明是多久以前", "分钟前" in bg, bg or "（空）")
+        check("抬头仍写明不是在跟它说话", "不是在跟你说话" in bg, bg[:60])
+
+        # 事故那次的真实情形：界限之前**没有**紧挨着的闲聊（最近一条是 33 分钟前），
+        # 这时该干脆不给背景——宁可空着，也别拿半小时前的旧话冒充「刚才」。
+        far = Store(tmp / "far.db")
+        await far.init()
+        service.store = far
+        await far.append_chat(gid, owner, "啊？", "user",
+                              "你觉得他能把等身大的手办顶上天吗？", kind="listen",
+                              created_at=now - 33 * 60)
+        await far.append_chat(gid, 0, "", "assistant", "有啊，湿得能把你们全泡烂~",
+                              kind="chat", created_at=now - 30)
+        await far.append_chat(gid, pumpkin, "Pumpkin", "user", "好好说话",
+                              kind="listen", created_at=now - 5)
+        bg2 = await _llm_background(_Ev(), cfg, "好好说话")
+        check("够不着就不给背景（宁可空着也不串人）", bg2 == "", bg2 or "（空）")
+    finally:
+        service.store = old_store
+
+
+def test_speaker_rules() -> None:
+    """「谁在说话」硬规则：只在真发请求时补，且压在人设之后、能力边界之前。"""
+    print("\n[15d] 系统提示词里的「谁在说话」")
+    from music_collector.llm import SPEAKER_RULES
+
+    base = LLMConfig(system_prompt="你是蓝色大肥鱼鲸鱼娘")
+    check("不传 speaker 就不塞这段", "谁在说话" not in system_text(base))
+    named = system_text(base, speaker="Pumpkin", user_id=3072915848)
+    check("传了就点名当前说话人", "Pumpkin(3072915848)" in named, named[-160:])
+    check("写明别人的话不算他的", "是**别人**说的" in named, named[-260:])
+    check("排在人设之后（不然压不住不分人的文风）",
+          named.index("蓝色大肥鱼鲸鱼娘") < named.index("谁在说话"))
+    check("没规则时它就是收尾（工具关了也一样）",
+          named.endswith(SPEAKER_RULES.replace("{speaker}", "Pumpkin")
+                         .replace("{uid}", "3072915848")))
+    with_tools = system_text(base, "\n【规则】边界", "", speaker="Pumpkin", user_id=3072915848)
+    check("能力边界仍守最后一道", with_tools.endswith("\n【规则】边界"))
+    long_cfg = LLMConfig(system_prompt="长" * 5000)
+    long_text = system_text(long_cfg, "\n【规则】边界", "\n【档案】某人",
+                            speaker="Pumpkin", user_id=3072915848)
+    check("人设写满也挤不掉这条",
+          "Pumpkin(3072915848)" in long_text and "【规则】边界" in long_text,
+          str(len(long_text)))
+
+
 async def test_reply_resets_banter() -> None:
     """被动回复完 → 主动搭话计时重算（接线检查）。
 
@@ -1404,6 +1515,8 @@ async def main() -> None:
     await test_trace_wired()
     await test_background()
     await test_background_incident()
+    await test_background_no_cross_person()
+    test_speaker_rules()
     await test_reply_resets_banter()
     await test_trace_has_background()
     await test_tool_mark_leak()

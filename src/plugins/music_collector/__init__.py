@@ -434,6 +434,17 @@ async def _llm_context(
 #: 取 2500 是给「转发记录 / 网页正文」留出空间；``bg_chat_chars`` 配得更大也只给这么多。
 _BG_CHAR_LIMIT = 2500
 
+#: 回补（``bg_chat_min_rows``）最多能往前追到「它上次说话」之前多久（分钟）。
+#:
+#: 为什么要有这道闸：回补的初衷是「刚答完一句又被 @，界限之后只剩提问本身，
+#: 往前补一小段让它接得上」。但补到多远必须有边界——2026-11-04 00:25（群
+#: 1053096807）就是界限（00:24:37）之后没人说话，回补一口气把 22:49~23:51 的
+#: 旧闲聊拖了进来，模型于是拿「啊？」22:58 说的「等身大的手办顶上天」，去回
+#: Pumpkin 那句「好好说话」，把别人的话安到了当前说话人头上。
+#:
+#: 10 分钟够覆盖「同一段对话的尾巴」，又不会跨过中间隔着的那几轮问答。
+_BG_BACKFILL_MINUTES = 10.0
+
 
 def _drop_pending_question(rows: list[dict], event: object, text: str) -> list[dict]:
     """把「当前这条提问」从背景里剔掉。
@@ -459,6 +470,50 @@ def _drop_pending_question(rows: list[dict], event: object, text: str) -> list[d
     ]
 
 
+async def _drop_already_asked(
+    rows: list[dict], group_id: int, ttl_minutes: float
+) -> list[dict]:
+    """把「其实是在问它的话」从背景里剔掉（当前提问之外的那些）。
+
+    凡是 @ 它的消息都会落两条：旁听 ``listen`` 一条、问答 ``chat`` 一条。
+    问答那条已经带着「昵称(QQ号)：」进了对话历史，旁听那条再进背景，同一句就
+    变成「既是别人的闲聊（不是在跟你说话）、又是问你的」——模型只能挑一个信，
+    挑错了就是「把 A 说的话当成 B 说的」。
+
+    :func:`_drop_pending_question` 只处理**当前这一条**，这里补上更早的那些。
+    判重只认「同一个人 + 正文相同（问答那条以它结尾）」，宁可漏也别误删别人的话。
+    """
+    if not rows:
+        return rows
+    try:
+        asked = await service.store.chat_questions(
+            group_id,
+            since=time.time() - max(0.0, float(ttl_minutes)) * 60,
+            limit=200,
+        )
+    except Exception as exc:  # noqa: BLE001 — 查不到就照旧带上，背景不该因此消失
+        logger.debug(f"[llm] 群{group_id} 取「问过它的话」失败（背景照常）: {exc}")
+        return rows
+    if not asked:
+        return rows
+    pairs = [
+        (int(a.get("user_id") or 0), str(a.get("content") or "").strip())
+        for a in asked
+    ]
+    kept: list[dict] = []
+    dropped = 0
+    for row in rows:
+        uid = int(row.get("user_id") or 0)
+        body = str(row.get("content") or "").strip()
+        if body and any(u == uid and content.endswith(body) for u, content in pairs):
+            dropped += 1
+            continue
+        kept.append(row)
+    if dropped:
+        logger.debug(f"[llm] 群{group_id} 背景里剔掉 {dropped} 条「其实是在问它的话」")
+    return kept
+
+
 async def _llm_background(event: object, llm_cfg, text: str = "") -> str:
     """机器人上次说话之后、群里聊的那一段（它没参与过的那截）。
 
@@ -467,7 +522,9 @@ async def _llm_background(event: object, llm_cfg, text: str = "") -> str:
     一无所知——问出这种「答不上来」的根源在这里，不是模型不行。
 
     ``text`` 是当前这条提问的正文，用来把它自己从背景里剔掉（见
-    :func:`_drop_pending_question`）。
+    :func:`_drop_pending_question`）；更早那些「其实是在问它的」也一并剔掉
+    （见 :func:`_drop_already_asked`），否则同一句会一边说「不是跟你说话」
+    一边躺在对话历史里。
 
     只查库、不发请求；任何异常都当「没有背景」，绝不能让 @ 的回复卡住。
     """
@@ -496,11 +553,21 @@ async def _llm_background(event: object, llm_cfg, text: str = "") -> str:
                 max_chars=int(llm_cfg.bg_chat_chars),
             )
             tail = _drop_pending_question(tail, event, text)
+            # 只补「紧挨着界限」的那一截（见 _BG_BACKFILL_MINUTES）：界限之前要是
+            # 还隔着别的对话，那段旧闲聊就不是「刚才在聊的」，补进来只会串人。
+            edge = float((last or {}).get("created_at") or 0)
+            if edge > 0:
+                edge -= _BG_BACKFILL_MINUTES * 60
+                tail = [r for r in tail if float(r.get("created_at") or 0) >= edge]
             # 只往前补，别把界限之后那些重复一遍
             first_id = int(rows[0]["id"]) if rows else 0
             older = [r for r in tail if not first_id or int(r["id"]) < first_id]
             if older:
                 rows = older[-(need - len(rows)):] + rows
+        # 剔掉「其实是在问它的话」：这类消息历史里已经有了，背景里再来一遍就是双份
+        rows = await _drop_already_asked(
+            rows, gid, ttl_minutes=float(llm_cfg.bg_chat_minutes)
+        )
     except Exception as exc:  # noqa: BLE001 — 背景拿不到也要正常回答
         logger.debug(f"[llm] 群{gid} 取群聊背景失败: {exc}")
         return ""
@@ -508,7 +575,8 @@ async def _llm_background(event: object, llm_cfg, text: str = "") -> str:
         return ""
 
     # 太久以前的不算「刚才在聊」：它可能几小时没说话，中间的全捞进来也没用
-    cutoff = time.time() - float(llm_cfg.bg_chat_minutes) * 60
+    now = time.time()
+    cutoff = now - float(llm_cfg.bg_chat_minutes) * 60
     rows = [r for r in rows if float(r.get("created_at") or 0) >= cutoff]
     if not rows:
         return ""
@@ -516,20 +584,30 @@ async def _llm_background(event: object, llm_cfg, text: str = "") -> str:
     tz = service.resolver.tz
     lines: list[str] = []
     for row in rows:
+        stamp = float(row.get("created_at") or 0)
         try:
-            hm = datetime.fromtimestamp(float(row["created_at"]), tz).strftime("%H:%M")
+            hm = datetime.fromtimestamp(stamp, tz).strftime("%H:%M")
         except (KeyError, TypeError, ValueError, OSError):
             hm = "--:--"
+        # 每行都写明「多久以前」：抬头要是只说「刚才」，模型会把一小时前的旧话
+        # 当成刚刚聊的，然后拿去回当前这个人（2026-11-04 00:25 就是这么串的）
+        ago = max(0, int((now - stamp) // 60)) if stamp > 0 else -1
+        when = "刚刚" if ago == 0 else (f"{ago} 分钟前" if ago > 0 else "时间未知")
         body = str(row.get("content") or "").strip().replace("\n", " ")
-        lines.append(f'[{hm}] {row.get("nick") or "群友"}({row.get("user_id") or 0})：{body}')
+        lines.append(
+            f'[{hm} / {when}] {row.get("nick") or "群友"}({row.get("user_id") or 0})：{body}'
+        )
 
     # 尊重用户的 bg_chat_chars，但不超过硬上限（超了会把真正的提问挤出 context）
     budget = max(200, min(int(llm_cfg.bg_chat_chars), _BG_CHAR_LIMIT))
     text = clip_tail("\n".join(lines), budget)
     logger.debug(f"[llm] 群{gid} 附带群聊背景 {len(rows)} 条 / {len(text)} 字")
     # 这句说明不能省：不写的话模型会以为有人在跟它说「这家锅贴真不错」，
-    # 或者以为自己该接话
-    return "【群里刚才在聊的，不是在跟你说话，判断语境用】\n" + text
+    # 或者以为自己该接话。括号里那句同样不能省——它挡住「把旧话当刚刚」。
+    return (
+        "【群里刚才在聊的（每行「X 分钟前」是真实时间差，可能不是刚刚；"
+        "这些是别人说的话），不是在跟你说话，判断语境用】\n" + text
+    )
 
 
 def _at_targets(message, self_ids: set[str]) -> list[tuple[int, str]]:

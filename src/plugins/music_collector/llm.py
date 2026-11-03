@@ -43,6 +43,26 @@ _HISTORY_CHAR_LIMIT = 600
 #: 「已用 x / 4000 字」，两边各写一个魔法数字迟早会对不上。
 SYSTEM_CHAR_LIMIT = 4000
 
+#: 「谁在说话」硬规则。**拼在人设与档案之后、能力边界之前**（见
+#: :func:`system_text`）：人设写满也挤不掉，和 ``tools.TOOL_RULES`` 一个待遇。
+#:
+#: 为什么必须有：群里每句话在 API 里都是同一个 ``role: user``，人名只写在正文
+#: 里，模型很容易把「上一位群友说的话」当成「现在这个人说的」。2026-11-04
+#: 00:25（群 1053096807）Pumpkin 只说了「好好说话」，它却把「啊？」87 分钟前
+#: 聊的「等身大的手办顶上天」安到 Pumpkin 头上回了出去。
+#:
+#: ``speaker`` / ``uid`` 由调用方填（见 :meth:`LLMClient.chat`）；不填就不加这条。
+SPEAKER_RULES = """
+【谁在说话（硬规则，压过上面所有人设与风格要求）】
+- 这一次跟你说话的是 {speaker}({uid})。
+- 上下文里带别的「昵称(QQ号)：」的那些话是**别人**说的，不是他说的。别把那些话、
+  那些话题、那些毛病安到他头上，也别替他回忆「你刚才不是说了X」。
+- 【群里刚才在聊的…】那段里每行都是「时间 / 谁(QQ号)：内容」，那是别人的闲聊；
+  除了当前这个人自己那几行，其余只能当语境参考，绝不能当成「他刚说的话」。
+- 他这句要是没有指向（比如只说「好好说话」「?」「在吗」），就直接针对这一句回；
+  不知道他在指什么就说不知道，别从背景或历史里挑别人的话题顶上。
+"""
+
 #: 服务端报「超窗」时常见的措辞。命中就说明上下文真的爆炸了，
 #: 与其把错误抛给用户，不如丢掉历史重试一次。
 _CONTEXT_OVERFLOW_MARKS = (
@@ -375,15 +395,21 @@ def without_images(messages: list[dict], text: str) -> list[dict]:
     return head
 
 
-def system_text(cfg: LLMConfig, rules: str = "", memory_text: str = "") -> str:
+def system_text(
+    cfg: LLMConfig, rules: str = "", memory_text: str = "",
+    speaker: str = "", user_id: int = 0,
+) -> str:
     """带长度保护的系统提示词（人设再长也不会挤占上下文）。
 
-    拼接顺序是 **人设 → 记忆 → 硬规则**，两个理由：
+    拼接顺序是 **人设 → 记忆 → 「谁在说话」→ 硬规则**，三个理由：
 
     - ``rules`` 是代码写死的硬规则（见 :data:`tools.TOOL_RULES`），必须排在最后、
       且**拼在截断之后**——用户把人设写满 4000 字也挤不掉「聊天里装不了技能」；
     - ``memory_text`` 是群成员档案（见 :mod:`memory`），它只会随人数增长、
-      不该挤占人设位置，也不该盖住能力边界。
+      不该挤占人设位置，也不该盖住能力边界；
+    - ``speaker`` 非空时补 :data:`SPEAKER_RULES`（当前这条是谁在说、别人的话不算
+      他的）。它和人设同处一块，必须排在**人设之后**才压得住「不分人」的文风，
+      又排在能力边界之前，让那道边界保持收尾。不传就不加，摘要/离线场景用不着。
     """
     prompt = (cfg.system_prompt or "").strip()
     if len(prompt) > SYSTEM_CHAR_LIMIT:
@@ -391,7 +417,13 @@ def system_text(cfg: LLMConfig, rules: str = "", memory_text: str = "") -> str:
             f"[llm] system_prompt 过长（{len(prompt)} 字），已截断到 {SYSTEM_CHAR_LIMIT} 字"
         )
         prompt = prompt[:SYSTEM_CHAR_LIMIT]
-    return prompt + (memory_text or "") + (rules or "")
+    who = str(speaker or "").strip()
+    speaker_rules = ""
+    if who:
+        speaker_rules = SPEAKER_RULES.replace("{speaker}", who).replace(
+            "{uid}", str(int(user_id or 0))
+        )
+    return prompt + (memory_text or "") + speaker_rules + (rules or "")
 
 
 def is_reasoning_model(model: str) -> bool:
@@ -1193,12 +1225,16 @@ class LLMBot:
             # 工具一开就是「agent 模式」：能力边界（不许装技能、不许写文件）由代码
             # 追加在系统提示词末尾，用户改人设也删不掉。群成员档案插在人设之后，
             # 硬规则之前——档案再长也盖不掉能力边界。
+            # 最后再补一段「这一次是谁在说话」：群里所有消息都是同一个 role，
+            # 不点名它就会把上一位群友说的话算到当前这个人头上（见 SPEAKER_RULES）。
             memory_gid = int(memory_group) if memory_group is not None else group_id
             memory_text = memory_mod.render_for_prompt(memory_cfg, memory_gid)
             system = system_text(
                 cfg,
                 tools_mod.TOOL_RULES if cfg.tools else "",
                 memory_text,
+                speaker=speaker,
+                user_id=user_id,
             )
             base: list[dict] = []
             if system:
