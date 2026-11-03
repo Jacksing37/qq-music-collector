@@ -1143,7 +1143,11 @@ class LLMBot:
         if mention_hint:
             extra = f"{mention_hint}\n\n{extra}" if extra else mention_hint
             # 网页「LLM 调用」里能看见这次到底给了哪些人——排查「它怎么没 @」的第一眼
-            llmtrace_mod.step(trace, f"🎯 可 @ 名单 {len(mention_targets or [])} 人")
+            llmtrace_mod.step(
+                trace,
+                f"🎯 可 @ 名单 {len(mention_targets or [])} 人"
+                f"（mention 工具{'已' if (mention_targets and cfg.mention_enabled) else '未'}注册）",
+            )
 
         def _done(reply_text, why: str = "", think: str = ""):
             """收口：归档这条调用记录，再原样返回给调用方。
@@ -1217,8 +1221,11 @@ class LLMBot:
             tool_ctx = None
             tool_schemas: list[dict] = []
             if cfg.tools and cfg.tool_rounds > 0:
+                # mention_targets 必须一起传：不给它，mention 工具压根不会注册进
+                # schema（模型就"看不到"这个工具，只能干瞪眼）——22:18 线上就这么翻的
                 tool_list, tool_ctx = tools_mod.build(
-                    cfg, group_id, user_id, speaker, memory_cfg
+                    cfg, group_id, user_id, speaker, memory_cfg,
+                    mention_targets=mention_targets,
                 )
                 tool_schemas = tools_mod.schemas(tool_list)
 

@@ -2396,6 +2396,15 @@ async def _api_chat_test(request: Request):
     except (TypeError, ValueError):
         quote_qq = 0
     quote = f"（引用 {quote_nick or quote_qq or '对方'} 的消息：{quote_text}）" if quote_text else ""
+    # 可选：模拟「这条消息里 @ 了谁」，用来复现「@某人 他说…」这种场景
+    at_qqs: list[tuple[int, str]] = []
+    for raw_qq in (body.get("at") or [])[:3] if isinstance(body.get("at"), list) else []:
+        try:
+            qq = int(raw_qq)
+        except (TypeError, ValueError):
+            continue
+        if qq > 0:
+            at_qqs.append((qq, ""))
 
     # 候选名单：借用的那个群的档案 + 模拟引用的人。名单外的名字点不到
     mention_targets: list = []
@@ -2412,6 +2421,7 @@ async def _api_chat_test(request: Request):
         mention_targets = mention_mod.build_targets(
             quote_qq=quote_qq,
             quote_nick=quote_nick,
+            at_qqs=at_qqs,
             text=f"{text}\n{quote}",
             people=people,
         )

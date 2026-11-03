@@ -219,6 +219,19 @@ def test_rules_mention_the_hard_rule():
     assert "只能点" in desc
 
 
+def test_chat_hands_targets_to_build():
+    """22:18 线上事故的钉子：chat() 忘了把 mention_targets 传给 tools.build()，
+    模型那边就**根本没有 mention 这个工具**，它自己都说了「the tools list doesn't
+    include a mention tool」，只能干瞪眼。源码级断言，防止再接漏一次。"""
+    import inspect
+
+    from src.plugins.music_collector import llm as L
+
+    src = inspect.getsource(L.LLMBot.chat)
+    assert "mention_targets=mention_targets" in src, (
+        "chat() 必须把候选名单交给 tools.build()，否则 mention 工具不会注册"
+    )
+
 def test_config_defaults_and_labels():
     cfg = AppConfig().llm
     assert cfg.mention_enabled is True
@@ -246,5 +259,6 @@ if __name__ == "__main__":
     test_handler_without_targets()
     test_tool_registered_only_with_targets()
     test_rules_mention_the_hard_rule()
+    test_chat_hands_targets_to_build()
     test_config_defaults_and_labels()
     print("mention tests OK")
