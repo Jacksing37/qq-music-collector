@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from . import budget as budget_mod
 from . import llmtrace as llmtrace_mod
 from . import memory as memory_mod
 from . import tools as tools_mod
@@ -954,6 +955,13 @@ class LLMBot:
             data = resp.json()
         except Exception:
             raise RuntimeError("返回的不是合法 JSON") from None
+        # 预算记账点。**放在这里而不是 chat() 里**，因为这里是全项目唯一真正发出
+        # 请求的地方：``chat`` 的降级重试循环每转一圈都会经过 ``_run_turns`` →
+        # 这里，而 ``_run_turns`` 自己还会为工具往返发好几次；一次 ``chat`` 到底
+        # 发了几次请求，只有在这个粒度上才数得清。失败（超时 / 4xx）没有 usage，
+        # ``note`` 自己会安静跳过；成功但结构不对的响应（下面抛「没有 choices」）
+        # 也照样记账——那笔钱是真花出去了。
+        budget_mod.note(data.get("usage"), cfg)
         choices = data.get("choices") or []
         if not choices:
             err = data.get("error") or data.get("message") or data.get("detail")

@@ -48,11 +48,13 @@ from .detector import (  # noqa: E402
 from .llm import disabled_reason as llm_disabled_reason  # noqa: E402
 from .llm import clip_tail, llm_bot  # noqa: E402
 from . import banter as banter_mod  # noqa: E402  被动回复后要重排搭话计时
+from . import budget as budget_mod  # noqa: E402  当日预算闸门（默认不限）
 from . import memory as memory_mod  # noqa: E402
 from . import mention as mention_mod  # noqa: E402  回复里 @ 谁，由模型自己点
 from . import persona as persona_mod  # noqa: E402  听群友抱怨「AI 味」，只记不吭声
 from . import replysplit  # noqa: E402  把一条回复拆成几条短消息发
 from . import speak as speak_mod  # noqa: E402  这一条到底该不该开口（概率门）
+from . import timeguard as timeguard_mod  # noqa: E402  白天说「晚安」时改写一次
 from .models import PLATFORM_NAMES, Song  # noqa: E402
 from .naming import build_context, render_template, resolve_alias  # noqa: E402
 from .scheduler import reload_jobs  # noqa: E402
@@ -380,10 +382,16 @@ def _llm_skip(event: GroupMessageEvent, reason: str, level: str = "debug") -> bo
 def _llm_gate(
     event: object = None, *, group_id: int | None = None
 ) -> tuple[object, str]:
-    """过三道门，返回 ``(llm_cfg, 原因)``；原因非空表示不该走大模型。
+    """过四道门，返回 ``(llm_cfg, 原因)``；原因非空表示不该走大模型。
 
-    三道门分别是：``llm.enabled`` + 必填项 + ``llm.groups`` 群白名单（由
+    前三道是静态资格：``llm.enabled`` + 必填项 + ``llm.groups`` 群白名单（由
     ``llm.disabled_reason`` 统一判定）、插件总开关、插件生效群号。
+
+    第四道是**当日预算**（``llm.daily_budget``，默认 ``0`` = 不限）。放在最后是有意
+    的：前三道都不看运行状态、恒为同一个结果，先用它们把「本来就不该走」的流量
+    挡掉，再去看「今天花了多少」这种会变的数字。超了只返回一句原因，上层照旧走
+    ``_llm_skip`` / 自我介绍那条既有路径——**不另造一套超预算话术**，否则群里会
+    冒出一句全新的、谁都没配过的回复。
 
     三个触发点（@ 机器人 / 被戳一戳 / 分享了非音乐链接）共用这一套门槛，
     免得某个入口漏掉一个开关、变成「明明关了还在说话」。
@@ -398,6 +406,14 @@ def _llm_gate(
         return llm_cfg, "插件总开关关闭"
     if app_cfg.groups and gid not in app_cfg.groups:
         return llm_cfg, "本群不在插件生效列表"
+    # 预算门自己会记日志（INFO 会刷屏，这里是真出事，用 WARNING 并带上数字，
+    # 方便事后核对「是不是中转刷的」）。群里看到的是正常的自我介绍，看不到原因。
+    if budget_mod.exceeded(llm_cfg):
+        logger.warning(
+            f"[llm] 群{gid} 今日预算已用尽（已花 {budget_mod.spent_today():.2f} 元 / "
+            f"上限 {float(llm_cfg.daily_budget):.2f} 元）→ 本轮不进模型"
+        )
+        return llm_cfg, "今日预算已用尽"
     return llm_cfg, ""
 
 
@@ -792,6 +808,14 @@ async def _llm_answer(
     )
     if not reply:
         return False, reason
+    # 时间感兜底：白天开口说「今晚 / 晚安 / 早点睡」这类话时按当前时段改写一次。
+    # 放在这里（拿到正文之后、剥 @ 与拆条之前）有两个理由：
+    # ① 拆条会按换行/标点切分，改写必须发生在**切分之前**，否则改的只是其中一段；
+    # ② 剥「手写 @昵称」要在最后——模型改写时不该操心正文开头有没有 @。
+    # 关着开关时 fix() 连正则都不跑、原样返回，回复与改造前逐字一致。
+    reply = await timeguard_mod.fix(
+        reply, datetime.now(service.resolver.tz), enabled=llm_cfg.time_guard
+    )
     # 这次真要 at 谁：模型点了人就用它的，没点才按配置兜底 @ 提问者。
     # 顺手把正文开头那段「手写 @昵称」剥掉——否则会变成「真 @ + 文字 @」同一个人两次
     if mentions:
