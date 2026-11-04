@@ -42,6 +42,7 @@ from .config import (
     reset_config_value,
 )
 from . import logbuffer
+from . import heart as heart_mod
 from . import llmtrace as llmtrace_mod
 from . import memory as memory_mod
 from . import mention as mention_mod
@@ -698,6 +699,32 @@ FIELD_META["memory.keep_days"] = (
     "群聊记录（上下文 + 整理素材）留多少天；0 = 永久保留",
     False,
 )
+FIELD_META["memory.buckets_enabled"] = (
+    "三桶结构",
+    "打开后档案正文按 <b>他是谁 / 我们之间 / 事件</b> 三节存，整理时由模型按判据归类、"
+    "合并同类条目、淘汰过时的状态；带日期的日常进「近期」，按天自动淘汰。"
+    "<br>⚠️ <b>默认关</b>：关着就是老的「一段自由文本」模式，整理提示词、解析、写盘"
+    "全走改造前那条路。旧档案两种模式都能读、都能写回。",
+    False,
+)
+FIELD_META["memory.l1_max_facts"] = (
+    "长期条目上限",
+    "一个人的档案最多几条长期条目（三桶合计）。<b>按条目数算，不是字数</b>——"
+    "按字数时模型估算和代码统计差好几倍，它会以为额度不够、把整库输出成空数组。",
+    False,
+)
+FIELD_META["memory.l1_quota"] = (
+    "各桶条目上限",
+    "形如 <code>{who: 20, us: 24, event: 16}</code>。<b>是上限不是目标</b>，"
+    "提示词里已写明「没到上限不要凑数，更不许编造」。超了先淘汰最久没被提到的。",
+    False,
+)
+FIELD_META["memory.recent_days"] = (
+    "近期流水保留天数",
+    "「近期」那一节里带日期的日常琐事留几天。它不进长期配额，由代码按天淘汰"
+    "（模型只管记新的）。",
+    False,
+)
 FIELD_META["memory.recall_enabled"] = (
     "按当前这句话挑人",
     "打开后装人前先给档案打分（相关度 + 重要度 + 新鲜度），只注入跟这句话有关的人。"
@@ -802,6 +829,24 @@ FIELD_META["persona.max_tokens"] = (
 FIELD_META["persona.persona_limit"] = (
     "人设总字数上限",
     "改完之后人设最多多少字；超出的修改一律驳回，避免人设越改越胖",
+    False,
+)
+FIELD_META["persona.heart_enabled"] = (
+    "心事（人设演化）",
+    "打开后按群定期生成一段第一人称的「心事」——人设说的是「你是…」（出厂定义、人审），"
+    "心事说的是「相处到如今我成了谁」（机器整体重写、每轮注入）。"
+    "<br>⚠️ <b>默认关</b>：关掉后既不生成也不注入，系统提示词与改造前逐字相同。"
+    "<br>生成时素材不够（最近对话少于下限）会直接跳过、保留旧心事——没素材硬写只能编。",
+    False,
+)
+FIELD_META["persona.heart_chars"] = (
+    "心事字数上限",
+    "心事最多多少字。它是**每轮都要注入**的固定成本，宁短勿长；写超了截断不报错",
+    False,
+)
+FIELD_META["persona.heart_min_source"] = (
+    "心事素材下限",
+    "最近对话少于这么多条就不调模型、保留旧心事。没有素材硬写，模型只能把「我成了谁」编出来",
     False,
 )
 FIELD_META["llm.max_input_chars"] = (
@@ -2090,6 +2135,14 @@ def _memory_payload(person, full: bool = False) -> dict:
     }
     if full:
         data["body"] = person.body
+        # 三桶视图：正文里的小节解析出来给前端画「他是谁 / 我们之间 / 事件」。
+        # 旧格式（没有小节）解析出空桶 + 整段原文，前端据此只显示原文、不显示空桶。
+        sections, rest = memory_mod.parse_body(person.body)
+        data["buckets"] = {
+            key: list(sections.get(key) or []) for key in (*memory_mod.BUCKETS, memory_mod.RECENT)
+        }
+        data["unclassified"] = rest
+        data["bucket_mode"] = bool(sections)
     return data
 
 
@@ -2150,12 +2203,23 @@ async def _api_memory(request: Request):
                 **style_mod.stats(mem, gid),
                 "next": _fmt_when(next_run_of("style")),
             },
+            # 心事：**只读预览**。它是机器整体重写的，手改会被下一轮覆盖，
+            # 所以这里只给看，不给编辑框——要改人设请走上面的「人设修订」。
+            "heart": {
+                **heart_mod.stats(gid, service.cfg(gid).persona),
+                "next": _fmt_when(next_run_of("heart")),
+            },
             "limits": {
                 "note_chars": int(mem.note_chars),
                 "inject_chars": int(mem.inject_chars),
                 "digest_hours": float(mem.digest_hours),
                 "style_chars": int(mem.style_chars),
                 "style_hours": float(mem.style_hours),
+                # 三桶：配额与开关给前端画「3/20 条」这样的进度，以及决定要不要显示小节
+                "buckets_enabled": bool(mem.buckets_enabled),
+                "l1_max_facts": int(mem.l1_max_facts),
+                "l1_quota": dict(mem.l1_quota) if isinstance(mem.l1_quota, dict) else {},
+                "recent_days": int(mem.recent_days),
             },
         })
 

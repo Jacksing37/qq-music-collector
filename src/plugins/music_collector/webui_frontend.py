@@ -300,6 +300,23 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .mem-item .mi-name{font-weight:600;font-size:13px}
 .mem-item .mi-sub{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
+/* 三桶预览：档案正文按「他是谁 / 我们之间 / 事件」分小节时，在编辑框下面摊开给一眼看。
+   正文本身仍然可编辑（下面那个 textarea），这里只是**读**的一层，不做双向同步——
+   两处都能写就得处理冲突，反而更容易把人的修改弄丢。 */
+.mem-buckets{margin-top:10px;padding:10px 12px;border:1px dashed var(--card-bd);border-radius:10px}
+.mem-buckets .mb-head{font-size:12px;color:var(--muted);margin-bottom:6px}
+.mem-buckets .mb-sec{margin-top:8px}
+.mem-buckets .mb-title{font-size:12px;font-weight:600;color:var(--accent)}
+.mem-buckets .mb-title .mb-count{font-weight:400;color:var(--muted);margin-left:6px}
+.mem-buckets ul{margin:4px 0 0;padding-left:18px;font-size:12px;line-height:1.7;color:var(--txt)}
+.mem-buckets li{margin:0}
+.mem-buckets .mb-empty{font-size:12px;color:var(--muted)}
+
+/* 心事（只读预览）：正文就是注入内容，原样折行显示，不做任何 markdown 渲染 */
+.mem-heart{margin:0;padding:10px 12px;border:1px solid var(--card-bd);border-radius:10px;
+  background:var(--input);color:var(--txt);font-size:13px;line-height:1.75;
+  white-space:pre-wrap;word-break:break-word;font-family:inherit}
+
 /* 按群配置：被单独覆盖过的项高亮，并给一个「继承全局」的还原按钮 */
 .field.overridden{border-left:3px solid var(--accent2);padding-left:11px;margin-left:-14px}
 .field.overridden .flabel .ink{font-size:11px;color:var(--accent2);border:1px solid var(--accent2);
@@ -607,6 +624,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
             <span class="muted" id="memMeta"></span>
           </div>
           <textarea id="memBody" class="mem-body" placeholder="选左边一个人，或者直接在这里写一个新档案（记得填昵称）"></textarea>
+          <div id="memBuckets" class="mem-buckets hidden"></div>
           <div class="row end" style="margin-top:10px">
             <button id="memDelete" title="把这个人的档案整个删掉">🗑 删除档案</button>
             <button id="memSave" class="btn-primary">💾 保存档案</button>
@@ -639,6 +657,19 @@ button:disabled{opacity:.5;cursor:not-allowed}
         <div class="row end" style="margin-top:10px">
           <button id="memStyleSave" class="btn-primary">💾 保存风格卡</button>
         </div>
+      </div>
+
+      <div class="card">
+        <h2><span class="dot"></span>心事 · 相处到如今它成了谁</h2>
+        <p class="muted">和上面的档案、风格卡都不是一回事：档案记「群里谁是谁」，风格卡记「这个群怎么说话」，
+          这里记的是<b>它自己心里的那点事</b>——它在<b>这个群里</b>成了什么样。</p>
+        <p class="muted">人设是出厂设定（<code>llm.system_prompt</code>，由人审）；
+          心事是相处到现在长出来的那部分，由机器整体重写、每轮注入。
+          <b>只读</b>：手改会被下一轮覆盖，想纠正它的样子请去改人设。</p>
+        <div class="row" style="margin-bottom:8px">
+          <span class="muted" id="memHeartMeta">—</span>
+        </div>
+        <pre id="memHeartBody" class="mem-heart">（还没有心事）</pre>
       </div>
 
       <div class="card">
@@ -2302,17 +2333,26 @@ async function loadMemoryGroup(){
     $("#memGroupNote").value="";
     $("#memStyleBody").value=""; $("#memStyleMeta").textContent="—";
     $("#memBody").value=""; $("#memNick").value=""; $("#memUid").value=""; $("#memMeta").textContent="";
+    renderMemBuckets(null);
+    renderMemHeart({});
     return;
   }
   const j=await (await api("/api/music-admin/memory?group="+gid)).json();
   if(!j.ok){ memMsg(j.message||"读取失败","bad"); return; }
   MEM.people=j.people||[];
   MEM.noteChars=(j.limits&&j.limits.note_chars)||8000;
+  MEM.limits=j.limits||{};
   const st=j.stats||{}, lg=j.log||{};
   $("#memStats").textContent =
     `${st.people||0} 人 / ${st.chars||0} 字 ｜ 群聊记录 ${lg.rows||0} 条（未整理 ${lg.pending||0}）`
     + ` ｜ 每 ${(j.limits&&j.limits.digest_hours)||0} 小时自动整理`
     + (j.next_digest ? ` ｜ 下次 ${j.next_digest}` : " ｜ 下次：未排期");
+  // 三桶条数只在打开时显示：关着就是自由文本，报「谁 0 条」只会让人以为坏了
+  const bk=st.buckets||{};
+  if(j.limits&&j.limits.buckets_enabled && st.buckets_enabled){
+    $("#memStats").textContent +=
+      ` ｜ 三桶：他是谁 ${bk.who||0} / 我们之间 ${bk.us||0} / 事件 ${bk.event||0} / 近期 ${bk.recent||0}`;
+  }
   $("#memGroupNote").value=j.group_note||"";
   const sty=j.style||{};
   $("#memStyleBody").value=sty.body||"";
@@ -2323,10 +2363,31 @@ async function loadMemoryGroup(){
     : `还没有风格卡（每 ${(j.limits&&j.limits.style_hours)||0} 小时自动学一次`
       + (sty.next ? `，下次 ${sty.next}` : "") + `）`;
   if(sty.body && !sty.enabled) memMsg("风格学习当前是关着的（卡还能看和改，但不会再自动更新）","bad");
+  renderMemHeart(j.heart||{});
   if(!j.enabled) memMsg("记忆功能当前是关闭的（档案还能看和改，但不会再自动更新）","bad");
   renderMemPeople();
   if(MEM.people.length) await selectMemPerson(MEM.people[0].uid);
-  else { $("#memBody").value=""; $("#memNick").value=""; $("#memUid").value=""; $("#memMeta").textContent=""; }
+  else { $("#memBody").value=""; $("#memNick").value=""; $("#memUid").value=""; $("#memMeta").textContent="";
+    renderMemBuckets(null); }
+}
+
+/* 心事：只读。它是机器整体重写的，给个编辑框只会让人改了又被下一轮覆盖 */
+function renderMemHeart(ht){
+  const body=$("#memHeartBody"), meta=$("#memHeartMeta");
+  if(!body||!meta) return;
+  if(ht.body){
+    body.textContent=ht.body;
+    meta.textContent=`${ht.chars||0}/${ht.budget||400} 字 ｜ 来源 ${ht.source_rows||0} 条对话 ｜ 更新于 ${ht.updated_at||"?"}`
+      + (ht.next?` ｜ 下次 ${ht.next}`:" ｜ 下次：未排期");
+    return;
+  }
+  body.textContent = ht.enabled
+    ? "（还空着：等群里聊够素材，下一次定时任务就会写）"
+    : "（心事没开：在「机器人 → 人设修订 → 心事」里打开后才会生成）";
+  meta.textContent = ht.enabled
+    ? `每轮都会注入；最近对话不足 ${ht.min_source||10} 条时跳过，保留旧心事`
+      + (ht.next?` ｜ 下次 ${ht.next}`:"")
+    : "心事当前是关着的（不影响回话）";
 }
 
 function renderMemPeople(){
@@ -2363,7 +2424,43 @@ async function selectMemPerson(uid){
     $("#memNick").value=p.nick||"";
     $("#memBody").value=p.body||"";
     $("#memMeta").textContent=`首次 ${p.first_seen||"?"} ｜ 最后 ${p.last_seen||"?"} ｜ 消息 ${p.msgs||0} 条 ｜ ${p.chars||0}/${MEM.noteChars} 字`;
+    renderMemBuckets(p);
   }catch(e){ memMsg("读取失败: "+e.message,"bad"); }
+}
+
+/* 三桶标题：键名是后端 memory.BUCKETS 的约定，这里只负责显示成中文 */
+const MEM_BUCKET_TITLES={who:"他是谁",us:"我们之间",event:"事件",recent:"近期"};
+/* 按小节把档案摊开给人看。**只读**：正文仍在上面那个 textarea 里改，
+   这里不做双向同步——两处都能写就得处理冲突，反而更容易把人的修改弄丢。 */
+function renderMemBuckets(p){
+  const box=$("#memBuckets"); if(!box) return;
+  const b=(p&&p.buckets)||{};
+  const keys=["who","us","event"];
+  const has=keys.some(k=>(b[k]||[]).length)||(b.recent||[]).length||(p&&p.unclassified);
+  if(!has){ box.classList.add("hidden"); box.innerHTML=""; return; }
+  const quotas=(MEM.limits&&MEM.limits.l1_quota)||{};
+  let html='<div class="mb-head">档案结构（按小节摊开；改还是在上面那个框里改）</div>';
+  keys.forEach(k=>{
+    const items=b[k]||[]; const cap=Number(quotas[k]||0);
+    html+=`<div class="mb-sec"><div class="mb-title">${esc(MEM_BUCKET_TITLES[k])}`
+      + `<span class="mb-count">${items.length}${cap?(" / "+cap):""} 条</span></div>`;
+    html+= items.length
+      ? `<ul>${items.map(x=>`<li>${esc(x)}</li>`).join("")}</ul>`
+      : '<div class="mb-empty">（空）</div>';
+    html+='</div>';
+  });
+  if((b.recent||[]).length){
+    html+=`<div class="mb-sec"><div class="mb-title">近期`
+      + `<span class="mb-count">${b.recent.length} 条（按天自动淘汰）</span></div>`
+      + `<ul>${b.recent.map(x=>`<li>${esc(x)}</li>`).join("")}</ul></div>`;
+  }
+  if(p.unclassified){
+    html+='<div class="mb-sec"><div class="mb-title">未分类'
+      + '<span class="mb-count">旧格式内容，原样保留</span></div>'
+      + `<ul>${String(p.unclassified).split(/\r?\n/).filter(x=>x.trim())
+        .map(x=>`<li>${esc(x)}</li>`).join("")}</ul></div>`;
+  }
+  box.innerHTML=html; box.classList.remove("hidden");
 }
 
 async function saveMemPerson(){

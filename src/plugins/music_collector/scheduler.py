@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import partial
 from typing import Optional
 
@@ -25,6 +25,7 @@ from nonebot.log import logger
 from nonebot_plugin_apscheduler import scheduler
 
 from . import banter as banter_mod
+from . import heart as heart_mod
 from . import persona as persona_mod
 from . import style as style_mod
 from .bot_utils import safe_send_group, send_report
@@ -298,6 +299,33 @@ async def job_style() -> None:
         logger.warning(f"[style] 定时学习有 {len(bad)} 个群失败：{detail}")
 
 
+async def job_heart() -> None:
+    """定时重写「心事」：相处到如今它成了谁。
+
+    和 ``job_memory_digest``（整理事实）、``job_style``（学语体）都不是一回事：
+    这个只写**第一人称的内心**，而且刻意排在整理之后——它要读的就是刚整理好的档案。
+    失败只写日志，群里什么都看不到。
+    """
+    pcfg = service.config.persona
+    if not pcfg.heart_enabled:
+        return
+    result = await heart_mod.update_all()
+    if not result:
+        return
+    ok = {g: r for g, r in result.items() if r.get("status") == "ok"}
+    bad = {g: r for g, r in result.items() if r.get("status") == "error"}
+    quiet = {g: r for g, r in result.items() if r.get("status") == "skipped"}
+    if ok:
+        parts = [f"群{g}:{r.get('chars', 0)}字" for g, r in ok.items()]
+        logger.info("[heart] 定时更新完成 " + "；".join(parts))
+    if bad:
+        detail = "；".join(f"群{g}:{r.get('why', '')}" for g, r in bad.items())
+        logger.warning(f"[heart] 定时更新有 {len(bad)} 个群失败：{detail}")
+    if quiet:
+        detail = "；".join(f"群{g}:{r.get('why', '')}" for g, r in quiet.items())
+        logger.debug(f"[heart] {len(quiet)} 个群这轮没更新：{detail}")
+
+
 async def job_persona() -> None:
     """定期检查一遍「该不该提议改人设」。攒的抱怨不够就什么都不做。
 
@@ -382,6 +410,7 @@ _JOB_FUNCS = {
     "descfix": job_descfix,
     "memory_digest": job_memory_digest,
     "style": job_style,
+    "heart": job_heart,
     "persona": job_persona,
     "banter": job_banter,
 }
@@ -460,6 +489,34 @@ def _style_spec() -> Optional[tuple[str, str, dict]]:
     return ("style", "interval", {"hours": float(mem.style_hours)})
 
 
+#: 心事第一次跑的时候，往后挪多少分钟。整理任务（digest）和心事的间隔都来自
+#: ``memory.digest_hours``，同一批注册时它们的第一个触发点是同一瞬间；挪开一点，
+#: 心事读到的就是刚整理完的档案，而不是两份任务同时抢着读库、同时打模型。
+HEART_OFFSET_MINUTES = 10
+
+
+def _heart_spec() -> Optional[tuple[str, str, dict]]:
+    """心事：进程级任务，跟着「整理周期」走，但第一次比整理晚几分钟。
+
+    ⚠️ 这不是**硬性的先后保证**（APScheduler 的 interval 各自计数，跑久了会漂）；
+    只是把「两个任务同一秒起跑」这个最常见的重合挪开。心事读的是磁盘上的档案，
+    晚一轮也只会用到上一次整理的结果——它不该假定整理刚跑完。
+    """
+    pcfg = service.config.persona
+    mem = service.config.memory
+    if not (pcfg.heart_enabled and mem.enabled):
+        return None
+    # 间隔跟整理周期走（心事没有自己的间隔旋钮：它是「整理完之后的那一点总结」）；
+    # digest_hours=0 表示整理只能手动，这时给个每天一次的兜底，别让它永远不跑。
+    hours = float(mem.digest_hours or 0) or 24.0
+    first = datetime.now(service.resolver.tz) + timedelta(minutes=HEART_OFFSET_MINUTES)
+    return (
+        "heart",
+        "interval",
+        {"hours": max(1.0, hours), "next_run_time": first},
+    )
+
+
 def _persona_spec() -> Optional[tuple[str, str, dict]]:
     """人设修订提议：进程级，按周检查。攒不够抱怨时这一跑几乎零成本（只读文件）。"""
     pcfg = service.config.persona
@@ -508,7 +565,7 @@ def reload_jobs() -> tuple[bool, str]:
 
     for extra in (
         _clean_spec(), _prune_spec(), _descfix_spec(), _memory_spec(),
-        _style_spec(), _persona_spec(), _banter_spec(),
+        _style_spec(), _heart_spec(), _persona_spec(), _banter_spec(),
     ):
         if extra is not None:
             specs.append(extra)

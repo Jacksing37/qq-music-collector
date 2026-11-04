@@ -48,9 +48,114 @@ _UID = re.compile(r"\A[0-9]{1,20}\Z")
 _GID = re.compile(r"\A[0-9]{1,20}\Z")
 #: 正文里的一条记录
 _NOTE_LINE = re.compile(r"^\s*[-*]\s+(.*)$")
+#: 正文里的二级小节标题（三桶格式的骨架）
+_SECTION_LINE = re.compile(r"^##\s+(.+?)\s*$")
 
 #: 注入时每个人的摘要最多多少字（不是档案上限，只是喂给模型的那一行）
 SUMMARY_CHARS = 220
+
+
+# ---------------------------------------------------------------- 三桶正文
+#
+# 正文有两种形态，**都认、都能写回**：
+#
+#   1. 旧格式（本项目改造前一直是这个）：一段自由文本，每行 ``- 日期 内容``；
+#   2. 三桶格式：``## 他是谁`` / ``## 我们之间`` / ``## 事件`` 三个小节。
+#
+# 为什么不在 ``Person`` 上开一个 ``buckets`` 字段：那样「字段」和「正文」就是两份
+# 真相——人在网页上改完正文、字段还留着旧值，下一次整理就会把人的修改覆盖掉。
+# 所以正文始终是唯一存储，三桶是**从正文解析出来的视图**，进出一律走
+# :func:`parse_body` / :func:`join_body`。
+
+#: 三个长期桶。顺序就是写盘与展示的顺序，改这里等于改文件格式。
+BUCKETS: tuple[str, ...] = ("who", "us", "event")
+#: 桶 → 小节标题。用中文标题是因为档案首先是**人也要读要改**的文本
+#: （「## 他是谁」比「## who」更像一份给人看的档案）。
+BUCKET_TITLES: dict[str, str] = {"who": "他是谁", "us": "我们之间", "event": "事件"}
+#: 「近期」流水：带日期的日常琐事，由代码按天滚动淘汰，不计入长期条目配额。
+#: 它和 ``event`` 是两种东西：``event`` 是「哪天要交作业」这种有确定时间点的
+#: 长期事实，``recent`` 是「今天中午刚醒」这种过几天就没意义的流水。
+RECENT = "recent"
+RECENT_TITLE = "近期"
+#: 认不出的内容（旧格式正文、未知小节、模型给的扁平 ``facts``）原样留在这里。
+#: **绝不丢**：整理是整库重写，丢一次就再也找不回来了。
+UNSORTED = "unclassified"
+UNSORTED_TITLE = "未分类"
+
+#: 写盘顺序。未分类放最后，免得它看起来像第四个正牌桶。
+_SECTION_ORDER: tuple[tuple[str, str], ...] = (
+    ("who", BUCKET_TITLES["who"]),
+    ("us", BUCKET_TITLES["us"]),
+    ("event", BUCKET_TITLES["event"]),
+    (RECENT, RECENT_TITLE),
+    (UNSORTED, UNSORTED_TITLE),
+)
+_TITLE_TO_KEY: dict[str, str] = {title: key for key, title in _SECTION_ORDER}
+
+
+def parse_body(body: str) -> tuple[dict[str, list[str]], str]:
+    """把正文拆成「小节 → 条目」+「认不出的原文」。
+
+    返回 ``(sections, rest)``：
+
+    - ``sections``：键取自 :data:`_SECTION_ORDER`（``who``/``us``/``event``/
+      ``recent``/``unclassified``），值是**去掉 ``- `` 前缀**的条目；
+    - ``rest``：不属于任何已知小节的原文（旧格式整段正文、未知小节连同标题），
+      按原顺序保留——它既不进模型，也绝不丢。
+
+    **旧格式（正文没有 ``##`` 小节）会得到空 ``sections`` + 整段原文**，
+    调用方据此判断「这份档案还没分桶」，行为与改造前一致。
+    """
+    sections: dict[str, list[str]] = {}
+    outside: list[str] = []
+    current: Optional[str] = None
+    for raw_line in (body or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        matched = _SECTION_LINE.match(line)
+        if matched:
+            key = _TITLE_TO_KEY.get(matched.group(1).strip())
+            if key is None:
+                # 未知小节：标题连同内容一起留在原地（人可能自己加了「## 备注」）
+                current = None
+                outside.append(line)
+                continue
+            current = key
+            sections.setdefault(key, [])
+            continue
+        if current is None:
+            outside.append(line)
+            continue
+        text = line[2:].strip() if line.startswith(("- ", "* ")) else line
+        if text:
+            sections.setdefault(current, []).append(text)
+    return sections, "\n".join(outside)
+
+
+def join_body(sections: dict[str, list[str]], rest: str = "") -> str:
+    """把解析出来的条目拼回 markdown 正文（:func:`parse_body` 的逆操作）。
+
+    - 空桶不写标题，不留空壳；
+    - ``rest`` 非空时单独成 ``## 未分类`` 一节；**只有** ``rest``、没有任何桶时
+      原样返回 ``rest``——这样旧格式档案被读进来再写回去，一个字都不会变。
+    """
+    blocks: list[str] = []
+    for key, title in _SECTION_ORDER:
+        items = [" ".join(str(x).split()) for x in (sections.get(key) or [])]
+        items = [x for x in items if x]
+        if not items:
+            continue
+        blocks.append(f"## {title}")
+        blocks.extend(f"- {item}" for item in items)
+    body = "\n".join(blocks)
+    tail = (rest or "").strip()
+    if not tail:
+        return body
+    if not body:
+        return tail
+    # 和上面「未分类」小节的写法保持一致（不留空行），否则同一份内容拼两次会长得不一样
+    return body + f"\n## {UNSORTED_TITLE}\n" + tail
 
 
 # ---------------------------------------------------------------- 数据模型
@@ -76,13 +181,37 @@ class Person:
         return f"{self.nick}({self.uid})" if self.nick else self.uid
 
     def notes(self) -> list[str]:
-        """正文里的条目（去掉 ``- `` 前缀）。"""
-        return [m.group(1).strip() for m in map(_NOTE_LINE.match, self.body.splitlines()) if m]
+        """正文里的条目（去掉 ``- `` 前缀）。
+
+        三桶正文只取 ``who``/``us``/``event``/``未分类`` 四节：``近期`` 是按天滚动
+        淘汰的流水，混进注入摘要会把长期特征挤掉（摘要是有字数上限的一行）。
+        **旧格式（没有 ``##`` 小节）走原来那条路**，返回值与改造前逐字相同。
+        """
+        sections, rest = parse_body(self.body)
+        if not sections:
+            return [
+                m.group(1).strip()
+                for m in map(_NOTE_LINE.match, self.body.splitlines())
+                if m
+            ]
+        out: list[str] = []
+        for key in (*BUCKETS, UNSORTED):
+            out.extend(sections.get(key) or [])
+        # 未知小节里的人写内容也要进摘要，否则「看得见但模型看不到」
+        out.extend(m.group(1).strip() for m in map(_NOTE_LINE.match, rest.splitlines()) if m)
+        return out
 
     def names(self) -> list[str]:
         """可以用来匹配的称呼集合（昵称 + 别名），忽略空值。"""
         out = [self.nick, *self.aliases]
         return [n for n in (x.strip() for x in out) if n]
+
+    def sections(self) -> dict[str, list[str]]:
+        """正文里的三桶条目（``who``/``us``/``event``，可能还有 ``recent``/``unclassified``）。
+
+        旧格式正文返回空 dict——调用方据此区分「还没分桶」和「分了桶但是空的」。
+        """
+        return parse_body(self.body)[0]
 
     def summary(self, limit: int = SUMMARY_CHARS) -> str:
         """一行摘要：档案里所有条目用「；」串起来。"""
@@ -154,7 +283,12 @@ def _q(value: str) -> str:
 
 
 def dump_person(person: Person) -> str:
-    """序列化成「frontmatter + 正文」。手写而不是 yaml.dump，是为了排版稳定。"""
+    """序列化成「frontmatter + 正文」。手写而不是 yaml.dump，是为了排版稳定。
+
+    正文**原样写出**（``person.body``）：三桶只是正文的一种排版，由 :func:`join_body`
+    在写之前拼好（整理任务与网页端都走这条路），这里不再拆一次——两处都负责格式，
+    迟早会出现「字段和正文各说一套」的情况。旧格式正文因此也能逐字写回。
+    """
     aliases = "[" + ", ".join(_q(a) for a in person.aliases) + "]"
     head = [
         "---",
@@ -172,7 +306,11 @@ def dump_person(person: Person) -> str:
 
 
 def parse_person(text: str, uid: str = "") -> Person:
-    """从文件内容还原档案。**不抛异常**：坏文件当成「只有正文」。"""
+    """从文件内容还原档案。**不抛异常**：坏文件当成「只有正文」。
+
+    正文交给 :meth:`Person.sections` / :func:`parse_body` 按小节拆——这一步放在读取
+    之外，是为了让「读到的东西」永远等于「文件里写的东西」，旧格式与三桶格式都成立。
+    """
     raw = text or ""
     meta: dict = {}
     body = raw
@@ -300,6 +438,35 @@ def touch(mem: MemoryConfig, group_id: int, uid: object, nick: str = "") -> bool
     return created
 
 
+def _append_recent(
+    mem: MemoryConfig, group_id: int, person: Person, text: str, limit: int
+) -> tuple[bool, str]:
+    """把一条带日期的观察追加进 ``## 近期`` 小节（三桶模式专用）。
+
+    为什么是「近期」而不是直接塞进三个桶：``remember`` 只拿到一句「用户说了什么」，
+    分不清这句是长期特征还是一次性的事；让模型在下一次整理时判，比让工具现场猜准。
+    超字数时**只挤近期流水**，绝不动三个长期桶——那才是档案的主体。
+    """
+    sections, rest = parse_body(person.body)
+    recent = sections.setdefault(RECENT, [])
+    item = f"{_today()} {text}"
+    if item in recent:
+        return False, "这条已经记过了，没有重复写入。"
+    recent.append(item)
+    dropped = 0
+    while len(join_body(sections, rest)) > limit and len(recent) > 1:
+        recent.pop(0)
+        dropped += 1
+    person.body = join_body(sections, rest)
+    save_person(mem, group_id, person)
+    logger.info(
+        f"[memory] 群{group_id} 记下 {person.display} 一条近期流水（{len(text)} 字）"
+        + (f"，挤掉最早的 {dropped} 条" if dropped else "")
+    )
+    extra = f"（近期流水已满，挤掉了最早的 {dropped} 条）" if dropped else ""
+    return True, f"已记到 {person.display} 的档案里{extra}"
+
+
 def append_note(
     mem: MemoryConfig,
     group_id: int,
@@ -311,6 +478,10 @@ def append_note(
 
     超过 ``memory.note_chars`` 时丢掉**最早**的条目腾地方，并把这件事写进返回值——
     模型看得到「我记满了，旧记录被挤掉了」，不至于以为自己写成功了全套。
+
+    ``memory.buckets_enabled`` 打开时，这条带日期的观察进 ``## 近期`` 小节：
+    ``remember`` 工具记的是「当下发生的事」，本来就该先进流水，等下一次整理再由
+    模型判断它到底属于「他是谁」还是「事件」。**关掉时走老路径，一字不改。**
     """
     safe = _uid(uid)
     if safe is None:
@@ -326,6 +497,9 @@ def append_note(
     if nick and not person.nick:
         person.nick = str(nick).strip()[:40]
     person.last_seen = _now()
+
+    if mem.buckets_enabled:
+        return _append_recent(mem, group_id, person, text, limit)
 
     line = f"- {_today()} {text}"
     lines = [ln for ln in person.body.splitlines() if ln.strip()]
@@ -715,6 +889,10 @@ def render_for_prompt(mem: MemoryConfig, group_id: int, query: str = "") -> str:
     ``query`` 是当前这句话。给了它、且 ``memory.recall_enabled`` 打开时，装人前先按
     相关度挑一遍（:func:`pick_people`）；**两者任一不满足，输出与改造前逐字相同**
     （群概况、风格卡、末尾提示的行为也一律不变）。
+
+    块顺序固定为 **群概况 → 风格卡 → 心事 → 成员档案**。心事由 :mod:`heart` 提供，
+    ``persona.heart_enabled`` 关着时它返回空串、这一格不占位——所以默认配置下
+    整段输出与改造前逐字相同。
     """
     if not mem.enabled:
         return ""
@@ -744,6 +922,21 @@ def render_for_prompt(mem: MemoryConfig, group_id: int, query: str = "") -> str:
             style_block = ""
         if style_block:
             blocks.append(style_block.strip("\n"))
+
+        # 心事排在风格卡之后、成员档案之前：它回答的是「我成了谁」，比「谁是谁」更该
+        # 先被读到；同时它必须留在群概况与风格卡之后，否则「这个群怎么说话」会被挤到
+        # 人设末尾的角落里，语气就散了。``persona.heart_enabled`` 关着时它返回空串，
+        # 这一格不占位——默认配置下整段输出与改造前逐字相同。
+        # 延迟导入避开循环依赖：heart 要用 memory 的路径与原子写。
+        try:
+            from . import heart as heart_mod
+
+            heart_block = heart_mod.render(group_id, mem=mem)
+        except Exception as exc:  # noqa: BLE001 — 心事坏了不能耽误回话
+            logger.warning(f"[memory] 组装心事失败（本次不带）: {exc}")
+            heart_block = ""
+        if heart_block:
+            blocks.append(heart_block.strip("\n"))
 
         people = list_people(mem, group_id)
         # 检索只插在「装人」这一步：群概况与风格卡已经拼好，不参与打分也不改预算
@@ -793,10 +986,19 @@ def render_for_prompt(mem: MemoryConfig, group_id: int, query: str = "") -> str:
 
 
 def stats(mem: MemoryConfig, group_id: int) -> dict:
-    """网页端状态显示用：人数、总字数、最后更新时间。"""
+    """网页端状态显示用：人数、总字数、最后更新时间、三桶条目数。"""
     try:
         people = list_people(mem, group_id)
         sizes = [len(p.body) for p in people]
+        # 三桶条目数：网页端据此显示「他是谁 6 / 我们之间 3 / 事件 2」。
+        # 只在开关打开时算——关着的时候正文是自由文本，统计它没有意义，
+        # 也免得给每条老档案多跑一次解析。
+        bucket_counts = {key: 0 for key in (*BUCKETS, RECENT)}
+        if mem.buckets_enabled:
+            for person in people:
+                sections, _rest = parse_body(person.body)
+                for key in bucket_counts:
+                    bucket_counts[key] += len(sections.get(key) or [])
         return {
             "people": len(people),
             "chars": sum(sizes),
@@ -804,6 +1006,8 @@ def stats(mem: MemoryConfig, group_id: int) -> dict:
             "group_chars": len(read_group_note(mem, group_id)),
             "last_seen": max((p.last_seen for p in people if p.last_seen), default=""),
             "root": str(memory_root(mem)),
+            "buckets": bucket_counts,
+            "buckets_enabled": bool(mem.buckets_enabled),
         }
     except Exception as exc:  # noqa: BLE001
         return {
