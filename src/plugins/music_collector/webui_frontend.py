@@ -1807,6 +1807,38 @@ const BOT_GROUPS=[
       + "关掉这个开关就只剩「太短 / 命令 / 纯符号」三道硬规则，基本等于逢话必接。",
    keys:["llm.banter_judge","llm.banter_judge_model","llm.banter_judge_chars",
          "llm.banter_judge_hint"]},
+  {title:"回复节奏",
+   note:"把一条回复拆成几条短消息依次发，像人连发微信，而不是一整段糊上来。<br>"
+      + "模型用<b>换行</b>表示「再发一条」，一个换行分一条；模型没换行、正文又超过 60 字时，按句末标点兜底切一次。<br>"
+      + "<b>关掉时输出与以前逐字相同</b>（整段发一条）。打开后建议在「系统提示词」里加一句"
+      + "「回复多用换行分成几条短句」，否则模型通常只回一整段，拆条不会触发。",
+   keys:["llm.reply_split","llm.reply_split_max","llm.reply_split_interval"]},
+  {title:"说话时机",
+   note:"决定它<b>这会儿该不该开口</b>：群里冷清就想捧场、正在刷屏就避让、有人跟它说话就接住、自己说完就安静下来。"
+      + "两个状态分开记账——群热度（快 120 秒 / 慢 1800 秒两个窗口）和介入深度（被 @、紧跟它发言、提到名字）。<br>"
+      + "<b>先开「干跑」跑一周</b>：只把概率写进运行日志、不拦任何消息，去「运行日志」搜 <code>[speak]</code> "
+      + "看分布合不合理（冷群应接近上限、刷屏时接近下限），再关掉干跑真正接管。<br>"
+      + "只影响<b>非音乐链接</b>和<b>主动搭话</b>两处；被 @ 与戳一戳恒放行，音乐收集链路不受影响。",
+   keys:["llm.speak_enabled","llm.speak_dry_run","llm.speak_p_max","llm.speak_p_min",
+         "llm.speak_heat_per_message","llm.speak_heat_fast_half_life","llm.speak_heat_slow_half_life",
+         "llm.speak_self_bump","llm.speak_engage_peak","llm.speak_engage_up",
+         "llm.speak_engage_up_followup","llm.speak_engage_keyword","llm.speak_engage_self_damp",
+         "llm.speak_engage_followup_window","llm.speak_engage_half_life","llm.speak_keywords"]},
+  {title:"时间感与花费",
+   note:"<b>时间感</b>：白天（06:00–20:00）回复里冒出「晚安 / 今晚 / 早点睡」这类夜间用语时，按时段改写一次；"
+      + "改写不出来就用词表硬替换兜底，全程不抛异常。<br>"
+      + "<b>花费</b>：单价按 <b>¥/百万 token</b> 填；日预算超了直接不调模型、走既有兜底话术。"
+      + "先只填单价、预算留 0（不限），看几天实际花费再设上限。单价/预算为 0 = 不启用。",
+   keys:["llm.time_guard","llm.daily_budget","llm.price_in","llm.price_out"]},
+  {title:"记忆与心事",
+   note:"<b>相关度检索</b>：按当前这句话给群成员档案打分挑选（群概况必带），关掉=以前那样按最近活跃装到预算满。<br>"
+      + "<b>三桶结构</b>：档案正文改成「他是谁 / 我们之间 / 事件」+ 近期流水，按<b>条目数</b>配额度。"
+      + "⚠️ 它会重写档案格式，<b>开启前先备份 data/memory/</b>；大群建议把「整理输出上限」提到 6000~8000。<br>"
+      + "<b>心事</b>：相处中长出来的内心（人设是出厂设定），整段重写、每轮注入；素材不足时直接跳过、保留旧版。<br>"
+      + "⚠️ 各桶配额（l1_quota）是映射类型，网页表单不渲染，只能在 config.yaml 里改。",
+   keys:["memory.recall_enabled","memory.recall_top","memory.recall_min","memory.recall_chars",
+         "memory.buckets_enabled","memory.l1_max_facts","memory.recent_days",
+         "persona.heart_enabled","persona.heart_chars","persona.heart_min_source"]},
   {title:"高级",
    note:"厂商私有参数（top_k、repetition_penalty、chat_template_kwargs…）在这里用 JSON 直接塞进请求体，会覆盖上面同名项。",
    keys:["llm.extra_body","llm.stop","llm.seed"]}

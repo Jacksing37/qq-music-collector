@@ -265,6 +265,42 @@ def test_chat_page_has_model_box():
     assert "model: ((" in body, "发送时没带 model 字段"
 
 
+def test_bot_groups_reference_only_existing_keys():
+    """机器人页的分组卡片里，每个键都必须在 BOT_SCHEMA 里真实存在。
+
+    ``BOT_GROUPS`` 是前端手写的白名单：键名写错一个字母**不会报错**，只会让那个字段
+    静默消失（既不在卡片里、也不在「其它」里），只有人肉翻页面才看得出来。
+    这条断言把它钉死，顺带保证新加的「说话时机」那 16 个字段别再掉回「其它」卡。
+    """
+    import re
+    from pathlib import Path
+
+    src = Path(F.__file__).read_text(encoding="utf-8")
+    seg = src[src.index("const BOT_GROUPS=["): src.index("BOT_GROUPS.forEach")]
+    grouped = re.findall(r'"([a-z_]+\.[a-z_0-9]+)"', seg)
+
+    bot_keys = {f["key"] for s in W.BOT_SCHEMA for f in s["fields"]}
+    unknown = [k for k in grouped if k not in bot_keys]
+    assert not unknown, f"BOT_GROUPS 里有 schema 中不存在的键（写错会静默丢字段）: {unknown}"
+
+    dupes = {k for k in grouped if grouped.count(k) > 1}
+    assert not dupes, f"同一个键被放进多张卡片: {sorted(dupes)}"
+
+    speak = [k for k in grouped if ".speak_" in k]
+    assert len(speak) == 16, f"speak_* 应有 16 个进了卡片，实际 {len(speak)}: {sorted(speak)}"
+
+    # 本次新增的几组都该有专属卡片，不许再落在「其它」里
+    for key in (
+        "llm.reply_split",
+        "llm.time_guard",
+        "llm.daily_budget",
+        "memory.recall_enabled",
+        "memory.buckets_enabled",
+        "persona.heart_enabled",
+    ):
+        assert key in grouped, f"{key} 没有归到任何分组卡片"
+
+
 if __name__ == "__main__":
     import tempfile
 
@@ -283,4 +319,5 @@ if __name__ == "__main__":
     test_apply_updates_map(_tmp)
     test_apply_updates_rollback_save_failure_no_500(_tmp)
     test_netease_section_and_secret_fields()
+    test_bot_groups_reference_only_existing_keys()
     print("webui tests OK")
