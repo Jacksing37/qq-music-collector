@@ -376,7 +376,7 @@ async def job_banter() -> None:
 def _schedule_banter_next() -> None:
     """排下一次主动搭话。关掉开关时什么都不做（已注册的那次会自己跑空）。"""
     cfg = service.config.llm
-    if not cfg.banter:
+    if not cfg.speak_proactive:
         return
     try:
         now = datetime.now(service.resolver.tz)
@@ -533,7 +533,7 @@ def _banter_spec() -> Optional[tuple[str, str, dict]]:
     下一次的具体时刻，排查「怎么没动静」时很有用。
     """
     cfg = service.config.llm
-    if not cfg.banter or not cfg.enabled:
+    if not cfg.speak_proactive or not cfg.enabled:
         return None
     when = banter_mod.next_run_at(cfg, datetime.now(service.resolver.tz))
     return ("banter", "date", {"run_date": when})

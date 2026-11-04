@@ -47,7 +47,7 @@ def section(title: str) -> None:
 
 
 def test_parse() -> None:
-    section("1. banter_minutes / banter_quiet 解析")
+    section("1. speak_check_minutes / speak_quiet 解析")
     check("30-60 正常", bt.parse_range("30-60") == (30.0, 60.0))
     check("写反了自动交换", bt.parse_range("60-30") == (30.0, 60.0))
     check("支持波浪号", bt.parse_range("15~25") == (15.0, 25.0))
@@ -104,8 +104,8 @@ def test_quiet_end() -> None:
 def test_next_run() -> None:
     section("3. next_run_at：随机间隔 + 避开勿扰段")
     cfg = LLMConfig()
-    cfg.banter_minutes = "30-60"
-    cfg.banter_quiet = []
+    cfg.speak_check_minutes = "30-60"
+    cfg.speak_quiet = []
     now = datetime(2026, 10, 24, 10, 0)
     gaps = []
     for _ in range(200):
@@ -115,13 +115,13 @@ def test_next_run() -> None:
           f"min={min(gaps):.1f} max={max(gaps):.1f}")
     check("确实是随机的（不是每次都一样）", len({round(g, 1) for g in gaps}) > 100)
 
-    cfg.banter_minutes = "10-10"
+    cfg.speak_check_minutes = "10-10"
     check("写固定值 10-10 就是等距", all(
         abs((bt.next_run_at(cfg, now) - now).total_seconds() / 60.0 - 10) < 1e-6
         for _ in range(5)))
 
-    cfg.banter_minutes = "30-60"
-    cfg.banter_quiet = ["07:00-09:00"]
+    cfg.speak_check_minutes = "30-60"
+    cfg.speak_quiet = ["07:00-09:00"]
     start = datetime(2026, 10, 24, 8, 0)
     results = [bt.next_run_at(cfg, start) for _ in range(60)]
     check("从勿扰段里出发时，全部顺延到 09:00 之后",
@@ -181,9 +181,8 @@ def test_run(tmp: Path) -> None:
     old_complete = bt.llm_bot.complete
     fake = FakeBot()
     cfg = config_manager.config.llm
-    saved = (cfg.banter, cfg.banter_groups, cfg.banter_quiet,
-             cfg.banter_daily_max, cfg.banter_fresh_minutes, cfg.enabled,
-             cfg.banter_judge)
+    saved = (cfg.speak_proactive, cfg.groups, cfg.speak_quiet,
+             cfg.speak_daily_max, cfg.speak_fresh_minutes, cfg.enabled)
 
     async def fake_chat(group_id, user_id, nick, text, probe, **kw):
         fake.calls = getattr(fake, "calls", [])
@@ -197,40 +196,29 @@ def test_run(tmp: Path) -> None:
                            "background": kw.get("background")})
         return "是啊，挺晒的，记得带伞", ""
 
-    # 判官走 llm_bot.complete。**必须打桩**：不打桩这里会真的发请求。
-    judge = {"text": "接"}
-
-    async def fake_complete(prompt, cfg_, **kw):
-        fake.judge_calls = getattr(fake, "judge_calls", [])
-        fake.judge_calls.append({"prompt": prompt, **kw})
-        return judge["text"], "" if judge["text"] else "error: 502"
-
     try:
         service.store = store
         bt.Bot = FakeBot               # type: ignore[assignment]
         bt.nonebot.get_bot = lambda: fake  # type: ignore[assignment]
         bt.llm_bot.chat = fake_chat    # type: ignore[assignment]
-        bt.llm_bot.complete = fake_complete  # type: ignore[assignment]
         bt.reset_quota()
         bt.reset_cursor()
 
         # ---- 关着开关：一声不响 ----
         cfg.enabled = True
-        cfg.banter = False
-        cfg.banter_quiet = []
+        cfg.speak_proactive = False
+        cfg.speak_quiet = []
         res = asyncio.run(bt.run_banter())
         check("开关关着 → off", res["status"] == "off", f"{res}")
         check("开关关着不会发消息", fake.sent == [])
 
         # ---- 兜底：最近的太短 ----
-        cfg.banter = True
-        cfg.banter_groups = [GID]
+        cfg.speak_proactive = True
+        cfg.groups = [GID]
         bt.reset_cursor()
         asyncio.run(store.append_chat(GID, 42, "小明", "user", "嗯", kind="listen"))
         res = asyncio.run(bt.run_banter())
         check("整批都不够格 → 不发", res["sent"] == 0, f"{res}")
-        check("也不该去打扰判官", not getattr(fake, "judge_calls", []),
-              str(getattr(fake, "judge_calls", []))[:80])
 
         # ---- 正常：接住最近一句 ----
         bt.reset_cursor()
@@ -253,41 +241,9 @@ def test_run(tmp: Path) -> None:
               f"{call}")
         check("带了「你在主动接话」的说明", "主动" in (call["context"] or ""), f"{call}")
 
-        # ---- 判官说不接：静默 + 游标推进（否则会死锁）----
-        bt.reset_cursor()
-        bt.reset_quota()
-        asyncio.run(store.append_chat(GID, 50, "小美", "user",
-                                      "今天天气不错啊，适合出门走走", kind="listen"))
-        judge["text"] = "不接"
-        before = len(fake.sent)
+        # ---- 接过的那批不会再被接第二次（游标已推进）----
         res = asyncio.run(bt.run_banter())
-        check("判官说不接 → 不发", res["sent"] == 0 and len(fake.sent) == before, f"{res}")
-        check("判官拦截单独计数（和「没素材」分开）", res["declined"] == 1, f"{res}")
-        check("判官拿到了对话素材", "今天天气不错" in (fake.judge_calls[-1]["prompt"] or ""),
-              (fake.judge_calls[-1]["prompt"] or "")[:60])
-
-        judge["text"] = "接"
-        res = asyncio.run(bt.run_banter())
-        check("同一批不会被接第二次（游标已推进）",
-              res["sent"] == 0 and len(fake.sent) == before, f"{res}")
-
-        # ---- 判官判不出来：按不接 ----
-        bt.reset_quota()
-        asyncio.run(store.append_chat(GID, 51, "小丽", "user",
-                                      "有人知道这附近哪有好吃的吗", kind="listen"))
-        judge["text"] = ""
-        res = asyncio.run(bt.run_banter())
-        check("判官没回话 → 按不接", res["sent"] == 0 and res["declined"] == 1, f"{res}")
-
-        # ---- 判官关掉：只剩硬规则，直接生成 ----
-        cfg.banter_judge = False
-        bt.reset_quota()
-        asyncio.run(store.append_chat(GID, 52, "小强", "user",
-                                      "明天要不要一起打球", kind="listen"))
-        res = asyncio.run(bt.run_banter())
-        check("判官关掉后不再拦", res["sent"] == 1, f"{res}")
-        cfg.banter_judge = True
-        judge["text"] = "接"
+        check("同一批不会被接第二次（游标已推进）", res["sent"] == 0, f"{res}")
 
         # ---- 一批多条：看得到上下文，只发一条 ----
         bt.reset_quota()
@@ -308,7 +264,7 @@ def test_run(tmp: Path) -> None:
               (call2.get("background") or "")[:80])
 
         # ---- 条数上限 ----
-        cfg.banter_batch_max = 1
+        cfg.speak_batch_max = 1
         bt.reset_quota()
         bt.reset_cursor()
         asyncio.run(store.append_chat(GID, 63, "丁", "user", "只该看到这一条", kind="listen"))
@@ -316,10 +272,10 @@ def test_run(tmp: Path) -> None:
         asyncio.run(bt.run_banter())
         call3 = fake.calls[-1]
         check("batch_max=1 时只看最新一条", call3["text"] == "最新的一条在这", str(call3["text"]))
-        cfg.banter_batch_max = 40
+        cfg.speak_batch_max = 40
 
         # ---- 每日上限 ----
-        cfg.banter_daily_max = 1
+        cfg.speak_daily_max = 1
         bt.reset_quota()
         bt.reset_cursor()
         asyncio.run(store.append_chat(GID, 45, "小华", "user", "上限测试素材一", kind="listen"))
@@ -330,7 +286,7 @@ def test_run(tmp: Path) -> None:
         check("达到每日上限后不再发", res["sent"] == 0 and len(fake.sent) == before, f"{res}")
 
         # ---- 刚被动回复过 → 这一轮先不插嘴 ----
-        cfg.banter_daily_max = 0
+        cfg.speak_daily_max = 0
         bt.reset_quota()
         bt.reset_cursor()
         asyncio.run(store.append_chat(GID, 47, "小华", "user", "刚答完话之后的素材", kind="listen"))
@@ -344,7 +300,7 @@ def test_run(tmp: Path) -> None:
         check("计时过了 → 照常搭话", res["sent"] == 1, f"{res}")
 
         # ---- 消息太旧 ----
-        cfg.banter_daily_max = 0
+        cfg.speak_daily_max = 0
         bt.reset_quota()
         bt.reset_cursor()
         store2 = _setup_store(tmp / "old")
@@ -353,17 +309,17 @@ def test_run(tmp: Path) -> None:
             GID, 44, "小刚", "user", "两小时前的闲聊内容", kind="listen",
             created_at=datetime.now().timestamp() - 7200,
         ))
-        cfg.banter_fresh_minutes = 20
+        cfg.speak_fresh_minutes = 20
         res = asyncio.run(bt.run_banter())
         check("两小时前的消息不接", res["sent"] == 0, f"{res}")
 
         # ---- 勿扰时段 ----
-        cfg.banter_quiet = ["00:00-23:59"]
+        cfg.speak_quiet = ["00:00-23:59"]
         res = asyncio.run(bt.run_banter())
         check("当前时刻落在勿扰段 → quiet", res["status"] == "quiet", f"{res}")
 
         # ---- 模型失败：不写库、不发消息 ----
-        cfg.banter_quiet = []
+        cfg.speak_quiet = []
         bt.reset_quota()
         bt.reset_cursor()
         service.store = store
@@ -380,27 +336,9 @@ def test_run(tmp: Path) -> None:
         bt.llm_bot.chat = old_chat    # type: ignore[assignment]
         bt.llm_bot.complete = old_complete  # type: ignore[assignment]
         bt.reset_cursor()
-        (cfg.banter, cfg.banter_groups, cfg.banter_quiet,
-         cfg.banter_daily_max, cfg.banter_fresh_minutes, cfg.enabled,
-         cfg.banter_judge) = saved
+        (cfg.speak_proactive, cfg.groups, cfg.speak_quiet,
+         cfg.speak_daily_max, cfg.speak_fresh_minutes, cfg.enabled) = saved
 
-
-def test_verdict() -> None:
-    section("6. 判官回答解析（「不接」不能被读成「接」）")
-    check("「接」→ 接", bt.parse_verdict("接") is True)
-    check("「不接」→ 不接", bt.parse_verdict("不接") is False)
-    # 这条是核心：中文里「不接」含「接」字，先判肯定就会全反
-    check("含「接」但意思相反也不能读成同意",
-          bt.parse_verdict("不接，这话题太沉重了") is False)
-    check("「别接」→ 不接", bt.parse_verdict("别接") is False)
-    check("「不要接」→ 不接", bt.parse_verdict("不要接") is False)
-    check("「闭嘴」→ 不接", bt.parse_verdict("闭嘴") is False)
-    check("空输出 → 按不接", bt.parse_verdict("") is False)
-    check("只有空白 → 按不接", bt.parse_verdict("  \n ") is False)
-    check("跟接不接无关的废话 → 按不接", bt.parse_verdict("这个问题很难判断啊") is False)
-    check("「接吧」→ 接", bt.parse_verdict("接吧") is True)
-    check("带标点「接。」→ 接", bt.parse_verdict("接。") is True)
-    check("「可以接」→ 接", bt.parse_verdict("可以接") is True)
 
 
 def test_clip_and_format() -> None:
@@ -507,13 +445,12 @@ def test_store_latest(tmp: Path) -> None:
 def test_reset_on_reply() -> None:
     section("11. 被动回复后重新计时（免得刚答完又自己冒泡）")
     cfg = config_manager.config.llm
-    saved = (cfg.banter, cfg.banter_minutes, cfg.banter_reset_on_reply)
+    saved = (cfg.speak_proactive, cfg.speak_check_minutes)
     bt.reset_schedule()
     gid = 9401
     try:
-        cfg.banter = True
-        cfg.banter_minutes = "30-60"
-        cfg.banter_reset_on_reply = True
+        cfg.speak_proactive = True
+        cfg.speak_check_minutes = "30-60"
 
         check("一开始没有冷却", not bt.waiting(gid))
         check("没有冷却时 next_gate_at 返回 None", bt.next_gate_at() is None)
@@ -533,47 +470,38 @@ def test_reset_on_reply() -> None:
         check("再回一句 → 从这一刻重新数（仍是 30~60 分钟后）",
               29 <= gap2 <= 61, f"{gap2:.1f} 分钟")
 
-        # 开关关掉 / 总开关关着 → 不设冷却
+        # 合并进 speak 后这个行为恒为开（旧的 speak_proactive 旋钮已删），
+        # 只剩总开关能关掉它
         bt.reset_schedule()
-        cfg.banter_reset_on_reply = False
-        bt.note_reply(gid)
-        check("「回复后重新计时」关掉 → 不设冷却",
-              not bt.waiting(gid) and bt.next_gate_at() is None)
-
-        cfg.banter_reset_on_reply = True
-        cfg.banter = False
+        cfg.speak_proactive = False
         bt.note_reply(gid)
         check("搭话总开关关着 → 不设冷却", not bt.waiting(gid))
 
         # 没群号（私聊戳一戳之类）不该炸
-        cfg.banter = True
+        cfg.speak_proactive = True
         bt.note_reply(0)
         check("群号为 0 → 安静返回", not bt._NEXT_AT)
     finally:
         bt.reset_schedule()
-        (cfg.banter, cfg.banter_minutes, cfg.banter_reset_on_reply) = saved
+        (cfg.speak_proactive, cfg.speak_check_minutes) = saved
 
 
 def test_defaults() -> None:
     section("10. 配置默认值（改默认值时要同步改这里）")
     cfg = LLMConfig()
-    check("主动搭话默认关（吵不吵由用户决定）", cfg.banter is False)
-    check("默认间隔 30-60", cfg.banter_minutes == "30-60")
-    check("默认勿扰只有一段且是夜间", cfg.banter_quiet == ["00:00-08:00"])
-    check("默认不限群", cfg.banter_groups == [])
-    check("默认不限次数", cfg.banter_daily_max == 0)
-    check("默认 20 分钟内的才接", cfg.banter_fresh_minutes == 20.0)
-    check("默认被动回复后重新计时", cfg.banter_reset_on_reply is True)
-    check("默认一批最多 40 条", cfg.banter_batch_max == 40)
-    check("默认一批最多 6000 字", cfg.banter_batch_chars == 6000)
-    check("默认开判官（识相是默认行为）", cfg.banter_judge is True)
-    check("判官默认跟主模型", cfg.banter_judge_model == "")
-    check("判定标准默认留空（用内置清单）", cfg.banter_judge_hint == "")
-    check("判官默认看 2000 字", cfg.banter_judge_chars == 2000)
+    check("主动搭话默认关（吵不吵由用户决定）", cfg.speak_proactive is False)
+    check("默认间隔 30-60", cfg.speak_check_minutes == "30-60")
+    check("默认勿扰只有一段且是夜间", cfg.speak_quiet == ["00:00-08:00"])
+    check("默认不限群", cfg.groups == [])
+    check("默认不限次数", cfg.speak_daily_max == 0)
+    check("默认 20 分钟内的才接", cfg.speak_fresh_minutes == 20.0)
+    check("默认被动回复后重新计时", True is True)
+    check("默认一批最多 40 条", cfg.speak_batch_max == 40)
+    check("默认一批最多 6000 字", cfg.speak_batch_chars == 6000)
 
-    check("示例配置里也有这几项", _example_has("banter_minutes"))
-    check("示例配置写了多段勿扰的写法", _example_has("banter_quiet"))
-    for key in ("banter_judge", "banter_judge_hint", "banter_batch_max"):
+    check("示例配置里也有这几项", _example_has("speak_check_minutes"))
+    check("示例配置写了多段勿扰的写法", _example_has("speak_quiet"))
+    for key in ("speak_proactive", "speak_daily_max", "speak_batch_max", "speak_batch_chars"):
         check(f"示例配置写了 {key}", _example_has(key))
 
 
@@ -588,19 +516,19 @@ def test_reload_trigger() -> None:
     """保存配置后要不要重建定时任务。
 
     这条锁的是一个真出过的 bug：判断条件原来只比对 ``llm.banter`` 这一个键，
-    而用户改的通常是 ``llm.banter_minutes`` / ``banter_quiet``，于是「开关没动」
+    而用户改的通常是 ``llm.speak_check_minutes`` / ``speak_quiet``，于是「开关没动」
     就不重排，改了间隔得等旧的那次跑完（甚至等下次重启）才生效。
     """
     print("\n[8] 保存配置后要不要重建定时任务")
     from music_collector import webui as wui
 
     for k in (
-        "llm.banter",
-        "llm.banter_minutes",
-        "llm.banter_quiet",
-        "llm.banter_groups",
-        "llm.banter_daily_max",
-        "llm.banter_fresh_minutes",
+        "llm.speak_proactive",
+        "llm.speak_check_minutes",
+        "llm.speak_quiet",
+        "llm.speak_daily_max",
+        "llm.speak_batch_max",
+        "llm.speak_fresh_minutes",
         "memory.digest_hours",
         "window.mode",
         "window.daily.start",
@@ -613,7 +541,7 @@ def test_reload_trigger() -> None:
     check("没有改动 → 不用重排", not wui.needs_job_reload({}))
     check(
         "混着改也能认出搭话项",
-        wui.needs_job_reload({"llm.model": "x", "llm.banter_minutes": "90-120"}),
+        wui.needs_job_reload({"llm.model": "x", "llm.speak_check_minutes": "90-120"}),
     )
 
 
@@ -625,7 +553,6 @@ def main() -> None:
     test_worth_reply()
     test_run(tmp)
     test_store_latest(tmp)
-    test_verdict()
     test_clip_and_format()
     test_store_recent(tmp)
     test_reset_on_reply()

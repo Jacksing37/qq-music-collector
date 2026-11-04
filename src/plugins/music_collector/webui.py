@@ -913,83 +913,6 @@ FIELD_META["llm.link_hint"] = (
     "上面开关打开后，接非音乐链接时追加给模型的一句说明，免得它把网页链接当成点歌；留空 = 不加",
     False,
 )
-FIELD_META["llm.banter"] = (
-    "主动搭话",
-    "没人 @ 它时也自己冒个泡：每隔一段随机时间，把群里「上次搭话之后」聊的那一段接过去。"
-    "素材来自「群记忆」的旁听记录，所以那边也要开着旁听；不 @ 人、不引用",
-    False,
-)
-FIELD_META["llm.banter_minutes"] = (
-    "搭话间隔（分钟）",
-    "写法 30-60：每次都在这个区间里重新随机取一个时间点。想更安静就写 90-180",
-    False,
-)
-FIELD_META["llm.banter_quiet"] = (
-    "勿扰时段",
-    "几段都行，用逗号分隔，每段写法 00:00-08:00、12:00-14:00（支持跨午夜 23:00-08:00）。"
-    "落在这些时段里的那次会顺延到结束后再随机几分钟",
-    False,
-)
-FIELD_META["llm.banter_groups"] = (
-    "只在哪些群搭话",
-    "留空 = 跟上面的「生效群」一致；再留空 = 所有有旁听记录的群",
-    False,
-)
-FIELD_META["llm.banter_daily_max"] = (
-    "每群每天上限",
-    "控制吵不吵最直接的旋钮：0 = 不限（一天约 20 次），填 6 就一天最多 6 次。"
-    "间隔决定节奏，这个决定总量",
-    False,
-)
-FIELD_META["llm.banter_fresh_minutes"] = (
-    "最后一条超过多久就不接",
-    "判的是这批消息的**最后一条**：超过这么多分钟就说明话题已经凉了，这轮空过。"
-    "半夜突然接一句两小时前的话很突兀",
-    False,
-)
-FIELD_META["llm.banter_batch_max"] = (
-    "一次最多看几条消息",
-    "从上次搭话之后算起，一次最多读几条群消息。群里刷屏时不给上限会上百条，"
-    "既慢又贵；超出的部分只取最近的",
-    False,
-)
-FIELD_META["llm.banter_batch_chars"] = (
-    "一次最多看多少字",
-    "素材总字数上限，超了从**最旧的**丢——接话接的是眼下的话题，"
-    "半小时前的开场白没什么用。6000 字约 3000 token",
-    False,
-)
-FIELD_META["llm.banter_judge"] = (
-    "先判断该不该插嘴",
-    "打开后会先让模型当「判官」看一眼这批对话，吵架、严肃话题、别人正在对话、"
-    "对话已收尾……说不该就闭嘴。判不出来（报错/回废话）也按不接处理。"
-    "关掉就只剩「长度 / 命令 / 纯符号」三道硬规则，基本等于逢话必接",
-    False,
-)
-FIELD_META["llm.banter_judge_model"] = (
-    "判官用的模型",
-    "留空 = 跟主模型。这活儿很简单，填个便宜快的更划算（如 deepseek-chat / gpt-4o-mini）",
-    False,
-)
-FIELD_META["llm.banter_judge_hint"] = (
-    "判官判定标准",
-    "直接写「什么情况别接、什么情况可以接」，判官就按这个来。留空 = 用内置清单。"
-    "不同群尺度不一样（有的能开玩笑、有的在聊工作），所以建议按自己的群改一版",
-    False,
-)
-FIELD_META["llm.banter_judge_chars"] = (
-    "判官最多看多少字",
-    "判官不需要看全量，看个大概就够判断气氛。太多反而慢；只取**最近**的那部分",
-    False,
-)
-FIELD_META["llm.banter_reset_on_reply"] = (
-    "回复后重新计时",
-    "它被动回完一句（@ / 戳一戳 / 发链接）之后，把主动搭话的计时<b>重新起算</b>。<br>"
-    "不开的话，它刚答完人还可能被排到的那一轮捞起来自己冒泡，群里看着像抢话；"
-    "而且刚说完这一两句，可接的素材也还没跟上。<br>"
-    "间隔仍取上面那个区间——是「从现在起再等一个间隔」，不是把下一次提前",
-    False,
-)
 
 FIELD_META["llm.speak_enabled"] = (
     "说话时机（概率模型）",
@@ -1327,12 +1250,54 @@ def current_values(group_id: typing.Optional[int] = None) -> dict[str, object]:
     return _walk(base.model_dump(mode="json"), "")
 
 
+FIELD_META["llm.speak_proactive"] = (
+    "主动搭话总开关",
+    "打开后它会在非勿扰时段里自己冒泡：每隔「检查间隔」看一次，接住群里刚才那一段。"
+    "<b>要不要开口由上面的概率模型决定</b>——群正热闹或刚聊完就不说话。"
+    "<br>素材取自「群记忆」的旁听记录，<b>旁听也要开着</b>，否则没有可接的话。"
+    "<br>⚠️ 关掉＝完全不主动说话（@ / 戳一戳 / 非音乐链接照旧）。",
+    False,
+)
+FIELD_META["llm.speak_check_minutes"] = (
+    "检查间隔（分钟）",
+    "多久唤醒一次去判断该不该开口，写法 <code>30-60</code>。"
+    "<b>这是检查节奏，不是「到点必说」</b>——到点还要过概率门与勿扰。"
+    "想安静就把它拉长（如 <code>90-180</code>）",
+    False,
+)
+FIELD_META["llm.speak_quiet"] = (
+    "勿扰时段",
+    "这些时段里绝不主动开口，可配多段（逗号分隔），支持跨午夜 <code>23:00-08:00</code>。"
+    "落在段内的那次会<b>顺延</b>到该段结束后，而不是直接丢掉",
+    False,
+)
+FIELD_META["llm.speak_daily_max"] = (
+    "每群每天最多几次",
+    "0 = 不限。控制「吵不吵」最直接的总量旋钮：间隔决定节奏，上限决定总量",
+    False,
+)
+FIELD_META["llm.speak_fresh_minutes"] = (
+    "太旧的批次不接（分钟）",
+    "批次里<b>最后一条</b>超过这么多分钟就不接了——半夜三点回一句两小时前的话比不说还怪。"
+    "判的是最后一条：聊了半小时的对话，只要刚还在继续就还值得接",
+    False,
+)
+FIELD_META["llm.speak_batch_max"] = (
+    "一次最多看几条消息",
+    "从上次开口之后算起。群里刷屏时不给上限会上百条",
+    False,
+)
+FIELD_META["llm.speak_batch_chars"] = (
+    "一次最多看多少字",
+    "超了从最旧的丢——接话接的是眼下的话题",
+    False,
+)
 #: 改到这些前缀的配置后必须重建定时任务。定时任务里有一类是「注册时就把下次时刻
 #: 算死了」（主动搭话用 ``date`` 触发器、群记忆用 ``interval``），光改配置不重建，
 #: 新值要等旧的那次跑完、甚至要等下次重启才生效。
 _RELOAD_PREFIXES = (
     "window",
-    "llm.banter",
+    "llm.speak",
     "memory.digest_hours",
     "memory.style_hours",
     "persona.propose_hours",
@@ -1342,9 +1307,9 @@ _RELOAD_PREFIXES = (
 def needs_job_reload(values: dict[str, object]) -> bool:
     """这批改动里有没有影响定时任务的。
 
-    注意要按**前缀**判断，不能只比对 ``llm.banter`` 这一个键——用户改的通常
-    ``llm.banter`` 是 ``banter_minutes`` / ``banter_quiet`` 这些，「开关没动」就
-    不重排，表现成「改了间隔没反应」。
+    注意要按**前缀**判断，不能只比对 ``llm.speak_proactive`` 这一个键——用户改的
+    通常只是 ``speak_check_minutes`` / ``speak_quiet`` 这些，「开关没动」就不重排，
+    表现成「改了间隔没反应」。
     """
     return any(str(k).startswith(_RELOAD_PREFIXES) for k in values)
 
@@ -2484,19 +2449,17 @@ async def _api_bot(request: Request):
             },
             # 「实际发出去的参数」预览：让「思考模式到底有没有生效」一眼可见
             "payload": payload_preview(cfg),
-            # 主动搭话：自己排自己，``next`` 是已经排好的下一次（排查「开了没动静」用）
-            "banter": {
-                "enabled": bool(cfg.banter),
-                "minutes": cfg.banter_minutes,
-                "quiet": list(cfg.banter_quiet),
-                "daily_max": int(cfg.banter_daily_max),
-                "fresh_minutes": float(cfg.banter_fresh_minutes),
-                "groups": list(cfg.banter_groups),
-                "batch_max": int(cfg.banter_batch_max),
-                "batch_chars": int(cfg.banter_batch_chars),
-                # 判官：开没开、用哪个模型——「开了却没动静」多半是它一直在拦
-                "judge": bool(cfg.banter_judge),
-                "judge_model": (cfg.banter_judge_model or "").strip() or cfg.model,
+            # 主动搭话：自己排自己，``next`` 是已经排好的下一次（排查「开了没动静」用）。
+            # 2026-11-05 起与「说话时机」合并，判官已删——频率由概率模型决定
+            "proactive": {
+                "enabled": bool(cfg.speak_proactive),
+                "minutes": cfg.speak_check_minutes,
+                "quiet": list(cfg.speak_quiet),
+                "daily_max": int(cfg.speak_daily_max),
+                "fresh_minutes": float(cfg.speak_fresh_minutes),
+                "groups": list(cfg.groups),
+                "batch_max": int(cfg.speak_batch_max),
+                "batch_chars": int(cfg.speak_batch_chars),
                 "next": _fmt_when(next_run_of("banter")),
             },
         },

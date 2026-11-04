@@ -1219,7 +1219,7 @@ async def test_reply_resets_banter() -> None:
     from music_collector import banter as bt
 
     cfg = config_manager.config.llm
-    saved = (cfg.banter, cfg.banter_minutes, cfg.banter_reset_on_reply, cfg.at_sender)
+    saved = (cfg.speak_proactive, cfg.speak_check_minutes, cfg.at_sender)
     old_chat = mc.llm_bot.chat
     bt.reset_schedule()
 
@@ -1227,9 +1227,8 @@ async def test_reply_resets_banter() -> None:
         return "好的", ""
 
     try:
-        cfg.banter = True
-        cfg.banter_minutes = "30-60"
-        cfg.banter_reset_on_reply = True
+        cfg.speak_proactive = True
+        cfg.speak_check_minutes = "30-60"
         cfg.at_sender = False
         mc.llm_bot.chat = fake_chat  # type: ignore[assignment]
 
@@ -1239,14 +1238,14 @@ async def test_reply_resets_banter() -> None:
         check("回复后该群进入搭话冷却", bt.waiting(GID) is True, str(bt._NEXT_AT))
 
         bt.reset_schedule()
-        cfg.banter_reset_on_reply = False
+        cfg.speak_proactive = False
         ok, why = await mc._llm_answer(bot, make_event("在吗"), cfg, "在吗")
         check("关掉开关 → 不设冷却",
               ok and not bt.waiting(GID), f"{ok} {why} {bt._NEXT_AT}")
     finally:
         mc.llm_bot.chat = old_chat
         bt.reset_schedule()
-        (cfg.banter, cfg.banter_minutes, cfg.banter_reset_on_reply, cfg.at_sender) = saved
+        (cfg.speak_proactive, cfg.speak_check_minutes, cfg.at_sender) = saved
 
 
 async def test_trace_has_background() -> None:

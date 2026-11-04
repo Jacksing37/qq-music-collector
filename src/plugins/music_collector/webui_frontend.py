@@ -1796,25 +1796,6 @@ const BOT_GROUPS=[
    note:"除了「@机器人」，还有两种<b>有事发生才开口</b>的场合：被戳一戳、分享了不是音乐的链接。<br>"
       + "两者都仍然受上面的开关、生效群与冷却限制；真·音乐链接不会被截走，照常走收集流程。",
    keys:["llm.poke_reply","llm.poke_prompt","llm.reply_link","llm.link_hint"]},
-  {title:"主动搭话",
-   note:"上面那些都是「有人叫它」才回，这一组是<b>没人叫也自己说</b>：非勿扰时段里每隔一段随机时间，"
-      + "把群里<b>上次搭话之后</b>聊的那一段接过去，<b>不 @ 人、不引用</b>。<br>"
-      + "素材取自「群记忆」的旁听记录，所以<b>旁听也要开着</b>，否则没有可接的话。<br>"
-      + "想安静就两个地方下手：把<b>间隔</b>拉长（90-180），或把<b>每天上限</b>压小（比如 4）。"
-      + "间隔决定节奏，上限决定总量——后者更好控制。<br>"
-      + "另外，它<b>每次被动回完话</b>都会把计时重算：刚答完人不会紧接着又自己冒泡，"
-      + "最下面那个开关可以关掉这个行为。",
-   keys:["llm.banter","llm.banter_minutes","llm.banter_quiet","llm.banter_groups",
-         "llm.banter_daily_max","llm.banter_fresh_minutes",
-         "llm.banter_batch_max","llm.banter_batch_chars",
-         "llm.banter_reset_on_reply"]},
-  {title:"主动搭话 · 判官",
-   note:"插嘴之前先问一句「此刻说这话自然吗」。<b>这一组决定它识不识相</b>："
-      + "吵架、严肃话题、别人正在对话、对话已经收尾……判官说不该，它就闭嘴不冒泡。<br>"
-      + "判不出来（接口报错、回一堆废话）一律按<b>不接</b>——静默最多是少说一句，接错话是社死。<br>"
-      + "关掉这个开关就只剩「太短 / 命令 / 纯符号」三道硬规则，基本等于逢话必接。",
-   keys:["llm.banter_judge","llm.banter_judge_model","llm.banter_judge_chars",
-         "llm.banter_judge_hint"]},
   {title:"回复节奏",
    note:"把一条回复拆成几条短消息依次发，像人连发微信，而不是一整段糊上来。<br>"
       + "模型用<b>换行</b>表示「再发一条」，一个换行分一条；模型没换行、正文又超过 60 字时，按句末标点兜底切一次。<br>"
@@ -1826,12 +1807,16 @@ const BOT_GROUPS=[
       + "两个状态分开记账——群热度（快 120 秒 / 慢 1800 秒两个窗口）和介入深度（被 @、紧跟它发言、提到名字）。<br>"
       + "<b>先开「干跑」跑一周</b>：只把概率写进运行日志、不拦任何消息，去「运行日志」搜 <code>[speak]</code> "
       + "看分布合不合理（冷群应接近上限、刷屏时接近下限），再关掉干跑真正接管。<br>"
-      + "只影响<b>非音乐链接</b>和<b>主动搭话</b>两处；被 @ 与戳一戳恒放行，音乐收集链路不受影响。",
+      + "只影响<b>非音乐链接</b>和<b>主动搭话</b>两处；被 @ 与戳一戳恒放行，音乐收集链路不受影响。<br>"
+      + "下面的<b>主动搭话</b>那几项是 2026-11-05 从原来独立的一套合并过来的：调度仍按间隔唤醒，但<b>要不要开口由上面的概率决定</b>，原来的 LLM 判官已删除。",
    keys:["llm.speak_enabled","llm.speak_dry_run","llm.speak_p_max","llm.speak_p_min",
          "llm.speak_heat_per_message","llm.speak_heat_fast_half_life","llm.speak_heat_slow_half_life",
          "llm.speak_self_bump","llm.speak_engage_peak","llm.speak_engage_up",
          "llm.speak_engage_up_followup","llm.speak_engage_keyword","llm.speak_engage_self_damp",
-         "llm.speak_engage_followup_window","llm.speak_engage_half_life","llm.speak_keywords"]},
+         "llm.speak_engage_followup_window","llm.speak_engage_half_life","llm.speak_keywords",
+         "llm.speak_proactive","llm.speak_check_minutes","llm.speak_quiet",
+         "llm.speak_daily_max","llm.speak_fresh_minutes",
+         "llm.speak_batch_max","llm.speak_batch_chars"]},
   {title:"时间感与花费",
    note:"<b>时间感</b>：白天（06:00–20:00）回复里冒出「晚安 / 今晚 / 早点睡」这类夜间用语时，按时段改写一次；"
       + "改写不出来就用词表硬替换兜底，全程不抛异常。<br>"
@@ -1914,16 +1899,14 @@ function renderBotStatus(st){
   if(st.ready) parts.push(`模型：<b>${esc(st.model||"")}</b>　接口：<code>${esc(st.endpoint||"")}</code>`);
   parts.push(`生效群：${esc((st.groups||[]).length ? st.groups.join("、") : "所有群")}`);
   /* 主动搭话：开了却一直没动静时，先看这里排的下次时刻对不对 */
-  const bant=st.banter||{};
-  if(bant.enabled){
-    const quiet=(bant.quiet||[]).join("、")||"无";
-    const cap=bant.daily_max>0?`每天最多 ${bant.daily_max} 次`:"每天不限";
-    const judge=bant.judge
-      ? `<b>开</b>（${esc(bant.judge_model||"主模型")} 先判该不该插嘴）`
-      : `<span class="muted">关（逢话必接）</span>`;
-    parts.push(`主动搭话：<b>每 ${esc(bant.minutes||"30-60")} 分钟</b>　勿扰：<code>${esc(quiet)}</code>　`
-      + `${esc(cap)}　下次：<b>${esc(bant.next||"待排期")}</b>`);
-    parts.push(`　判官：${judge}　一次最多看 <b>${esc(String(bant.batch_max||40))}</b> 条消息`);
+  const pro=st.proactive||{};
+  if(pro.enabled){
+    const quiet=(pro.quiet||[]).join("、")||"无";
+    const cap=pro.daily_max>0?`每天最多 ${pro.daily_max} 次`:"每天不限";
+    parts.push(`主动搭话：<b>每 ${esc(pro.minutes||"30-60")} 分钟看一次</b>　勿扰：<code>${esc(quiet)}</code>　`
+      + `${esc(cap)}　下次：<b>${esc(pro.next||"待排期")}</b>`);
+    parts.push(`　一次最多看 <b>${esc(String(pro.batch_max||40))}</b> 条消息　`
+      + `<span class="muted">（开不开口由概率模型定，判官已删）</span>`);
   } else {
     parts.push(`主动搭话：<span class="muted">关（打开后没人叫它也自己冒泡）</span>`);
   }

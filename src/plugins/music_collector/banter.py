@@ -3,29 +3,31 @@
 和另外三个触发点的区别值得先说清楚：
 
 - ``@ 机器人`` / ``戳一戳`` / 非音乐链接 —— 都是「群里发生了某件事」才回；
-- 这里是**定时**的：非勿扰时段里，每隔一段随机时间挑一个点，
+- 这里是**定时**的：非勿扰时段里按 ``speak_check_minutes`` 取一个点，
   把群里「上次搭话之后」聊的那一段接过去。
 
-几道闸（缺一不可）：
+**要不要开口由 ``speak`` 的概率模型决定**（2026-11-05 合并）：同一套 heat/engage
+状态既管「非音乐链接要不要接」，也管这里。原来另有一套「随机间隔 + 每日上限 +
+LLM 判官」的独立逻辑，现在只保留调度必需的部分：
 
-- ``llm.banter`` 总开关 + ``llm.enabled`` + 生效群；
-- 勿扰时段 ``llm.banter_quiet``：**可配多段**，支持跨午夜（``23:00-08:00``）；
+- ``llm.speak_proactive`` 总开关 + ``llm.enabled`` + ``llm.groups`` 生效群；
+- 勿扰时段 ``llm.speak_quiet``：**可配多段**，支持跨午夜（``23:00-08:00``）；
 - 没有新消息（游标之后一片空白）就不接；
-- 批次里最后一条太旧（``banter_fresh_minutes``）就不接——半夜三点突然回一句
+- 批次里最后一条太旧（``speak_fresh_minutes``）就不接——半夜三点突然回一句
   两小时前的话，比不说话还怪；
-- 太短（「哈哈」「+1」）、纯标点、命令一律不从当「接的对象」；
-- **判官**（``banter_judge``）：先问一句「此刻插嘴自然吗」，吵架、严肃话题、
-  别人正在对话、对话已收尾……说不该就闭嘴。判不出来也按「不接」；
-- **说话时机**（``llm.speak_enabled``）：群正热闹 / 刚聊完的时候整轮就不冒泡。
-  默认关；关着的时候这道闸恒放行，行为与改造前一致；
-- 每群每天上限 ``banter_daily_max``（``0`` = 不限）。
+- 太短（「哈哈」「+1」）、纯标点、命令一律不当「接的对象」；
+- **概率门** ``speak.decide_speak(gid, "banter")``：群正热闹、或刚聊完，这一轮就
+  不冒泡；``llm.speak_enabled`` 关着时它恒放行（零行为变化）；
+- 每群每天上限 ``speak_daily_max``（``0`` = 不限）。
 
-**素材是一段而不是一条**：从 ``_LAST_ID``（上次搭话处理到的 ``chat_log.id``）往后取，
-所以读到的是「这段时间发生了什么事」。游标顺便解决了「同一句被接两次」。
-判官说「不接」时**也推进游标**，否则下一轮还是这批消息，会死锁在反复白跑。
+⚠️ **LLM 判官已删除**（2026-11-05）：以前每轮多花一次模型调用问「此刻插嘴自然吗」，
+现在频率完全交给概率模型；语义质量靠 ``BANTER_HINT`` 与概率门共同兜。
 
-素材取自 ``chat_log(kind='listen')``，也就是旁听器攒下来的群聊。这样做的好处是
-不额外占存储，代价是**依赖 ``memory.listen``**：关掉旁听就没素材，此时
+**素材是一段而不是一条**：从 ``_LAST_ID``（上次处理到的 ``chat_log.id``）往后取，
+读到的是「这段时间发生了什么事」。游标顺便解决「同一句被接两次」；跳过时也推进游标，
+否则下一轮还是这批消息，会死锁在反复白跑。
+
+素材取自 ``chat_log(kind='listen')``，**依赖 ``memory.listen``**：关掉旁听就没素材，
 :func:`run_banter` 会在日志里说明原因，而不是悄悄什么都不做。
 """
 
@@ -43,7 +45,6 @@ from nonebot.log import logger
 
 from .bot_utils import safe_send_group
 from .config import LLMConfig
-from . import llmtrace as llmtrace_mod
 from . import speak as speak_mod
 from .llm import clip_tail, llm_bot
 from .service import service
@@ -52,7 +53,7 @@ from .service import service
 #: 那个值可能配到上百万字（真人提问时值得），但主动搭话只要「知道最近聊了啥」，
 #: 带全部历史等于每句话花一块多钱。12000 字约 6000 token，够看最近几十轮。
 #:
-#: 注意它和「批次素材」（``banter_batch_chars``）不是一回事：历史里是
+#: 注意它和「批次素材」（``speak_batch_chars``）不是一回事：历史里是
 #: ``kind='chat'``（跟机器人的问答），素材是 ``kind='listen'``（群友闲聊），
 #: 两者互补，不重复。
 BANTER_HISTORY_CHARS = 12000
@@ -73,25 +74,8 @@ BANTER_HINT = (
     "前面那些是背景，挑最自然的那个点接，不用逐句回应。）"
 )
 
-#: 判官的内置标准（``llm.banter_judge_hint`` 留空时用它）。
-#: 之所以做成可配置，是因为「什么话题不该插嘴」只有群主知道——有的群能开玩笑，
-#: 有的群在聊工作，写死在代码里必然有一半场景不合适。
-DEFAULT_JUDGE_HINT = (
-    "不要接：争吵或阴阳怪气；严肃话题（生病、去世、家人、成绩、钱、感情）；"
-    "明显是在问某个人、或几个人正在对话；纯表情、复读、单字；广告拉人；"
-    "对话已经收尾（「好的」「收到」「晚安」）。\n"
-    "可以接：泛泛的感慨或吐槽、玩梗、没人接的提问、在聊某个具体话题。\n"
-    "不确定时选「不接」。"
-)
-
-#: 判官的 system。**只要两个字**——判定结果要好解析，解释反而会污染输出。
-JUDGE_SYSTEM = (
-    "你在帮一个群聊机器人决定要不要插话。"
-    "只输出「接」或「不接」两个字，不要解释、不要标点、不要任何别的字。"
-)
-
 #: 群号 -> 上次搭话处理到的 ``chat_log.id``。放内存就够了：重启后最多把最近
-#: ``banter_batch_max`` 条再看一遍（可能重复接一小段），不值得为它建表。
+#: ``speak_batch_max`` 条再看一遍（可能重复接一小段），不值得为它建表。
 #:
 #: 它同时解决「同一句被接两次」——推进游标之后，接过的那批不会再被捞出来。
 _LAST_ID: dict[int, int] = {}
@@ -111,7 +95,7 @@ _DAILY: dict[tuple[int, str], int] = {}
 #:
 #: **为什么需要**：它刚被 @ 完、在群里答了一句，紧接着又自己冒个泡，看着像抢话；
 #: 而且它刚说完那么一两句，可接的素材也还没跟上。所以被动回复完就把这个群的
-#: 计时**重新起算**（见 :func:`note_reply`），间隔仍取 ``banter_minutes`` 那一段。
+#: 计时**重新起算**（见 :func:`note_reply`），间隔仍取 ``speak_check_minutes`` 那一段。
 _NEXT_AT: dict[int, float] = {}
 
 
@@ -127,7 +111,7 @@ def parse_range(text: str, default: tuple[float, float] = (30.0, 60.0)) -> tuple
     m = _RANGE_RE.match(str(text or ""))
     if not m:
         if str(text or "").strip():
-            logger.warning(f"[banter] banter_minutes 格式应为 `30-60`，收到 {text!r} → 用默认 30-60")
+            logger.warning(f"[banter] speak_check_minutes 格式应为 `30-60`，收到 {text!r} → 用默认 30-60")
         return default
     lo, hi = float(m.group(1)), float(m.group(2))
     if lo <= 0 or hi <= 0:
@@ -190,8 +174,8 @@ def next_run_at(cfg: LLMConfig, now: datetime) -> datetime:
     30~60 分钟空转一次，白天的时间点也跟着漂移。顺延之后，夜里那次直接排到
     早上，既不空转，醒来后的第一次也不会正好卡在勿扰结束的同一分钟。
     """
-    lo, hi = parse_range(cfg.banter_minutes)
-    spans = parse_quiet(cfg.banter_quiet)
+    lo, hi = parse_range(cfg.speak_check_minutes)
+    spans = parse_quiet(cfg.speak_quiet)
     when = now
     for _ in range(12):
         when = when + timedelta(minutes=random.uniform(lo, hi))
@@ -259,84 +243,12 @@ def reset_cursor(group_id: Optional[int] = None) -> None:
         _LAST_ID.pop(int(group_id), None)
 
 
-# ---------------------------------------------------------------- 判官（该不该插嘴）
-
-
-def judge_prompt(material: str, hint: str) -> str:
-    return f"群里刚才的对话：\n{material}\n\n判定标准：\n{hint}\n\n此刻插一句话，自然吗？"
-
-
-def parse_verdict(text: str) -> bool:
-    """把判官的回答读成「接不接」。
-
-    **必须先判否定词**——中文里「不接」本身就含「接」字，先判肯定的话
-    会把所有拒绝都读成同意，那这个功能就是反的。解析不出来一律按不接。
-    """
-    body = (text or "").strip()
-    if not body:
-        return False
-    for no in ("不接", "别接", "不要接", "不插", "别说", "闭嘴"):
-        if no in body:
-            return False
-    return "接" in body
-
-
-async def should_reply(
-    cfg: LLMConfig, material: str, group_id: int = 0
-) -> tuple[bool, str]:
-    """问判官「此刻插一句自然吗」。返回 ``(接不接, 原因)``。
-
-    走 ``llm.complete``：一次性、不写历史、不占冷却。**这点是关键**——如果让
-    主模型自己输出「SKIP」，那次请求已经被 ``chat()`` 写进历史了，下次真人提问
-    上下文里会躺着一条「助手: SKIP」。
-
-    判不出来（空正文 / 报错 / 回一堆废话）一律按**不接**：识相的意思是宁缺毋滥，
-    静默最多是少说一句，接错话是社死。
-
-    每次判定都记进 :mod:`llmtrace`（``kind="judge"``）：否则「开了主动搭话却一直
-    没动静」只能靠猜，看不出是没素材还是判官一路拦。
-    """
-    hint = (cfg.banter_judge_hint or "").strip() or DEFAULT_JUDGE_HINT
-    # 兜一道：万一有人往判定标准里贴了几万字，每次判官请求都得带上它
-    hint = hint[:3000]
-    body = clip_tail(material, int(cfg.banter_judge_chars))
-
-    trace = llmtrace_mod.start(group_id, 0, "判官", cfg, question=body, kind="judge")
-    started = time.monotonic()
-    verdict, why = await llm_bot.complete(
-        judge_prompt(body, hint),
-        cfg,
-        system=JUDGE_SYSTEM,
-        model=(cfg.banter_judge_model or "").strip(),
-        # 只要两个字，但别卡太死：有的模型会带个标点或先说半句，
-        # 8 个 token 容易把「不接」本身也截掉，那就变成「判不出来」了
-        max_tokens=16,
-        temperature=0.0,
-    )
-    if not verdict:
-        logger.warning(f"[banter] 判官没回话（{why}）→ 按不接处理")
-        llmtrace_mod.step(trace, f"⚠️ 判官没有回话（{why}）→ 按不接")
-        llmtrace_mod.finish(
-            trace, error=f"judge_empty({why})",
-            elapsed_ms=(time.monotonic() - started) * 1000,
-        )
-        return False, f"judge_empty({why})"
-
-    ok = parse_verdict(verdict)
-    llmtrace_mod.step(trace, f"判定：{'接' if ok else '不接'}")
-    llmtrace_mod.finish(
-        trace, reply=verdict.strip(),
-        elapsed_ms=(time.monotonic() - started) * 1000,
-    )
-    return ok, f"判官「{verdict.strip()[:8]}」"
-
-
 def target_groups(cfg: LLMConfig) -> list[int]:
-    """这次该在哪些群搭话：``banter_groups`` → ``llm.groups`` → 所有旁听过的群。"""
-    for candidate in (cfg.banter_groups, cfg.groups):
-        if candidate:
-            return [int(g) for g in candidate]
-    return []
+    """这次该在哪些群开口：直接用 ``llm.groups``（留空 = 所有旁听过的群）。
+
+    合并进 speak 之后不再单独有个「搭话群」旋钮——两套群白名单只会让人改错。
+    """
+    return [int(g) for g in (cfg.groups or [])]
 
 
 def _today(now: datetime) -> str:
@@ -365,7 +277,7 @@ def reset_quota() -> None:
 
 def _gap_minutes(cfg: LLMConfig) -> float:
     """一次随机间隔（分钟）。和 :func:`next_run_at` 取同一段区间。"""
-    lo, hi = parse_range(cfg.banter_minutes)
+    lo, hi = parse_range(cfg.speak_check_minutes)
     return random.uniform(lo, hi)
 
 
@@ -377,7 +289,7 @@ def note_reply(group_id: int) -> None:
     """被动回复完，把这个群的搭话计时**重新起算**，并把定时任务挪到那之后。
 
     三个被动入口（@ / 戳一戳 / 非音乐链接）都走 ``_llm_answer``，所以调用点只
-    需要那一处。间隔仍取 ``banter_minutes``——「重新计算」的意思是「从现在起再等
+    需要那一处。间隔仍取 ``speak_check_minutes``——「重新计算」的意思是「从现在起再等
     一个间隔」，不是把下一次提前。
 
     不这样做的话：它 22:00 刚答完人，22:01 又被排到的那一轮捞起来自己冒泡，
@@ -387,7 +299,9 @@ def note_reply(group_id: int) -> None:
     if not gid:
         return
     cfg = service.config.llm
-    if not cfg.banter or not getattr(cfg, "banter_reset_on_reply", True):
+    # 合并进 speak 后「被动回复后重算计时」恒为开（原来的 banter_reset_on_reply 旋钮
+    # 已删）：它防的是「刚答完又自己冒泡」这种抢话，没有关掉的理由。
+    if not cfg.speak_proactive:
         return
     gap = _gap_minutes(cfg)
     _set_gate(gid, gap)
@@ -436,12 +350,11 @@ async def run_banter() -> dict:
     - ``no_seed`` —— 所有群都没有可接的素材（没新消息 / 太旧 / 全是短句）；
     - ``ok`` —— 至少发出去一条。
 
-    摘要里还带 ``skipped``（跳过的群数）和 ``declined``（判官说别插嘴的群数）——
-    后者为 0 而 ``sent`` 也为 0 时，说明是「没素材」而不是「识相闭嘴」，
-    排查起来不至于混为一谈。
+    摘要里还带 ``skipped``（跳过的群数）：``sent`` 为 0 时看它就知道是没素材
+    还是被概率门/勿扰/上限挡掉了（日志里各有对应的一句）。
     """
     llm_cfg = service.config.llm
-    if not llm_cfg.banter or not llm_cfg.enabled:
+    if not llm_cfg.speak_proactive or not llm_cfg.enabled:
         return {"status": "off", "sent": 0}
     # 素材只来自旁听。旁听关着就没话可接——这里直接说明，免得每半小时跑一次
     # 只在日志里留一句「no_seed」，看的人以为出了 bug
@@ -450,7 +363,7 @@ async def run_banter() -> dict:
         return {"status": "no_listen", "sent": 0}
 
     now = datetime.now(service.resolver.tz)
-    if quiet_end(now, parse_quiet(llm_cfg.banter_quiet)) is not None:
+    if quiet_end(now, parse_quiet(llm_cfg.speak_quiet)) is not None:
         # next_run_at 已经避开了勿扰段，能走到这里说明配置刚被改过
         logger.info("[banter] 此刻在勿扰时段内，本轮跳过")
         return {"status": "quiet", "sent": 0}
@@ -478,10 +391,9 @@ async def run_banter() -> dict:
     day = _today(now)
     sent = 0
     skipped = 0
-    declined = 0
-    fresh = max(60.0, llm_cfg.banter_fresh_minutes * 60.0)
+    fresh = max(60.0, llm_cfg.speak_fresh_minutes * 60.0)
     for gid in groups:
-        if not _quota_left(gid, day, llm_cfg.banter_daily_max):
+        if not _quota_left(gid, day, llm_cfg.speak_daily_max):
             skipped += 1
             continue
         # 刚在群里回过话，这一轮先不插嘴——计时已按被动回复那一刻重算过
@@ -495,8 +407,8 @@ async def run_banter() -> dict:
             rows = await service.store.recent_chat(
                 gid,
                 after_id=_LAST_ID.get(gid, 0),
-                limit=int(llm_cfg.banter_batch_max),
-                max_chars=int(llm_cfg.banter_batch_chars),
+                limit=int(llm_cfg.speak_batch_max),
+                max_chars=int(llm_cfg.speak_batch_chars),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[banter] 群{gid} 取最近消息失败: {exc}")
@@ -519,8 +431,8 @@ async def run_banter() -> dict:
 
         # 说话时机：概率门排在**最前面**。它替代的是「定时器 + 随机间隔」这一层——
         # 群里正热闹、或刚才那阵子已经聊完了，这一轮就不冒泡。
-        # 后面两道照旧保留：免费的粗筛（太长/命令/纯符号）和 LLM 判官（吵架、严肃
-        # 话题、别人正在对话……）看的是**语义**，比纯概率准得多，两者职责不重叠。
+        # 概率门之后还剩一道**免费粗筛**（太长/命令/纯符号）：不需要模型、几乎零成本。
+        # LLM 判官已于 2026-11-05 删除——频率交给概率，别再多花一次调用。
         #
         # 素材取最后一条：它才是「现在的话题」，也是 age / fresh 判定的那一条
         speak_ok, _speak_p = speak_mod.decide_speak(
@@ -533,8 +445,7 @@ async def run_banter() -> dict:
             skipped += 1
             continue
 
-        # 先做免费的粗筛：整批都够不上（全是「嗯」「哈哈」「/命令」）就直接跳过，
-        # 省一次判官调用。判官只负责「语义上该不该说」，不管这种机械过滤。
+        # 先做免费的粗筛：整批都够不上（全是「嗯」「哈哈」「/命令」）就直接跳过。
         idx = -1
         for i in range(len(rows) - 1, -1, -1):
             if worth_reply(str(rows[i].get("content") or "")):
@@ -546,20 +457,6 @@ async def run_banter() -> dict:
             continue
 
         material = format_batch(rows, service.resolver.tz)
-
-        # 判官再说该不该插嘴。判「不接」**也要推进游标**——否则下一轮还是这批
-        # 消息，判官大概率还说不接，就死锁在那儿反复白跑。
-        if llm_cfg.banter_judge:
-            ok, verdict_why = await should_reply(llm_cfg, material, gid)
-            if not ok:
-                _advance(gid, last_id)
-                declined += 1
-                logger.info(
-                    f"[banter] 群{gid} 决定不插嘴（{verdict_why}）："
-                    f"{len(rows)} 条 / {len(material)} 字"
-                )
-                skipped += 1
-                continue
 
         # 接的是「最后一条有内容的」，前面那些当背景。
         # 这样历史里存的是一句自然的话，而不是一整段带时间戳的群聊记录。
@@ -612,5 +509,4 @@ async def run_banter() -> dict:
         "status": "ok" if sent else "no_seed",
         "sent": sent,
         "skipped": skipped,
-        "declined": declined,
     }
