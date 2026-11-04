@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime
 
@@ -50,6 +51,7 @@ from . import banter as banter_mod  # noqa: E402  被动回复后要重排搭话
 from . import memory as memory_mod  # noqa: E402
 from . import mention as mention_mod  # noqa: E402  回复里 @ 谁，由模型自己点
 from . import persona as persona_mod  # noqa: E402  听群友抱怨「AI 味」，只记不吭声
+from . import replysplit  # noqa: E402  把一条回复拆成几条短消息发
 from .models import PLATFORM_NAMES, Song  # noqa: E402
 from .naming import build_context, render_template, resolve_alias  # noqa: E402
 from .scheduler import reload_jobs  # noqa: E402
@@ -682,6 +684,26 @@ def _mention_targets(event: object, llm_cfg, text: str, quote: str, group_id: in
         self_qq=self_id,
     )
 
+
+def _split_reply_parts(reply: str, llm_cfg) -> list[str]:
+    """把回复拆成要依次发出的若干段，并保证每段不超过单条消息长度上限。
+
+    ``llm.reply_split`` 关掉时原样一条返回（不清理、不切分），输出与改造前一致；
+    打开时按模型给的换行分条，模型没给换行且正文很长才用标点兜底。
+
+    拆完每段还要过一遍 :func:`bot_utils.split_text`——那是**传输层**的长度上限，
+    与「想拆几条」是两件事：缺了它，超长单段会被服务端拒发。
+    """
+    out: list[str] = []
+    for part in replysplit.split_reply(
+        reply,
+        enabled=bool(llm_cfg.reply_split),
+        max_parts=int(llm_cfg.reply_split_max),
+    ):
+        out.extend(split_text(part))
+    return out or [reply]
+
+
 async def _llm_answer(
     bot: Bot,
     event: object,
@@ -743,7 +765,7 @@ async def _llm_answer(
         if dropped:
             logger.info(f"[mention] 群{group_id} 正文开头的「@{dropped}」已去掉（已经真 @ 过他）")
 
-    parts = split_text(reply)
+    parts = _split_reply_parts(reply, llm_cfg)
     first = Message()
     # 模型自己点了人（mention 工具）就以它为准；它没点才按配置兜底 @ 提问者。
     # 两者都上会变成「@提问者 @被评价的人」两个提醒，群里看着像拉人对峙
@@ -753,6 +775,10 @@ async def _llm_answer(
     first += MessageSegment.text(" " + parts[0])
     await safe_send_group(bot, group_id, first)
     for extra in parts[1:]:
+        # 段间停顿：真人连发几条不会同时弹出来。解析不出区间就是 0，不会卡住
+        delay = replysplit.between_delay(llm_cfg.reply_split_interval)
+        if delay > 0:
+            await asyncio.sleep(delay)
         await safe_send_group(bot, group_id, Message(MessageSegment.text(extra)))
     # 它刚在群里说过话 → 主动搭话的计时重新起算。否则排到的那一轮可能紧接着
     # 就自己冒泡，群里看着像抢话；而且刚说完这一两句，可接的素材也还没跟上

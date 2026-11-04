@@ -358,6 +358,9 @@ llm:
   skill_timeout: 20.0         # 技能脚本超时秒数，超时直接 kill
   max_input_chars: 500        # 单条提问最多取多少字，0=不限
   max_reply_chars: 800        # 回复最多发多少字，0=不限（超长自动分条）
+  reply_split: false          # 把一条回复拆成几条短消息依次发（关掉=整段发，行为不变）
+  reply_split_max: 10         # 最多拆成几条，超出用「……」合并到最后一条
+  reply_split_interval: "0.5-1.5"   # 两条之间的随机间隔（秒），"最小-最大"
   at_sender: true           # 回复时 @ 提问者（模型用 mention 点了人时以模型为准）
   mention_enabled: true     # 让模型自己决定 @ 谁（mention 工具）；只认本次出现的人
   mention_max: 3            # 一条回复最多 @ 几个
