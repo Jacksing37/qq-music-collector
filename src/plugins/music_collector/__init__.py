@@ -52,6 +52,7 @@ from . import memory as memory_mod  # noqa: E402
 from . import mention as mention_mod  # noqa: E402  回复里 @ 谁，由模型自己点
 from . import persona as persona_mod  # noqa: E402  听群友抱怨「AI 味」，只记不吭声
 from . import replysplit  # noqa: E402  把一条回复拆成几条短消息发
+from . import speak as speak_mod  # noqa: E402  这一条到底该不该开口（概率门）
 from .models import PLATFORM_NAMES, Song  # noqa: E402
 from .naming import build_context, render_template, resolve_alias  # noqa: E402
 from .scheduler import reload_jobs  # noqa: E402
@@ -195,14 +196,14 @@ async def _listen_group_message(bot: Bot, event: GroupMessageEvent) -> None:
     **只落库，不回复**。它解决的是「机器人只在被 @ 时才看得见群里的话」这个问题：
     没有这份素材，「记住每个人」就只能靠运气。
 
+    说话时机（``speak``）的记账**不在这里**，在 :func:`_speak_account`
+    （priority=100）——理由见那里的注释：判定必须先于记账。
+
     失败一律静默：磁盘满、目录没权限都不该让群里出现报错。
     """
     gid = int(getattr(event, "group_id", 0) or 0)
     uid = int(getattr(event, "user_id", 0) or 0)
     if not gid or not uid or uid == int(getattr(event, "self_id", 0) or 0):
-        return
-    ok, mem = memory_goal(gid)
-    if not ok:
         return
     text = (event.get_plaintext() or "").strip()
     # 纯图片 / 表情 / 卡片没有可读文字，记下来也没用
@@ -210,6 +211,10 @@ async def _listen_group_message(bot: Bot, event: GroupMessageEvent) -> None:
         return
     # 命令不记："/music list" 这类不能反映「这个人平时聊什么」
     if text.lower().startswith(_COMMAND_PREFIXES):
+        return
+
+    ok, mem = memory_goal(gid)
+    if not ok:
         return
 
     app_cfg = service.cfg(gid)
@@ -249,6 +254,44 @@ async def _listen_group_message(bot: Bot, event: GroupMessageEvent) -> None:
         return
     if created:
         logger.info(f"[memory] 群{gid} 新成员进档：{nick}({uid})")
+
+
+# ----------------------------------------------------- 说话时机：记账
+
+# **必须是所有触发点里最大的优先级**：@ 是 5、链接在 music_listener 里是 99。
+# 「判定先于记账」是 speak 模型的第一条铁律——触发点算概率用的是**这条消息之前**
+# 积累的气氛。若记账跟旁听（priority=2）挤在一起，同一条带链接的消息会先把自己
+# 的热度抬起来、再拿被自己抬高的热度算概率：死群里第一条链接的 p 会从 0.70
+# 掉到 0.52，而第一条恰恰是最该接的那条。
+speak_listener = on_message(priority=100, block=False)
+
+
+@speak_listener.handle()
+async def _speak_account(bot: Bot, event: GroupMessageEvent) -> None:
+    """给「说话时机」模型记一笔：这条群消息抬热度还是抬 engage。
+
+    ``note_engage`` 回答「这条是不是在跟我说话」：
+
+    - 是（被 @ / 紧跟它发言 / 正文里点了它的名字）→ 抬 engage，且**不算**群友
+      之间的闲聊，不抬群热度（冲着它说的一句「在吗」说明不了这个群有多热闹）；
+    - 不是 → 才是群友在聊，抬 fast + slow 两个热度窗口。
+
+    不放在 ``_listen_group_message`` 里的原因见上面的优先级注释；也不受「群记忆」
+    开关影响——热不热闹跟「要不要攒素材」是两件独立的事。
+    """
+    gid = int(getattr(event, "group_id", 0) or 0)
+    uid = int(getattr(event, "user_id", 0) or 0)
+    if not gid or not uid or uid == int(getattr(event, "self_id", 0) or 0):
+        return
+    text = (event.get_plaintext() or "").strip()
+    # 空正文（纯图 / 表情 / 卡片）与命令都不是「在聊天」，记进去只会污染气氛
+    if not text or text.lower().startswith(_COMMAND_PREFIXES):
+        return
+    engaged = speak_mod.note_engage(
+        gid, mentioned=await _at_bot(event), text=text, nick=_sender_nick(event)
+    )
+    if not engaged:
+        speak_mod.note_group_message(gid)
 
 
 # ----------------------------------------------------- 被 @ 时回复自我介绍
@@ -804,6 +847,10 @@ async def _llm_answer(
         # 记下「它刚才说了什么」：后面群里要是有人嫌弃「AI 味」，判官得知道是哪句话
         # 惹的。放在送达分支里——没发出去的话，群友根本看不到，无从抱怨
         persona_mod.note_bot_spoke(group_id, reply)
+        # 说话时机也要知道「它刚说过话」：抬 heat_fast（只抬快窗口）、把 engage 打折、
+        # 重开「紧跟」窗口。同样放在送达分支里——没送到的话它其实没开口，
+        # 这时候压自己的概率、等别人接话，全是错的
+        speak_mod.note_bot_spoke(group_id)
     else:
         # 没全送到就别记：模型"以为自己说过"会让后面几轮全错位，
         # 而群里的人看到的是它答非所问。box 里的内容直接丢弃。
@@ -1360,7 +1407,8 @@ async def _reply_llm_link(bot: Bot, event: GroupMessageEvent) -> None:
     - **真·音乐链接一律不碰**（``_has_music_link``）：不在收集期时
       ``handle_segments`` 会直接返回空结果，这里的判定才不会把歌当成普通链接；
     - **@ 过机器人的不碰**：那条走 ``at_listener``（优先级更高），否则会回两遍；
-    - 命令不碰；不在生效群 / 没填全接口，静默。
+    - 命令不碰；不在生效群 / 没填全接口，静默；
+    - 说话时机（``llm.speak_enabled``）：群正热闹时大概率不接。默认关，关着恒放行。
     """
     llm_cfg, why = _llm_gate(event)
     if why or not llm_cfg.reply_link:
@@ -1372,6 +1420,13 @@ async def _reply_llm_link(bot: Bot, event: GroupMessageEvent) -> None:
     text, images = read_message(event.message, {str(event.self_id)})
     if not extract_urls(text):
         return  # 没有链接（或链接在卡片里读不出来）→ 没什么可接的
+    # 说话时机：链接也算「群里有事发生」，但它不是有人在跟它说话，所以只看群热度
+    # 与 engage 存量的概率门。speak 关着时恒放行——关掉开关就是改造前的行为
+    speak_ok, _speak_p = speak_mod.decide_speak(
+        event.group_id, "link", text, _sender_nick(event)
+    )
+    if not speak_ok:
+        return
     hint = (llm_cfg.link_hint or "").strip()
     question = f"{text}\n{hint}" if hint else text
     # 链接正文：这一步才是「真看了」和「只看标题瞎猜」的分界线

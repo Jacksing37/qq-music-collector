@@ -16,6 +16,8 @@
 - 太短（「哈哈」「+1」）、纯标点、命令一律不从当「接的对象」；
 - **判官**（``banter_judge``）：先问一句「此刻插嘴自然吗」，吵架、严肃话题、
   别人正在对话、对话已收尾……说不该就闭嘴。判不出来也按「不接」；
+- **说话时机**（``llm.speak_enabled``）：群正热闹 / 刚聊完的时候整轮就不冒泡。
+  默认关；关着的时候这道闸恒放行，行为与改造前一致；
 - 每群每天上限 ``banter_daily_max``（``0`` = 不限）。
 
 **素材是一段而不是一条**：从 ``_LAST_ID``（上次搭话处理到的 ``chat_log.id``）往后取，
@@ -42,6 +44,7 @@ from nonebot.log import logger
 from .bot_utils import safe_send_group
 from .config import LLMConfig
 from . import llmtrace as llmtrace_mod
+from . import speak as speak_mod
 from .llm import clip_tail, llm_bot
 from .service import service
 
@@ -511,6 +514,22 @@ async def run_banter() -> dict:
         if age > fresh:
             _advance(gid, last_id)
             logger.info(f"[banter] 群{gid} 最后一条已是 {age / 60:.0f} 分钟前，这批凉了，跳过")
+            skipped += 1
+            continue
+
+        # 说话时机：概率门排在**最前面**。它替代的是「定时器 + 随机间隔」这一层——
+        # 群里正热闹、或刚才那阵子已经聊完了，这一轮就不冒泡。
+        # 后面两道照旧保留：免费的粗筛（太长/命令/纯符号）和 LLM 判官（吵架、严肃
+        # 话题、别人正在对话……）看的是**语义**，比纯概率准得多，两者职责不重叠。
+        #
+        # 素材取最后一条：它才是「现在的话题」，也是 age / fresh 判定的那一条
+        speak_ok, _speak_p = speak_mod.decide_speak(
+            gid,
+            "banter",
+            str(rows[-1].get("content") or ""),
+            str(rows[-1].get("nick") or ""),
+        )
+        if not speak_ok:
             skipped += 1
             continue
 
