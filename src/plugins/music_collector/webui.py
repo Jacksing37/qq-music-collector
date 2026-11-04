@@ -440,12 +440,6 @@ FIELD_META["llm.history_chars"] = (
     "真超窗了程序也会自动丢历史重试一次",
     False,
 )
-FIELD_META["llm.context_window"] = (
-    "上下文窗口(token)",
-    "只用于「上下文用量」那条进度条的**分母**，不参与请求、不影响裁剪（裁剪看上面的字符上限）。"
-    "实测当前中转 1,048,576；换成小窗口模型（8k/32k/128k）时记得改小，否则百分比会显得过于乐观",
-    False,
-)
 FIELD_META["llm.cooldown"] = (
     "冷却(秒)",
     "同一用户在同一群的两次回复最小间隔，防止刷屏；0 = 不限",
@@ -674,14 +668,9 @@ FIELD_META["memory.digest_hours"] = (
     "多久把新群聊归纳进档案一次；0 = 不自动整理，只能在「群记忆」页手动点",
     False,
 )
-FIELD_META["memory.digest_msgs"] = (
-    "单次整理条数",
-    "一次最多看多少条新消息（新的优先，太旧的会被丢掉）",
-    False,
-)
 FIELD_META["memory.digest_chars"] = (
     "整理素材字数",
-    "喂给整理任务的聊天记录最多多少字",
+    "喂给整理任务的聊天记录最多多少字（条数上限已固定 300 条，不用再调）",
     False,
 )
 FIELD_META["memory.digest_model"] = (
@@ -694,9 +683,11 @@ FIELD_META["memory.digest_max_tokens"] = (
     "整理结果是 JSON，太小会被截断导致解析失败",
     False,
 )
-FIELD_META["memory.keep_days"] = (
-    "记录保留天数",
-    "群聊记录（上下文 + 整理素材）留多少天；0 = 永久保留",
+FIELD_META["memory.chat_keep_days"] = (
+    "群聊记录保留天数",
+    "群聊记录（上下文 + 整理素材）留多少天；0 = 永久保留。"
+    "<br>⚠️ 和上面「配置」页里的<b>收集记录保留天数</b>不是一回事：那个管歌单收集记录（默认 30 天），"
+    "这个管聊天记录（默认 180 天）",
     False,
 )
 FIELD_META["memory.buckets_enabled"] = (

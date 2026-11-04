@@ -850,7 +850,7 @@ async def test_context_breakdown() -> None:
     gid = 8301
     base = dict(
         enabled=True, base_url="http://x/v1", api_key="k", model="m",
-        system_prompt="你是测试机器人", history_rounds=5, context_window=1048576,
+        system_prompt="你是测试机器人", history_rounds=5,
         max_tokens=800, history_chars=0,
     )
     cfg = LLMConfig(tools=False, **base)
@@ -861,7 +861,7 @@ async def test_context_breakdown() -> None:
     check("分段齐全且顺序固定",
           [s["key"] for s in d["segments"]] == ["system", "memory", "rules", "tools", "history"],
           str([s["key"] for s in d["segments"]]))
-    check("窗口取自 context_window", d["window"] == 1048576, str(d["window"]))
+    check("窗口是写死常量（已不再是配置项）", d["window"] == 1048576, str(d["window"]))
     check("人设段字数对得上", segs["system"]["chars"] == len("你是测试机器人"),
           str(segs["system"]["chars"]))
     check("记忆关着 → 0", segs["memory"]["chars"] == 0)
@@ -903,12 +903,17 @@ async def test_context_breakdown() -> None:
     check("工具段列出了挂上的工具名", len(d4["tools"]) > 0, str(d4["tools"]))
     check("开工具后总量变大", d4["used"] > d["used"], f'{d4["used"]} vs {d["used"]}')
 
-    # (e) 分母真的在用 context_window
-    cfg_small = cfg.model_copy(update={"context_window": 2000})
-    d5 = bot.context_breakdown(gid, cfg_small, mem)
-    check("窗口调小后百分比变大", d5["percent"] > d2["percent"],
-          f'{d5["percent"]} vs {d2["percent"]}')
-    check("改了窗口不影响 used", d5["used"] == d2["used"], f'{d5["used"]} vs {d2["used"]}')
+    # (e) 分母是写死的常量：百分比必须与 used/1048576 自洽；
+    #     而旧的 llm.context_window 已经删掉，再传进去应当被静默忽略（不再影响任何东西）
+    d5 = bot.context_breakdown(gid, cfg, mem)
+    check("百分比与写死分母自洽",
+          d5["percent"] == round(d5["used"] * 100.0 / 1048576, 2),
+          f'{d5["percent"]} vs used={d5["used"]}')
+    cfg_stale = LLMConfig(tools=False, **{**base, "context_window": 2000})
+    d6 = bot.context_breakdown(gid, cfg_stale, mem)
+    check("旧的 context_window 已失效（传了也不影响窗口）",
+          d6["window"] == d5["window"] and d6["percent"] == d5["percent"],
+          f'{d6["window"]} / {d6["percent"]}')
 
 
 async def test_trace_wired() -> None:

@@ -1783,7 +1783,15 @@ const BOT_GROUPS=[
          "llm.skills","llm.skills_dir","llm.skill_body_chars","llm.skill_file_chars",
          "llm.skill_scripts","llm.skill_timeout"]},
   {title:"上下文与频率限制",
-   keys:["llm.history_rounds","llm.history_chars","llm.cooldown","llm.max_input_chars","llm.max_reply_chars","llm.at_sender","llm.fallback_intro","llm.timeout"]},
+   note:"历史记忆是<b>三层一起裁</b>：先按<b>轮数</b>取最近几轮（一来一回算一轮），"
+      + "再按<b>总字符</b>从最旧的成对丢掉，最后单条超过<b>单条字符上限</b>的会被截断——"
+      + "谁先到头谁生效，所以三个都别设得太小。<br>"
+      + "「库里保留天数」只管从数据库载入的范围（超过天数的旧对话不进上下文）；"
+      + "「上下文用量」那张卡的<b>分母是写死的 1,048,576 token</b>，已经不作为配置项暴露——"
+      + "它只影响百分比好不好看，改它不会改变任何实际行为。",
+   keys:["llm.history_rounds","llm.history_chars","llm.history_item_chars","llm.history_days",
+         "llm.cooldown","llm.max_input_chars","llm.max_reply_chars","llm.at_sender",
+         "llm.fallback_intro","llm.timeout"]},
   {title:"附加触发",
    note:"除了「@机器人」，还有两种<b>有事发生才开口</b>的场合：被戳一戳、分享了不是音乐的链接。<br>"
       + "两者都仍然受上面的开关、生效群与冷却限制；真·音乐链接不会被截走，照常走收集流程。",

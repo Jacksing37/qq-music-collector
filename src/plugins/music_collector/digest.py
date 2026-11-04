@@ -72,6 +72,11 @@ _PROMPT = """下面是 QQ 群 {gid} 最近的一段聊天记录，以及我手�
 #: 已知档案塞进 prompt 的上限（按人裁剪，避免整理请求本身撑爆上下文）
 KNOWN_CHARS = 12000
 
+#: 一次整理最多看多少条新消息。以前是配置项 ``memory.digest_msgs``，但它和
+#: ``memory.digest_chars`` 限的是同一份素材（条数 / 字数），留两个旋钮只会
+#: 改一个忘一个、互相抵消；真正该调的是字数。这里固定一个足够大的值。
+DIGEST_MAX_MSGS = 300
+
 # ---------------------------------------------------------------- 三桶模式
 
 
@@ -465,10 +470,12 @@ async def _digest_locked(
 ) -> dict:
     """拿到「整理中」标记之后的正文。拆出来只为让 ``try/finally`` 一眼可见。"""
     since = 0.0
-    if cfg_mem.keep_days > 0:
-        since = time.time() - float(cfg_mem.keep_days) * 86400
+    if cfg_mem.chat_keep_days > 0:
+        since = time.time() - float(cfg_mem.chat_keep_days) * 86400
+    # 条数上限固定 300：它和 ``digest_chars`` 限的是同一份素材，留两个旋钮只会
+    # 改一个忘一个、互相抵消。真正该调的是字数（``digest_chars``）。
     rows = await service.store.pending_digest(
-        group_id, limit=max(20, int(cfg_mem.digest_msgs)), since=since
+        group_id, limit=DIGEST_MAX_MSGS, since=since
     )
     if not rows:
         return {"status": "skipped", "why": "没有新消息"}

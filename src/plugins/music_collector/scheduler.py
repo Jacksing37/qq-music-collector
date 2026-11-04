@@ -223,12 +223,12 @@ async def job_prune() -> None:
     # 群聊记录跟着一起清：它是记忆整理任务的素材，留太久只会让库无限长大。
     # 这一条**不受 clear.scheduled_enabled 控制**——记忆有自己的保留天数。
     mem = service.config.memory
-    if mem.keep_days and mem.keep_days > 0:
-        before_chat = time.time() - float(mem.keep_days) * 86400
+    if mem.chat_keep_days and mem.chat_keep_days > 0:
+        before_chat = time.time() - float(mem.chat_keep_days) * 86400
         dropped = await service.store.prune_chat(before_chat)
         if dropped:
             logger.info(
-                f"[memory] 清理过期群聊记录 {dropped} 条（保留 {mem.keep_days} 天）"
+                f"[memory] 清理过期群聊记录 {dropped} 条（保留 {mem.chat_keep_days} 天）"
             )
 
     cfg = service.config.clear

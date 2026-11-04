@@ -508,10 +508,6 @@ class LLMConfig(BaseModel):
     #: 对话历史在库里保留多少天（0 = 永久）。只影响「从库里载入」的范围，
     #: 超过天数的旧对话不会进上下文，但会被记忆整理任务用过就不再需要
     history_days: float = Field(180, ge=0, le=3650)
-    #: 模型的上下文窗口（token）。**只用于网页上那条「上下文用量」进度条的分母**，
-    #: 不参与请求、不影响裁剪（裁剪看 history_chars）。实测当前中转 1,048,576；
-    #: 换成小窗口模型时记得改小，否则百分比会显得过于乐观
-    context_window: int = Field(1048576, ge=1000, le=10000000)
     #: 同一用户在同一群的冷却秒数，防止刷屏；0 = 不限
     cooldown: int = Field(3, ge=0, le=600)
     # ---- 消息读取（群友发的东西能不能被「看懂」）----
@@ -783,16 +779,16 @@ class MemoryConfig(BaseModel):
     listen_groups: list[int] = Field(default_factory=list)
     #: 多久自动整理一次档案（小时）。0 = 不自动整理，只能手动触发
     digest_hours: float = Field(6.0, ge=0, le=720)
-    #: 一次整理最多看多少条新消息（从最旧的开始丢，新的优先）
-    digest_msgs: int = Field(300, ge=20, le=5000)
-    #: 喂给整理任务的素材最多多少字
+    #: 喂给整理任务的素材最多多少字（条数上限已固定为 300 条，见 digest.py）
     digest_chars: int = Field(20000, ge=1000, le=300000)
     #: 整理用哪个模型；留空 = 跟 ``llm.model``
     digest_model: str = ""
     #: 整理结果的 token 上限（要输出 JSON，别给太小）
     digest_max_tokens: int = Field(4000, ge=256, le=32000)
-    #: 群聊记录在库里保留多少天（0 = 永久）。上下文与整理素材共用这张表
-    keep_days: float = Field(180, ge=0, le=3650)
+    #: 群聊记录在库里保留多少天（0 = 永久）。上下文与整理素材共用这张表。
+    #: ⚠️ 名字里带 chat 是为了和 ``clear.keep_days``（收集记录，默认 30 天）区分开——
+    #: 两者同名不同表，曾经极易改错
+    chat_keep_days: float = Field(180, ge=0, le=3650)
 
     # ------------------------------------------------ 三桶结构（他是谁 / 我们之间 / 事件）
     #: 成员档案正文是否按三个小节存。**默认关**：关着就是老的「一段自由文本」模式，

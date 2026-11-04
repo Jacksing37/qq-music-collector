@@ -44,6 +44,11 @@ _HISTORY_CHAR_LIMIT = 600
 #: 「已用 x / 4000 字」，两边各写一个魔法数字迟早会对不上。
 SYSTEM_CHAR_LIMIT = 4000
 
+#: 「上下文用量」进度条的分母（token）。实测当前中转 1,048,576。
+#: 写死而不是做成配置项：它只喂这一个展示数字，不参与请求、不影响裁剪，
+#: 让它可配只会让人以为改了它就改了行为（换小窗口模型时才需要动这里）。
+CONTEXT_WINDOW_TOKENS = 1048576
+
 #: 「谁在说话」硬规则。**拼在人设与档案之后、能力边界之前**（见
 #: :func:`system_text`）：人设写满也挤不掉，和 ``tools.TOOL_RULES`` 一个待遇。
 #:
@@ -846,7 +851,10 @@ class LLMBot:
         hist_chars = sum(message_chars(m) for m in hist)
         raw_chars = sum(message_chars(m) for m in raw)
 
-        window = max(1000, int(cfg.context_window or 1048576))
+        # 「上下文用量」进度条的**分母**。以前是 llm.context_window 可配项，但它
+        # 只喂这一个展示数字、不参与请求也不影响裁剪，配置项本身就是噪音
+        # （用户改小之后百分比变好看，实际行为一点没变，反而误导）。写死实测值。
+        window = CONTEXT_WINDOW_TOKENS
         parts = [
             ("system", "系统提示词（人设）", len(prompt), estimate_tokens(prompt)),
             ("memory", "群记忆档案", len(memory_text), estimate_tokens(memory_text)),
