@@ -675,6 +675,16 @@ button:disabled{opacity:.5;cursor:not-allowed}
           <label class="muted">工具轮数：<input id="chatRounds" type="number" min="0" max="8" value="5" style="width:86px"></label>
           <label class="muted">借用群档案：<select id="chatGid" style="width:auto;min-width:150px"><option value="0">不借用</option></select></label>
         </div>
+        <!-- 模型：默认填「机器人设置」里那个，方便临时换个模型对比效果。
+             只作用于这一次请求，不写回配置（改配置还是去「机器人设置」页）。 -->
+        <div class="row" style="margin-top:8px">
+          <span class="muted" title="只影响聊天测试，不改配置文件">模型：</span>
+          <input id="chatModel" placeholder="留空 = 用「机器人设置」里的模型" style="width:230px"
+                 autocomplete="off" spellcheck="false" autocapitalize="off"
+                 title="临时换模型试效果；留空则用配置里的那个">
+          <button id="chatModelReset" type="button" title="清回配置里的模型">↺ 用配置里的</button>
+          <span class="muted" id="chatModelHint"></span>
+        </div>
         <!-- 模拟引用：只作用于「下一次发送」，发完自动清空。
              这三个框只有 placeholder、没有 name，浏览器（Chrome 自动填充 /
              密码管理器 / 表单恢复）会把它们当成「姓名·电话」塞进别处的数据；
@@ -2114,8 +2124,47 @@ CHAT_QUOTE_IDS.forEach(id=>{
 
 async function loadChat(){
   if(!CHAT_READY){ CHAT_READY = true; await loadChatGroups(); paintChat(); }
+  await syncChatModel();
   scrubChatQuote();
   const t=$("#chatInput"); if(t) t.focus();
+}
+
+//: 「机器人设置」里配的模型。每次进这一页都重新取一次——刚在配置页改完模型就过来
+//: 测试的情况很常见，拿缓存的旧值会把「我以为在测新模型」变成一场空。
+let CHAT_CFG_MODEL = null;
+
+async function syncChatModel(){
+  const el=$("#chatModel");
+  try{
+    const j = await (await api("/api/music-admin/bot")).json();
+    CHAT_CFG_MODEL = String((j.status&&j.status.model)||"");
+  }catch(e){ /* 取不到就保持原样，输入框照样能手填 */ }
+  if(!el) return;
+  // 用户没亲手改过就一直跟配置走；改过的不动，免得把正在调试的模型名冲掉
+  if(!el.dataset.touched) el.value = CHAT_CFG_MODEL || "";
+  paintModelHint();
+}
+
+//: 只更新提示文字，不发请求（输入框每敲一下就发一次 bot 接口太浪费）
+function paintModelHint(){
+  const el=$("#chatModel"), hint=$("#chatModelHint");
+  if(!el || !hint) return;
+  const cur=(el.value||"").trim(), cfg=CHAT_CFG_MODEL||"";
+  if(!cfg){ hint.textContent = cur ? "⚠ 配置里还没填模型" : ""; return; }
+  hint.textContent = (!cur || cur===cfg)
+    ? ("配置里：" + cfg)
+    : ("⚠ 临时改用别的模型（配置里是 " + cfg + "）");
+}
+
+if($("#chatModel")){
+  $("#chatModel").addEventListener("input", e=>{ e.target.dataset.touched="1"; paintModelHint(); });
+}
+if($("#chatModelReset")){
+  $("#chatModelReset").onclick=()=>{
+    const el=$("#chatModel"); if(!el) return;
+    delete el.dataset.touched; el.value = CHAT_CFG_MODEL || ""; paintModelHint();
+    el.focus();
+  };
 }
 
 async function sendChat(){
@@ -2129,6 +2178,7 @@ async function sendChat(){
   try{
     const body={
       text,
+      model: (($("#chatModel")&&$("#chatModel").value)||"").trim(),
       tools: !!($("#chatTools") && $("#chatTools").checked),
       rounds: Number(($("#chatRounds")&&$("#chatRounds").value)||0)||0,
       memory_group: Number(($("#chatGid")&&$("#chatGid").value)||0)||0,

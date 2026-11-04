@@ -238,12 +238,41 @@ def test_chat_test_quote_inputs_clean():
     assert 'id="chatRounds"' in body and "rounds: Number(" in body, "工具轮数没发出去"
 
 
+def test_chat_test_model_override():
+    """「聊天测试」能临时换模型（页面上默认填配置里那个），且绝不写回配置。"""
+    from src.plugins.music_collector.config import LLMConfig
+
+    base = LLMConfig(model="deepseek-v4.1-flash", cooldown=5, tools=False, tool_rounds=3)
+    cfg = W.chat_test_config(base, {"model": "  qwen3-max ", "tools": True, "rounds": 99})
+    assert cfg.model == "qwen3-max", cfg.model
+    assert cfg.cooldown == 0, "测试不该占真群的冷却"
+    assert cfg.tools is True
+    assert cfg.tool_rounds == 8, "轮数上限 8，别让人手滑写 99"
+
+    # 留空 / 全空格 = 用配置里的那个
+    assert W.chat_test_config(base, {}).model == "deepseek-v4.1-flash"
+    assert W.chat_test_config(base, {"model": "   "}).model == "deepseek-v4.1-flash"
+    # 传进来的配置对象不许被改
+    assert base.model == "deepseek-v4.1-flash" and base.cooldown == 5 and base.tools is False
+
+
+def test_chat_page_has_model_box():
+    """界面上得有模型输入框，请求体里也得真的带上它。"""
+    body = F.DASHBOARD_HTML
+    assert 'id="chatModel"' in body, "聊天测试缺模型输入框"
+    assert 'id="chatModelReset"' in body, "缺「用配置里的」按钮"
+    assert "syncChatModel" in body, "进页面没去取配置里的模型"
+    assert "model: ((" in body, "发送时没带 model 字段"
+
+
 if __name__ == "__main__":
     import tempfile
 
     _tmp = Path(tempfile.mkdtemp())
     test_dashboard_html_is_well_formed()
     test_chat_test_quote_inputs_clean()
+    test_chat_test_model_override()
+    test_chat_page_has_model_box()
     test_build_schema_covers_known_keys()
     test_enum_options_detected()
     test_coerce_value_types()

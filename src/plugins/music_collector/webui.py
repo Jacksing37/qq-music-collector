@@ -2352,12 +2352,43 @@ async def _api_bot_history(request: Request):
 CHAT_TEST_GID = -1
 
 
+def chat_test_config(base, body: dict):
+    """「聊天测试」这次请求要用的配置副本（**绝不写回 config.yaml**）。
+
+    三个维度都能临时改，方便调试对比：
+
+    - ``cooldown=0``：测试不该占真群的限流额度；
+    - ``model``：临时换模型（页面上默认填配置里那个）。空 = 用配置里的；
+      换了模型后采样参数、思考写法都由 :func:`llm.build_payload` 按新模型重算，
+      所以「同一个提示词换模型对比」在这里是准的；
+    - ``tools`` / ``rounds``：工具开关与轮数（``rounds`` 上限 8，防手滑）。
+
+    传进来的 ``base`` 不会被改——每个字段都是 ``model_copy`` 出来的新对象。
+    """
+    cfg = base.model_copy(
+        update={"cooldown": 0, "tools": bool(body.get("tools", True))}
+    )
+    model = str(body.get("model") or "").strip()[:120]
+    if model:
+        cfg = cfg.model_copy(update={"model": model})
+    try:
+        rounds = int(body.get("rounds") or 0)
+    except (TypeError, ValueError):
+        rounds = 0
+    if rounds > 0:
+        cfg = cfg.model_copy(update={"tool_rounds": min(8, rounds)})
+    return cfg
+
+
 async def _api_chat_test(request: Request):
     """网页「聊天测试」：直接用机器人那一套配置跟模型对话。
 
     和群里唯一的区别是**副作用全关**：``persist=False`` 不写 ``chat_log``（否则测试
     内容会变成群记忆的整理素材）、``cooldown=0`` 不占冷却、群号是负数虚拟群、回复
     也不发到任何地方。所以这里可以随便试提示词和工具。
+
+    可临时改的东西（都只作用于这一次请求，见 :func:`chat_test_config`）：模型、
+    工具开关与轮数。
 
     ``memory_group`` 让人可以「只借用某个群的档案」，但历史仍留在虚拟群里——
     否则测试几句就会把真群的上下文冲掉。
@@ -2375,14 +2406,7 @@ async def _api_chat_test(request: Request):
         return JSONResponse({"ok": False, "message": "先说点什么"}, status_code=400)
 
     app_cfg = effective_config(None)
-    use_tools = bool(body.get("tools", True))
-    cfg = app_cfg.llm.model_copy(update={"cooldown": 0, "tools": use_tools})
-    try:
-        rounds = int(body.get("rounds") or 0)
-    except (TypeError, ValueError):
-        rounds = 0
-    if rounds > 0:
-        cfg = cfg.model_copy(update={"tool_rounds": min(8, rounds)})
+    cfg = chat_test_config(app_cfg.llm, body)
     try:
         mem_gid = int(body.get("memory_group") or 0)
     except (TypeError, ValueError):
