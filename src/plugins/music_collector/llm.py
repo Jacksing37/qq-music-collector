@@ -1099,6 +1099,7 @@ class LLMBot:
         memory_group: Optional[int] = None,
         mention_targets: Optional[list] = None,
         mention_out: Optional[list] = None,
+        body_out: Optional[dict] = None,
     ) -> tuple[Optional[str], str]:
         """生成一条回复。
 
@@ -1116,6 +1117,13 @@ class LLMBot:
         ``persist`` / ``memory_group`` 只给网页「聊天测试」用：``persist=False`` 时不把
         这轮对话写进 ``chat_log``（否则测试内容会变成记忆整理的素材）；``memory_group``
         指定「只借用某个群的档案」，而历史与记录仍留在测试用的虚拟群里。
+
+        ``body_out`` 是「这一轮要落库的两行」的暂存处。``persist=True`` 且传了它时，
+        这里**不再自己写库**，只把 ``user_content`` / ``assistant_content`` /
+        ``reasoning`` / ``user_id`` / ``speaker`` 填进去，由调用方拿到**送达回执**
+        后再调 :meth:`persist_turn`。理由见 ``persist_turn``：发送失败的对话一旦落库，
+        模型就会记得自己没说过的话。没传 ``body_out`` 的调用方（主动搭话 banter）
+        无从得知回执，只能按旧行为当场写库。
 
         返回 ``(回复文本, 原因)``：
 
@@ -1228,7 +1236,10 @@ class LLMBot:
             # 最后再补一段「这一次是谁在说话」：群里所有消息都是同一个 role，
             # 不点名它就会把上一位群友说的话算到当前这个人头上（见 SPEAKER_RULES）。
             memory_gid = int(memory_group) if memory_group is not None else group_id
-            memory_text = memory_mod.render_for_prompt(memory_cfg, memory_gid)
+            # 传当前这句提问：开了 ``memory.recall_enabled`` 时按相关度挑档案，
+            # 关着时它被忽略、输出与以前逐字相同。注意上面 :meth:`context_breakdown`
+            # 那份占用统计拿不到提问（它算的是「发出去之前」），所以那里不传。
+            memory_text = memory_mod.render_for_prompt(memory_cfg, memory_gid, query=text)
             system = system_text(
                 cfg,
                 tools_mod.TOOL_RULES if cfg.tools else "",
@@ -1370,19 +1381,38 @@ class LLMBot:
                     hist_box.popleft()
 
             # 落库**不受 history_rounds 限制**：即使关了上下文，这些对话仍然是
-            # 记忆整理任务的素材。写库失败只记一条日志，绝不拖累「已经把回复发出去了」
-            # 这个结果。
-            if persist and self._store is not None:
-                try:
-                    await self._store.append_chat(
-                        group_id, user_id, speaker, "user", body[:item_limit], kind="chat"
+            # 记忆整理任务的素材。
+            #
+            # 但**不能在这里写库**：这一轮还没发出去。发送失败（NapCat 掉线、被风控）
+            # 却已经落库的话，模型会"记得"自己说过那句话，接着等一个永远不来的回应，
+            # 对话从此错位——而且没有任何日志会暴露这件事。所以这里只把要写的两行
+            # 打包交给调用方，等它拿到送达回执再调 persist_turn（见 __init__._llm_answer）。
+            # 写库失败也只记一条日志，绝不拖累「回复已经发出去了」这个结果。
+            if persist:
+                turn = {
+                    "user_id": int(user_id),
+                    "speaker": speaker,
+                    # 单行长度上限与历史同一条口径（history_item_chars）
+                    "user_content": body[:item_limit],
+                    "assistant_content": reply[:item_limit],
+                    "reasoning": reasoning[:item_limit],
+                }
+                if body_out is not None:
+                    # 整体替换而不是 update：同一份 dict 复用多轮时，上一轮的内容
+                    # 绝不能残留在里面（调用方是按「箱子里有什么就写什么」用的）
+                    body_out.clear()
+                    body_out.update(turn)
+                else:
+                    # 没有 body_out 的调用方拿不到回执，只能照旧当场写库，
+                    # 否则它的对话会从记忆素材里凭空消失
+                    await self.persist_turn(
+                        group_id,
+                        user_id=turn["user_id"],
+                        speaker=speaker,
+                        body=turn["user_content"],
+                        reply=turn["assistant_content"],
+                        reasoning=turn["reasoning"],
                     )
-                    await self._store.append_chat(
-                        group_id, 0, "", "assistant", reply[:item_limit],
-                        reasoning[:item_limit], kind="chat",
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(f"[llm] 群{group_id} 对话落库失败: {exc}")
 
         self._last_reply[(int(group_id), int(user_id))] = time.monotonic()
         pics_note = f"，图 {len(pics)} 张" if pics else ""
@@ -1393,6 +1423,41 @@ class LLMBot:
             f" → 回复 {len(reply)} 字{tool_note}（model={cfg.model}）"
         )
         return _done(reply, "", reasoning)
+
+    async def persist_turn(
+        self,
+        group_id: int,
+        *,
+        user_id: int,
+        speaker: str,
+        body: str,
+        reply: str,
+        reasoning: str = "",
+    ) -> None:
+        """把一轮问答写进 ``chat_log`` 的两行（``kind="chat"``）。
+
+        **只在回复真的送到群里之后调**（由调用方拿着送达回执调；见 ``chat`` 的
+        ``body_out``）。这是「送达回执才落库」的落库端：发送失败时调用方压根不会调
+        这里，模型也就不会记得自己没说过的话。
+
+        两行的形状与改造前逐字一致：user 行带提问者（``user_id`` + 昵称），
+        assistant 行 ``user_id=0`` / ``nick=""``——它不是某个群友说的话，记忆整理
+        与「背景里剔掉其实是在问它的话」都靠这个区分。
+
+        写库失败只记一条 warning：这时回复已经发出去了，不能让落库失败把结果翻成
+        「没答」（否则调用方会退回自我介绍，群里就变成答一句 + 自我介绍一句）。
+        """
+        if self._store is None:
+            return
+        try:
+            await self._store.append_chat(
+                group_id, int(user_id), speaker, "user", body, kind="chat"
+            )
+            await self._store.append_chat(
+                group_id, 0, "", "assistant", reply, reasoning, kind="chat"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[llm] 群{group_id} 对话落库失败: {exc}")
 
     async def complete(
         self,

@@ -510,14 +510,211 @@ def resolve_who(
     return None, f"档案里没有叫「{raw}」的人。可以先用 QQ 号记录它。"
 
 
+# ---------------------------------------------------------------- 相关度检索
+
+#: 相关度 / 重要度 / 新鲜度三者的权重。相关度占一半是刻意的：这一层存在的意义就是
+#: 「问谁就带谁」，活跃度只能当配角，否则又会退回按活跃倒序。
+_W_RELEVANCE = 0.5
+_W_IMPORTANCE = 0.3
+_W_FRESHNESS = 0.2
+#: 重要度常量。``Person`` 里只有 ``msgs`` / ``first_seen`` / ``last_seen`` 三个元数据，
+#: 其中 ``msgs`` 是**活跃度**不是重要度——拿它当重要度等于让「话最多的人」重新赢回排序，
+#: 而这层检索就是为了摆脱这个偏差。档案 frontmatter 目前没有手工标记，所以一律 0.5。
+_IMPORTANCE = 0.5
+#: 相关度放大量：query 的 token 有一半被覆盖就算「很相关」（0.5×2.2 已封顶）。
+#: 二元组切分会产生「伦哪」这种跨词碎片，不放大一点真相关的档案得分会被稀释得太低。
+_RELEVANCE_GAIN = 2.2
+#: 姓名/别名在 query 里被完整念出时的额外加权
+_NAME_BOOST = 1.4
+#: 新鲜度半衰期（天）：一个月没说话，这一项减半
+_FRESH_HALF_LIFE = 30.0
+#: ``last_seen`` 的两种写法（``touch`` 写前者，手改的档案可能只写日期）
+_SEEN_FORMATS = ("%Y-%m-%d %H:%M", "%Y-%m-%d")
+
+#: 中文按二元组切，英文/数字整词。**刻意不引分词库**：无监督分词在群昵称、黑话、
+#: 生造词上并不可靠，二元组召回够用、零依赖、零维护。
+_CJK_RUN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+")
+_WORD_RUN = re.compile(r"[A-Za-z0-9]+")
+
+
+def tokenize(text: str) -> set[str]:
+    """中文按二元组 + 英文/数字整词。
+
+    「我昨天加班到十点」→ 我昨/昨天/天加/加班/班到/到十/十点。
+    单字成段（「猫」「妈」）保留单字本身，否则一个人的名字只有一个字时永远匹配不上；
+    纯标点、空白、空串一律得到空集合（调用方据此判断「这句话没有可检索的信息」）。
+    """
+    raw = text or ""
+    tokens: set[str] = set()
+    for run in _CJK_RUN.findall(raw):
+        if len(run) == 1:
+            tokens.add(run)
+        else:
+            tokens.update(run[i : i + 2] for i in range(len(run) - 1))
+    tokens.update(word.lower() for word in _WORD_RUN.findall(raw))
+    return tokens
+
+
+def _name_tokens(person: Person) -> set[str]:
+    """昵称/别名切出来的 token（提问里念到名字也算命中这份档案）。"""
+    out: set[str] = set()
+    for name in person.names():
+        out |= tokenize(name)
+    return out
+
+
+def _name_hit(person: Person, tokens: set[str]) -> bool:
+    """query 里是否**完整**念出了某个称呼。
+
+    要求称呼的二元组全部命中：「王小明」不会因为提问里有「小明」就算命中，
+    否则群里叫「阿强」的和叫「小阿强」的会互相偷分数。
+    """
+    for name in person.names():
+        name_tokens = tokenize(name)
+        if name_tokens and name_tokens <= tokens:
+            return True
+    return False
+
+
+def _relevance(person: Person, tokens: set[str]) -> float:
+    """相关度：query 的 token 有多少被这份档案覆盖，放大后封顶 1.0。
+
+    覆盖范围是**正文 + 称呼**：问「小明喜欢什么」时，小明的档案正文里未必写着「小明」
+    三个字，只算正文会让最该被带上的那个人拿 0 分。
+    """
+    if not tokens:
+        return 0.0
+    covered = tokens & (tokenize(person.body) | _name_tokens(person))
+    score = min(1.0, len(covered) / len(tokens) * _RELEVANCE_GAIN)
+    if _name_hit(person, tokens):
+        score = min(1.0, score * _NAME_BOOST)
+    return score
+
+
+def _freshness(person: Person, now: datetime) -> float:
+    """新鲜度 ``0.5 ** (days / 30)``：今天≈1，一个月前 0.5。
+
+    没有时间字段（或格式认不出来）给 0.5——不给 0 是为了不让缺元数据的档案被判死，
+    也不给 1 是为了不假装它很新。未来时间按 0 天算（时钟回拨时不至于炸）。
+    """
+    stamp = (person.last_seen or "").strip()
+    if not stamp:
+        return 0.5
+    seen: Optional[datetime] = None
+    for fmt in _SEEN_FORMATS:
+        try:
+            seen = datetime.strptime(stamp, fmt)
+            break
+        except ValueError:
+            continue
+    if seen is None:
+        return 0.5
+    days = (now - seen).total_seconds() / 86400.0
+    return 0.5 ** (max(0.0, days) / _FRESH_HALF_LIFE)
+
+
+def _total_score(relevance: float, freshness: float) -> float:
+    """三项加权。``pick_people`` 里相关度只算一次，所以先拆成这个函数再组装。"""
+    return (
+        relevance * _W_RELEVANCE
+        + _IMPORTANCE * _W_IMPORTANCE
+        + freshness * _W_FRESHNESS
+    )
+
+
+def score_person(person: Person, tokens: set[str], now: datetime) -> float:
+    """单个人的得分：相关度×0.5 + 重要度×0.3 + 新鲜度×0.2。
+
+    只有 :func:`pick_people` 关心排序，但把它单独拎出来是为了能被直接测：
+    「换个日期，新鲜度就该掉多少」这类断言不该通过注入块间接验证。
+    """
+    return _total_score(_relevance(person, tokens), _freshness(person, now))
+
+
+def _row_text(person: Person) -> str:
+    """注入时每个人的那一行。挑人时量字数、拼正文时写字，两处必须同一个写法。"""
+    return f"- {person.display}：{person.summary()}"
+
+
+def _pick_detail(
+    mem: MemoryConfig, group_id: int, query: str, *, top: int, min_n: int, chars: int
+) -> tuple[list[Person], bool]:
+    """按 ``query`` 挑人，返回 ``(选中的人, 是否命中)``。
+
+    **没命中就返回「按最近活跃倒序的全量列表」+ ``False``**，调用方据此走旧渲染路径
+    （旧路径的预算、顺序、标题文案一字不改）——这是「退化后不更差」的落点。
+    ``query`` 为空、没有档案、命中但一个人都装不下，也都走这条：
+
+    - 全员无关时不该把档案池缩小成空（问一句「量子力学」不等于群里没人在）；
+    - 一个人都装不下时旧路径至少还能装，凭空变差不如不变。
+    """
+    people = list_people(mem, group_id)
+    tokens = tokenize(query or "")
+    if not people or not tokens:
+        return people, False
+
+    now = datetime.now()
+    # 相关度只算一次：再交给 score_person 会重复折一遍分词，人多了纯属浪费
+    scored: list[tuple[Person, float, float]] = []
+    for person in people:
+        relevance = _relevance(person, tokens)
+        scored.append((person, _total_score(relevance, _freshness(person, now)), relevance))
+    if not any(relevance > 0 for _, _, relevance in scored):
+        return people, False
+
+    # sorted 是稳定排序：同分的人保持「最近活跃」的相对次序，退化时也不抖动
+    ranked = sorted(scored, key=lambda item: item[1], reverse=True)
+    cap_top = max(1, int(top))
+    cap_min = min(max(1, int(min_n)), cap_top)  # 补齐也不能突破 top：最多挑 top 条是硬上限
+    budget = max(1, int(chars))
+
+    picked = [person for person, _, relevance in ranked if relevance > 0][:cap_top]
+    if len(picked) < cap_min:
+        chosen = {id(person) for person in picked}
+        for person, _, _ in ranked:
+            if len(picked) >= cap_min:
+                break
+            if id(person) not in chosen:
+                picked.append(person)
+                chosen.add(id(person))
+
+    out: list[Person] = []
+    used = 0
+    for person in picked:
+        row = _row_text(person)
+        if used + len(row) > budget:
+            break
+        out.append(person)
+        used += len(row)
+    return (out, True) if out else (people, False)
+
+
+def pick_people(
+    mem: MemoryConfig, group_id: int, query: str, *, top: int, min_n: int, chars: int
+) -> list[Person]:
+    """按当前这句话挑人；``query`` 为空 / 全员无关时退化为「按最近活跃倒序」的全量列表。
+
+    - 命中：按分数取 ``top`` 条；不足 ``min_n`` 时按分数补齐（以免只挑出一个人时，
+      模型把「一个人」当成「全群」）；总长不超过 ``chars`` 字。
+    - 命中的人全部排在最前，同分时保持原有活跃次序。
+    """
+    return _pick_detail(
+        mem, group_id, query, top=top, min_n=min_n, chars=chars
+    )[0]
+
+
 # ---------------------------------------------------------------- 注入
 
 
-def render_for_prompt(mem: MemoryConfig, group_id: int) -> str:
+def render_for_prompt(mem: MemoryConfig, group_id: int, query: str = "") -> str:
     """拼出塞进系统提示词的「记忆」段落。**绝不抛异常**（记忆坏了不能耽误回话）。
 
-    预算用 ``memory.inject_chars``：按最后活跃倒序装人，装不下就停，末尾注明还剩
-    多少人没进来——模型知道「有人没看到」，就不会把人记混成「群里只有这些人」。
+    预算用 ``memory.inject_chars``：装不下的部分不装，末尾注明还剩多少人没进来——
+    模型知道「有人没看到」，就不会把人记混成「群里只有这些人」。
+
+    ``query`` 是当前这句话。给了它、且 ``memory.recall_enabled`` 打开时，装人前先按
+    相关度挑一遍（:func:`pick_people`）；**两者任一不满足，输出与改造前逐字相同**
+    （群概况、风格卡、末尾提示的行为也一律不变）。
     """
     if not mem.enabled:
         return ""
@@ -549,19 +746,40 @@ def render_for_prompt(mem: MemoryConfig, group_id: int) -> str:
             blocks.append(style_block.strip("\n"))
 
         people = list_people(mem, group_id)
+        # 检索只插在「装人」这一步：群概况与风格卡已经拼好，不参与打分也不改预算
+        picked = people
+        by_score = False
+        if (query or "").strip() and mem.recall_enabled:
+            try:
+                picked, by_score = _pick_detail(
+                    mem,
+                    group_id,
+                    query or "",
+                    top=mem.recall_top,
+                    min_n=mem.recall_min,
+                    chars=mem.recall_chars,
+                )
+            except Exception as exc:  # noqa: BLE001 — 打分坏了按活跃倒序，不能不回话
+                logger.warning(f"[memory] 相关度挑选失败（本次按最近活跃装人）: {exc}")
+                picked, by_score = people, False
+
         rows: list[str] = []
-        skipped = 0
-        for person in people:
-            row = f"- {person.display}：{person.summary()}"
+        for person in picked:
+            row = _row_text(person)
             if used + len(row) > budget:
-                skipped = len(people) - len(rows)
                 break
             rows.append(row)
             used += len(row)
 
         if rows:
-            head = f"【群成员档案】共 {len(people)} 人，以下按最近活跃排序："
+            if by_score:
+                head = f"【群成员档案】共 {len(people)} 人，以下按与这句话的相关度挑选："
+            else:
+                head = f"【群成员档案】共 {len(people)} 人，以下按最近活跃排序："
             blocks.append(head + "\n" + "\n".join(rows))
+        # 两种「没进来」都要交代：预算装不下（旧行为），或被相关度筛掉了（新行为）——
+        # 不说明的话模型会以为群里只有被挑中的这几个人
+        skipped = len(people) - len(rows) if (len(rows) < len(picked) or by_score) else 0
         if skipped:
             blocks.append(
                 f"（还有 {skipped} 人的档案没装进来，需要时用 recall 按名字或 QQ 号查）"

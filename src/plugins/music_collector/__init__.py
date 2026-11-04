@@ -726,6 +726,10 @@ async def _llm_answer(
     # 名单外的名字模型点不到（「拿不准就不 @」写死在这份小名单里）
     mention_targets = _mention_targets(event, llm_cfg, text, quote, group_id)
     mentions: list[int] = []
+    # 这一轮要落库的两行先装进 box，**发出去了才写库**（见 llm.persist_turn）。
+    # 发送失败的对话一旦落库，模型会记得自己没说过的话，后面几轮全错位，
+    # 而且没有任何日志会暴露这件事。
+    box: dict = {}
     reply, reason = await llm_bot.chat(
         group_id,
         user_id,
@@ -741,6 +745,7 @@ async def _llm_answer(
         mem=service.cfg(group_id).memory if group_id else None,
         mention_targets=mention_targets,
         mention_out=mentions,
+        body_out=box,
     )
     if not reply:
         return False, reason
@@ -773,18 +778,42 @@ async def _llm_answer(
         first += MessageSegment.at(int(qq))
         first += MessageSegment.text(" ")
     first += MessageSegment.text(" " + parts[0])
-    await safe_send_group(bot, group_id, first)
+    # 每段都要拿到回执才计数：只要有一段没发出去，这一轮就不写进记忆
+    delivered = 0
+    if await safe_send_group(bot, group_id, first) is not None:
+        delivered += 1
     for extra in parts[1:]:
         # 段间停顿：真人连发几条不会同时弹出来。解析不出区间就是 0，不会卡住
         delay = replysplit.between_delay(llm_cfg.reply_split_interval)
         if delay > 0:
             await asyncio.sleep(delay)
-        await safe_send_group(bot, group_id, Message(MessageSegment.text(extra)))
+        if await safe_send_group(
+            bot, group_id, Message(MessageSegment.text(extra))
+        ) is not None:
+            delivered += 1
+    # 全部段落都送达 → 才把这一轮写进 chat_log（内容就是 box 里那两行）
+    if delivered >= len(parts):
+        await llm_bot.persist_turn(
+            group_id,
+            user_id=int(box.get("user_id") or user_id),
+            speaker=str(box.get("speaker") or ""),
+            body=str(box.get("user_content") or ""),
+            reply=str(box.get("assistant_content") or ""),
+            reasoning=str(box.get("reasoning") or ""),
+        )
+        # 记下「它刚才说了什么」：后面群里要是有人嫌弃「AI 味」，判官得知道是哪句话
+        # 惹的。放在送达分支里——没发出去的话，群友根本看不到，无从抱怨
+        persona_mod.note_bot_spoke(group_id, reply)
+    else:
+        # 没全送到就别记：模型"以为自己说过"会让后面几轮全错位，
+        # 而群里的人看到的是它答非所问。box 里的内容直接丢弃。
+        logger.warning(
+            f"[llm] 群{group_id} 回复未送达（{delivered}/{len(parts)} 段成功）"
+            f" → 不写记忆（本轮问答已丢弃）"
+        )
     # 它刚在群里说过话 → 主动搭话的计时重新起算。否则排到的那一轮可能紧接着
     # 就自己冒泡，群里看着像抢话；而且刚说完这一两句，可接的素材也还没跟上
     banter_mod.note_reply(group_id)
-    # 记下「它刚才说了什么」：后面群里要是有人嫌弃「AI 味」，判官得知道是哪句话惹的
-    persona_mod.note_bot_spoke(group_id, reply)
     return True, ""
 
 

@@ -500,14 +500,29 @@ def split_text(text: str, limit: int = MAX_TEXT_LEN) -> list[str]:
     return chunks
 
 
-async def safe_send_group(bot: Bot, group_id: int, message: Message | str) -> bool:
+async def safe_send_group(
+    bot: Bot, group_id: int, message: Message | str
+) -> Optional[dict]:
+    """发一条群消息：成功返回 NapCat 的回执（含 ``message_id``），失败返回 ``None``。
+
+    返回类型从 ``bool`` 换成「回执 / None」是为了支持「送达回执才落库」——调用方
+    需要确认这条**真的发出去了**，才敢把这一轮问答写进记忆（发送前就写库，会让模型
+    记得自己压根没说过的话，后面几轮全错位，而且没有任何日志暴露）。
+
+    真值语义刻意保持不变：回执是 dict（真），失败是 None（假）。所以现有那些
+    ``if not safe_send_group(...)`` / 直接忽略返回值的调用点全都不受影响。
+    """
     try:
-        await bot.send_group_msg(group_id=group_id, message=message)
+        ret = await bot.send_group_msg(group_id=group_id, message=message)
     except Exception as exc:
         logger.warning(f"[music] 发送群消息失败 group={group_id}: {exc}")
-        return False
+        return None
     trace_out(message_preview(message), f"群{group_id}")
-    return True
+    # NapCat 有版本（以及部分中转实现）不回 message_id，就给一个只有 message_id 的壳：
+    # **不能**让它退化成假值，否则会被调用方当成「没发出去」。
+    if isinstance(ret, dict):
+        return ret
+    return {"message_id": ret}
 
 
 async def send_report(
