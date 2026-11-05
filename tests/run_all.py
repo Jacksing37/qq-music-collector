@@ -41,7 +41,9 @@ PREFERRED_ORDER = [
 
 
 def discover(keyword: str | None) -> list[Path]:
-    found = {p.name: p for p in TESTS_DIR.glob("*.py") if p.name != "run_all.py"}
+    # 只收 ``test_*.py``：``manual_search.py``（真联网）/ ``smoke_commands.py`` 这类
+    # 手动脚本不该进回归——真联网的那个每次跑都在赌 Bing 有没有限流，随机挂
+    found = {p.name: p for p in TESTS_DIR.glob("test_*.py")}
     ordered: list[Path] = []
     for name in PREFERRED_ORDER:
         if name in found:

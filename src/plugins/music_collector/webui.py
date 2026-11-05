@@ -619,6 +619,33 @@ FIELD_META["llm.search_tools_dir"] = (
     "相对路径按仓库根解析。目录里必须有 <code>bin/wb.mjs</code>",
     False,
 )
+FIELD_META["llm.image_lookup"] = (
+    "允许以图搜番",
+    "有人发图问「这是谁 / 出自哪部」时，给它一个 <code>lookup_anime_image</code> 工具："
+    "把图交给 trace.moe，直接拿回<b>作品名、集数、那一帧的时间点</b>。"
+    "<br>这是认出动画截图的唯一有效路径——用文字搜索写「粉发 + 圆框眼镜」是搜不出来的"
+    "（搜索引擎会拆成单个词，返回颜色表、词典）。"
+    "<br>免 API Key，免费额度约 <b>100 次/天</b>；只有当前消息带图时这个工具才出现。"
+    "只认动画正片，插画/同人图/游戏截图查不到",
+    False,
+)
+FIELD_META["llm.image_lookup_timeout"] = (
+    "以图搜番超时（秒）",
+    "下载图片 + 查询一起算。网络慢就调大；trace.moe 自己一般 3~5 秒就回",
+    False,
+)
+FIELD_META["llm.image_lookup_interval"] = (
+    "两次以图搜番的最小间隔（秒）",
+    "免费额度每天 100 次，被同一张图连问几次就白烧配额（同一张图 15 分钟内走缓存）。"
+    "0 = 不限，不推荐",
+    False,
+)
+FIELD_META["llm.image_lookup_min_similarity"] = (
+    "最低相似度",
+    "低于这个值的候选直接丢掉。给模型一串 0.3 的噪声，它反而会挑一个错的去编。"
+    "0.7 是稳妥值；0.9 更严（只认几乎确定的）",
+    False,
+)
 FIELD_META["llm.skills"] = (
     "启用技能包",
     "扫描技能目录下的 SKILL.md：模型先看「名字 + 简介」，需要时才读全文照着做。"

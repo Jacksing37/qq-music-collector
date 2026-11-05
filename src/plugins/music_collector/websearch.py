@@ -74,6 +74,10 @@ DEFAULT_NODE = "node"
 #: 再登记进来，调用方（工具层 / 配置 / 前端）一处都不用改
 ENGINES = {"wb": "_search_wb", "bing": "_search_bing"}
 
+#: ``freshness`` 的合法值：``d1``~``d30`` / ``m1``~``m12`` / ``y1``~``y5``，数字可省。
+#: 契约来自 vendored 工具（``WB_SEARCH_MONTH_RE`` 那套），只有 ``wb`` 引擎真支持
+FRESHNESS_RE = re.compile(r"^(?:d(?:[1-9]|[12]\d|30)?|m(?:[1-9]|1[0-2])?|y[1-5]?)$")
+
 #: 加在查询里会让 Bing 改写成「新闻式」查询、结果反而完全不相干的词。
 #: 实测（2026-10）：「尊界V800 刹车」能搜到刹车踏板断裂的报道，
 #: 换成「尊界V800 刹车事件」就变成「尊」字的字典释义——这种素材喂给模型，
@@ -85,6 +89,11 @@ _NOISE_WORDS = (
 
 #: 取查询里的「实词」：2 字以上的中文片段 + 英文/数字词（用来判断结果是否跑偏）
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]{2,}|[\u4e00-\u9fff]{2,}")
+
+#: 判定跑偏时给模型的**原因串**（不含建议）。建议在 :mod:`tools` 的 handler 里拼——
+#: 那里才知道这次有没有以图搜番等其他出路。原来自带「换个说法再试」，实测会让模型
+#: 连着重试十次（2026-11-05 线上，10 次调用 40 秒，全是形容词堆叠查询）
+OFF_TOPIC = "没搜到相关内容：搜索引擎返回的是无关结果"
 
 
 # ---------------------------------------------------------------- 限流
@@ -154,7 +163,13 @@ def resolve_tools_dir(explicit: str = "") -> Path:
 
 
 async def _search_wb(
-    query: str, count: int, timeout: float, *, node: str = "", tools_dir: str = ""
+    query: str,
+    count: int,
+    timeout: float,
+    *,
+    node: str = "",
+    tools_dir: str = "",
+    freshness: str = "",
 ) -> list[dict]:
     """跑 vendored 的 ``bin/wb.mjs search --json``，把 JSON 结果换成 ``[{title, url, snippet}]``。
 
@@ -163,6 +178,7 @@ async def _search_wb(
     ``tool_chars`` 的——直接用它的文本会把最后几条吃掉。
 
     ``WB_MAX_RESULTS`` 传的是「引擎侧多要几条」，由 :func:`search` 决定（本地还要清洗）。
+    ``freshness``（``d7`` / ``m6`` / ``y1``）原样交给 CLI，只有它支持时间过滤。
     """
     exe = (node or "").strip() or DEFAULT_NODE
     cli = resolve_tools_dir(tools_dir) / "bin" / "wb.mjs"
@@ -173,13 +189,12 @@ async def _search_wb(
         "WB_SEARCH_BACKEND": "bing",
         "WB_MAX_RESULTS": str(int(count)),
     }
+    argv = [exe, str(cli), "search", query, "--json"]
+    if freshness:
+        argv += ["--freshness", str(freshness)]
     try:
         proc = await asyncio.create_subprocess_exec(
-            exe,
-            str(cli),
-            "search",
-            query,
-            "--json",
+            *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
@@ -391,13 +406,17 @@ async def search(
     engine: str = "bing",
     node: str = "",
     tools_dir: str = "",
+    freshness: str = "",
 ) -> dict:
-    """搜一次。返回 ``{"query", "engine", "results", "error"}``。
+    """搜一次。返回 ``{"query", "engine", "results", "error", "reason"}``。
 
     ``engine`` 的**函数默认**是 ``bing``（纯 Python，测试和兜底用）；线上由
     ``llm.search_engine`` 传进来，缺省 ``wb``。加了新引擎记得在这儿登记两份。
 
-    ``node`` / ``tools_dir`` 只有 ``wb`` 用得到，其它引擎忽略。
+    ``node`` / ``tools_dir`` / ``freshness`` 只有 ``wb`` 用得到，其它引擎忽略。
+
+    ``reason`` 只在需要区分失败类型时给值（目前只有 ``"off_topic"``，
+    意思是「拿到了结果但跟查询无关，已丢弃」）——工具层据此给出更准的建议。
 
     **不抛异常**：超时、被反爬、Bing 改版导致解析出 0 条，全部落进 ``error``，
     由工具层翻成一句人话回给模型——工具挂了不该让整轮对话崩掉。
@@ -412,10 +431,16 @@ async def search(
     # 本地清洗会淘汰结果，所以引擎侧多要一批再截
     pool = max(want * _POOL_FACTOR, _MIN_POOL)
     name = (engine or "bing").strip().lower()
-    extra = {"node": node, "tools_dir": tools_dir} if name == "wb" else {}
+    extra = (
+        {"node": node, "tools_dir": tools_dir, "freshness": freshness}
+        if name == "wb" else {}
+    )
 
-    def pack(rows: list[dict], error: str = "") -> dict:
-        return {"query": text, "engine": name, "results": rows[:want], "error": error}
+    def pack(rows: list[dict], error: str = "", reason: str = "") -> dict:
+        return {
+            "query": text, "engine": name, "results": rows[:want],
+            "error": error, "reason": reason,
+        }
 
     if name not in ENGINES:
         return pack([], f"不支持的引擎 {name}")
@@ -439,7 +464,7 @@ async def search(
             if not again_error and not looks_off_topic(again, tokens):
                 logger.info(f"[search] 重试成功，拿到 {len(again)} 条")
                 return pack(again)
-        return pack([], "没搜到相关内容（搜索引擎返回的是无关结果），换个说法再试")
+        return pack([], OFF_TOPIC, reason="off_topic")
 
     return pack(rows)
 

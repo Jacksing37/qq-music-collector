@@ -1292,6 +1292,9 @@ class LLMBot:
                 tool_list, tool_ctx = tools_mod.build(
                     cfg, group_id, user_id, speaker, memory_cfg,
                     mention_targets=mention_targets,
+                    # 图片地址要一起传：模型看不到 URL（正文只有 [图片]），
+                    # 以图搜番这类工具只能从 ToolContext.images 拿图
+                    images=pics,
                 )
                 tool_schemas = tools_mod.schemas(tool_list)
 

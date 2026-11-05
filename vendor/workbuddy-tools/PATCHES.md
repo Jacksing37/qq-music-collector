@@ -17,10 +17,17 @@ D:\0\WorkBuddy\2026-11-05-14-09-17\workbuddy-tools
 只有 `src/plugins/music_collector/websearch.py` 的 `_search_wb` 会调：
 
 ```
-node vendor/workbuddy-tools/bin/wb.mjs search "<query>" --json
+node vendor/workbuddy-tools/bin/wb.mjs search "<query>" --json [--freshness d7]
 ```
 
 `ViewImage` 没接（项目自己的图片走 `llm.vision` + `ToolContext.images`）。
+
+**以图搜番不在这个目录里**：原件有 `scripts/trace.mjs`（trace.moe），但它要 node、
+也只能处理本地文件；项目里改成纯 Python 的
+`src/plugins/music_collector/imagelookup.py` + 工具 `lookup_anime_image`
+（拿的是 QQ 消息里的图片 URL，node 版拿不到）。契约（端点 / multipart 字段名 `image` /
+`anilistInfo` / `cutBorders` / `similarity` 判据）都是从 `trace.mjs` 对齐过来的，
+那 100 次/天的免费额度也是它印在响应体里的 `quota` / `quotaUsed`。
 
 ## 本项目补丁（3 处，其余保持原样）
 

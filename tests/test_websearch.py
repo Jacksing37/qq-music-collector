@@ -268,6 +268,9 @@ def test_off_topic() -> None:
         r = asyncio.run(ws.search("尊界V800 刹车事件", max_results=3))
         check("两次都跑偏 → 不返回无关结果", r["results"] == [], str(r["results"]))
         check("两次都跑偏 → error 说明没搜到相关内容", "没搜到相关内容" in r["error"], r["error"])
+        check("跑偏的 error 不再说「换个说法再试」（那句话会诱发连搜十次）",
+              "换个说法再试" not in r["error"], r["error"])
+        check("跑偏给机器可读的 reason", r.get("reason") == "off_topic", str(r.get("reason")))
 
         # ---- 正常查询不该多打一次请求 ----
         calls.clear()
@@ -307,7 +310,7 @@ def test_build() -> None:
 
     check("web_search 在白名单里", "web_search" in tl.ALLOWED_TOOL_NAMES,
           str(sorted(tl.ALLOWED_TOOL_NAMES)))
-    check("白名单共 10 个（新增必须显式加）", len(tl.ALLOWED_TOOL_NAMES) == 10,
+    check("白名单共 11 个（新增必须显式加）", len(tl.ALLOWED_TOOL_NAMES) == 11,
           str(len(tl.ALLOWED_TOOL_NAMES)))
 
 
@@ -477,6 +480,65 @@ def test_tool_handler() -> None:
     asyncio.run(case())
 
 
+def test_freshness_and_hints() -> None:
+    section("11. freshness 透传 + 跑偏时的引导文案")
+    captured: dict = {}
+
+    async def fake_wb(query, count, timeout, *, node="", tools_dir="", freshness=""):
+        captured.update(freshness=freshness, node=node, tools_dir=tools_dir)
+        return [{"title": "尊界V800 报价", "url": "https://a.com", "snippet": "摘要"}]
+
+    original_wb = ws._search_wb
+    try:
+        ws._search_wb = fake_wb  # type: ignore[assignment]
+        r = asyncio.run(ws.search("尊界V800 刹车", engine="wb", freshness="d7"))
+        check("freshness 透传给 wb 引擎", captured.get("freshness") == "d7", str(captured))
+        check("带 freshness 也能正常返回", len(r["results"]) == 1, str(r["results"]))
+        asyncio.run(ws.search("尊界V800 刹车", engine="wb"))
+        check("不传 freshness 时是空串（CLI 不会加 --freshness）",
+              captured.get("freshness") == "", str(captured))
+    finally:
+        ws._search_wb = original_wb  # type: ignore[assignment]
+
+    check("freshness 合法值通过", ws.FRESHNESS_RE.match("d7") is not None)
+    check("freshness 越界被拒（d31）", ws.FRESHNESS_RE.match("d31") is None)
+
+    async def case() -> None:
+        cfg = LLMConfig(web_search=True, search_engine="bing", search_interval=0)
+        tools = tl.build(cfg, mem=MemoryConfig(enabled=False))[0]
+        ctx = tl.build(cfg, mem=MemoryConfig(enabled=False))[1]
+        out = await tl.dispatch(tools, "web_search",
+                                {"query": "尊界 v800", "freshness": "d99"}, ctx)
+        check("handler 挡住非法 freshness", "freshness" in out, out)
+
+        original = ws._search_bing
+
+        async def always_off(*a, **k):
+            return [{"title": "向日葵远程控制官网", "url": "https://x.com", "snippet": "远程桌面"}]
+
+        try:
+            ws._search_bing = always_off  # type: ignore[assignment]
+            out = await tl.dispatch(tools, "web_search", {"query": "尊界V800 刹车事件"}, ctx)
+        finally:
+            ws._search_bing = original  # type: ignore[assignment]
+        check("跑偏 → 说清楚是形容词堆叠的锅", "形容词" in out, out)
+        check("跑偏 → 不再怂恿「换个说法再试」", "换个说法再试" not in out, out)
+
+        # 有图时把模型指向以图搜番
+        cfg2 = LLMConfig(web_search=True, search_engine="bing", search_interval=0,
+                         image_lookup=True)
+        tools2, ctx2 = tl.build(cfg2, mem=MemoryConfig(enabled=False),
+                                images=["https://x.com/a.jpg"])
+        try:
+            ws._search_bing = always_off  # type: ignore[assignment]
+            out = await tl.dispatch(tools2, "web_search", {"query": "尊界V800 刹车事件"}, ctx2)
+        finally:
+            ws._search_bing = original  # type: ignore[assignment]
+        check("有图时跑偏 → 指向 lookup_anime_image", "lookup_anime_image" in out, out)
+
+    asyncio.run(case())
+
+
 def main() -> None:
     test_parse()
     test_real_url()
@@ -488,6 +550,7 @@ def main() -> None:
     test_defaults()
     test_tool_handler()
     test_wb_engine()
+    test_freshness_and_hints()
     print(f"\n通过 {PASSED} 项，失败 {FAILED} 项")
     sys.exit(1 if FAILED else 0)
 

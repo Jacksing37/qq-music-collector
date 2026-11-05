@@ -36,6 +36,7 @@ from typing import Awaitable, Callable, Optional
 
 from nonebot.log import logger
 
+from . import imagelookup as imagelookup_mod
 from . import memory as memory_mod
 from . import mention as mention_mod
 from . import skills as skill_mod
@@ -50,8 +51,8 @@ DEFAULT_TOOL_CHARS = 2000
 #: **新增工具必须同时加进这里**，否则 ``build()`` 会把它丢掉——这是为了「少一个
 #: 安装类工具不小心上线」而不是为了省事。
 ALLOWED_TOOL_NAMES = frozenset(
-    {"fetch_url", "web_search", "list_skills", "use_skill", "read_skill_file",
-     "run_skill_script", "mention", "remember", "recall", "forget"}
+    {"fetch_url", "web_search", "lookup_anime_image", "list_skills", "use_skill",
+     "read_skill_file", "run_skill_script", "mention", "remember", "recall", "forget"}
 )
 
 #: 模型臆造出来的「装/写/删」类工具名。命中就回 :data:`INSTALL_DENIED`。
@@ -70,13 +71,19 @@ INSTALL_DENIED = (
 
 #: 追加到系统提示词末尾的边界说明（``llm.system_text(cfg, rules=...)`` 使用）。
 TOOL_RULES = (
-    "\n\n【能力边界】你可以搜网页（web_search）、抓网页（fetch_url）、读已安装的技能、"
+    "\n\n【能力边界】你可以搜网页（web_search）、抓网页（fetch_url）、以图搜番"
+    "（lookup_anime_image：认出动画截图出自哪部）、读已安装的技能、"
     "在管理员允许时运行技能自带脚本；也可以把群友的特征记进长期记忆"
     "（remember）、翻档案（recall）、删掉记错的内容（forget）——"
     "记忆目录是你**唯一**能写的地方，别处一律不行。"
     "碰到会过时效、或你拿不准的事实（新闻、价格、比分、谁的现任职位、软件版本、"
     "某个事件的前因后果），**先用 web_search 搜一下再答**，别凭记忆硬编；"
     "搜不到就说搜不到，不要编造搜索结果的细节。"
+    "**搜索要用实体词**（作品名、人名、官方全名）。有人发图问「这是谁 / 出自哪部」时，"
+    "先用 lookup_anime_image 拿到作品名，再用作品名去搜角色；"
+    "不要照着画面写「粉发 + 圆框眼镜 + 蓝眼睛」去 web_search——这种形容词堆叠会被拆成"
+    "单个词，返回颜色表、词典之类的无关内容。"
+    "以图搜番只认动画正片，插画/同人图/游戏截图查不到，那就直接说认不出来。"
     "要 @ 群友就调 mention（正文里写「@某某」不会被 @）。只在「这个人必须看到这条回复」时用，"
     "拿不准就别 @；引用谁的话问看法就**先调 mention 点他**（不 @ 他不知道你在说他），只是拿它当背景就别 @。"
     "技能正文里让你「读取 references/xxx.md」这类附属文件时，用 read_skill_file 按路径读，"
@@ -119,6 +126,9 @@ class ToolContext:
     #: 模型通过 mention 工具记下的要 @ 的 QQ（去重、保序、有上限）
     mentions: list[int] = field(default_factory=list)
     skills: list = field(default_factory=list)
+    #: 这次提问（含引用、含转发）里出现的图片地址。模型**看不到**这些 URL
+    #: （正文里只有 ``[图片]`` 标记），所以以图搜番这类工具只能从这儿拿图
+    images: list[str] = field(default_factory=list)
 
 
 Handler = Callable[[dict, ToolContext], Awaitable[str]]
@@ -268,6 +278,9 @@ async def _handle_web_search(args: dict, ctx: ToolContext) -> str:
     query = str(args.get("query") or "").strip()
     if len(query) < 2:
         return "错误：query 至少要两个字，说清楚你想搜什么。"
+    freshness = str(args.get("freshness") or "").strip()
+    if freshness and not websearch_mod.FRESHNESS_RE.match(freshness):
+        return "错误：freshness 只能是 d / d7 / m6 / y1 这种（dN=1~30 天，mN=1~12 月，yN=1~5 年）。"
     if not await websearch_mod.throttle(ctx.cfg.search_interval):
         return "刚刚才搜过，稍等一两秒再搜——连着搜会被搜索引擎拦。"
 
@@ -278,18 +291,38 @@ async def _handle_web_search(args: dict, ctx: ToolContext) -> str:
         engine=str(ctx.cfg.search_engine),
         node=str(ctx.cfg.search_node),
         tools_dir=str(ctx.cfg.search_tools_dir),
+        freshness=freshness,
     )
     if found["error"]:
+        if found.get("reason") == "off_topic":
+            return _off_topic_hint(query, ctx)
         # 不抛异常：搜不到也要让模型能接话（说「搜不到」比整轮崩掉强）
         return f"搜索失败：{found['error']}。不要编造搜索结果，可以告诉群友你搜不到。"
     rows = found["results"]
     if not rows:
         return (
             f"搜索「{query}」没有解析出结果。可能是搜索引擎返回了验证页，或者查询词太生僻；"
-            "换个说法再试一次，或者告诉群友你搜不到。"
+            "换个更短的实体词再试一次，或者告诉群友你搜不到。"
         )
     logger.info(f"[search] 「{query[:30]}」→ {len(rows)} 条")
     return websearch_mod.format_results(query, rows, int(ctx.cfg.search_snippet_chars))
+
+
+def _off_topic_hint(query: str, ctx: ToolContext) -> str:
+    """结果跑偏被拦下时给模型的说明。
+
+    ⚠️ **不要写「换个说法再试」**：那句话会让模型把同一类形容词查询换个排列再打十次。
+    2026-11-05 线上实测：一句「粉色长发 金丝圆框眼镜 动漫角色 蓝眼睛」连搜 10 次、40 秒，
+    每次都返回颜色表/词典/视频站。要告诉它**为什么**搜不到、**换什么**才对。
+    """
+    head = (
+        f"搜索「{query}」被搜索引擎理解成了别的意思，返回的全是无关内容，已经丢掉（不能当答案用）。"
+        "别再用「发色 + 眼镜 + 瞳色 + 场景」这类**形容词组合**重试：这种查询会被拆成单个词，"
+        "越描述越跑偏。"
+    )
+    if ctx.cfg.image_lookup and ctx.images:
+        return head + "要认「图里是谁」，直接调 lookup_anime_image（把图丢给以图搜番）。"
+    return head + "改用一个**实体词**（作品名 / 角色名 / 官方全名）再搜；凑不出实体就直接说搜不到。"
 
 
 WEB_SEARCH = Tool(
@@ -300,6 +333,9 @@ WEB_SEARCH = Tool(
         "某人现任职位、软件最新版本、某个事件是怎么回事。"
         "只想知道某个**具体网址**里写了什么，用 fetch_url，不要用这个。"
         "搜到的摘要通常够回答；要细节再用 fetch_url 打开其中一条。"
+        "**查资料要用实体词**（作品名 / 人名 / 官方全名），不要堆形容词——"
+        "「粉发 + 圆框眼镜 + 蓝眼睛」这种描述会被搜索引擎拆成单个词，返回颜色表、词典之类的无关内容。"
+        "有人发图问「这是谁」，先调 lookup_anime_image，不要用它。"
     ),
     parameters={
         "type": "object",
@@ -309,10 +345,93 @@ WEB_SEARCH = Tool(
                 "minLength": 2,
                 "description": "搜索词。像人一样写关键词，别写整段话（例如「尊界 V800 售价」）",
             },
+            "freshness": {
+                "type": "string",
+                "description": (
+                    "只要最近一段时间的内容时填：d1~d30（天）/ m1~m12（月）/ y1~y5（年），"
+                    "例如查今天的事填 d1。不填 = 不限时间"
+                ),
+            },
         },
         "required": ["query"],
     },
     handler=_handle_web_search,
+)
+
+
+# ---------------------------------------------------------------- 以图搜番
+
+
+async def _handle_image_lookup(args: dict, ctx: ToolContext) -> str:
+    """把这次消息里的图丢给 trace.moe，拿回作品名 + 集数 + 那一帧的时间点。
+
+    图**从 :attr:`ToolContext.images` 拿**：模型看不到图片 URL（正文里只有 ``[图片]``），
+    所以它没法自己拼地址。``index`` 只用来在「一次发了好几张」时指定第几张。
+    """
+    url = str(args.get("url") or "").strip()
+    if not url:
+        urls = [item for item in (ctx.images or []) if item]
+        if not urls:
+            return (
+                "这次提问里没有图片，没法以图搜番。"
+                "让群友把截图直接发出来（引用别人的图也算），我再查。"
+            )
+        try:
+            index = int(args.get("index") or 1)
+        except (TypeError, ValueError):
+            index = 1
+        if index < 1 or index > len(urls):
+            return f"这次只有 {len(urls)} 张图，index 从 1 开始。"
+        url = urls[index - 1]
+
+    if not await imagelookup_mod.throttle(ctx.cfg.image_lookup_interval):
+        return "刚刚查过一张，等几秒再查——trace.moe 免费额度每天 100 次，别连着打。"
+
+    found = await imagelookup_mod.search(
+        url,
+        timeout=float(ctx.cfg.image_lookup_timeout),
+        min_similarity=float(ctx.cfg.image_lookup_min_similarity),
+    )
+    if found["error"]:
+        return f"以图搜番失败：{found['error']}。别猜作品名，直接告诉群友查不到。"
+    if not found["best"]:
+        return (
+            "以图搜番没有匹配。trace.moe 只索引动画正片——插画、同人图、漫画分镜、"
+            "游戏截图、真人照片本来就查不到。别猜，直接说你认不出来。"
+        )
+    best = found["best"]
+    logger.info(
+        f"[image] sim={best['similarity']:.2f} 《{best['title'][:24]}》{best['episode']} {best['at']}"
+    )
+    return imagelookup_mod.format_result(found)
+
+
+LOOKUP_ANIME_IMAGE = Tool(
+    name="lookup_anime_image",
+    description=(
+        "以图搜番：把这张动画截图交给 trace.moe，返回作品名、集数、那一帧的时间点和相似度。"
+        "**有人发图问「这是谁 / 出自哪部 / 第几集」时用它**，一次就能拿到作品，"
+        "再用 web_search 查角色名。"
+        "**不要用 web_search 去认图**：照着画面写「粉发 + 圆框眼镜 + 蓝眼睛」去搜，"
+        "搜索引擎会拆成单个词，返回颜色表/词典这类无关内容（实测）。"
+        "它只认**动画正片**：插画、同人图、漫画、游戏截图、真人照片会返回「没匹配」，"
+        "那就直接说认不出来，别猜。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "index": {
+                "type": "integer",
+                "description": "一次发了好几张图时指定第几张（从 1 开始）；默认第一张",
+            },
+            "url": {
+                "type": "string",
+                "description": "已知图片的完整网址时可直接给；一般情况下不用填",
+            },
+        },
+        "required": [],
+    },
+    handler=_handle_image_lookup,
 )
 
 
@@ -660,17 +779,22 @@ def build(
     nick: str = "",
     mem: Optional[MemoryConfig] = None,
     mention_targets: Optional[list] = None,
+    images: Optional[list] = None,
 ) -> tuple[list[Tool], ToolContext]:
     """按配置组装这次请求可用的工具，以及共享上下文。
 
-    每个开关都独立：``tools`` 是总闸，``web_tool`` / ``skills`` / ``memory``
-    再各自控制，这样关掉技能不用连抓网页一起关。
+    每个开关都独立：``tools`` 是总闸，``web_tool`` / ``web_search`` / ``image_lookup``
+    / ``skills`` / ``memory`` 再各自控制，这样关掉技能不用连抓网页一起关。
 
     ``nick`` 只给 ``remember`` 用：模型记「当前这个人」时要顺手把昵称写进档案，
     否则新档案会是一个只有 QQ 号的空壳，下次认不出来。
 
     ``mem`` 不传就用默认值（``enabled=True`` + ``data/memory``）——测试和离线
     调用不必为了拿到记忆配置去构造整个 ``AppConfig``。
+
+    ``images`` 是这次提问（含引用、含转发）里的图片地址。**模型看不到 URL**，
+    所以 ``lookup_anime_image`` 只能从 :attr:`ToolContext.images` 取图；
+    没有图就不注册这个工具（省得它调了才发现没图）。
 
     返回前还会按 :data:`ALLOWED_TOOL_NAMES` 再过滤一遍——就算以后有人往这里塞了
     一个「安装技能」的工具，它也发不到 QQ 会话里。
@@ -683,6 +807,7 @@ def build(
         user_id=int(user_id),
         nick=str(nick or ""),
         mention_targets=list(mention_targets or []),
+        images=[str(url) for url in (images or []) if url],
     )
     tools: list[Tool] = []
     if not cfg.tools:
@@ -693,6 +818,9 @@ def build(
         # 搜索依赖「打开网页」的能力（摘要不够时再去 fetch_url 读细节），
         # 所以 web_tool 关掉时搜索也一起不给——否则模型搜到网址却打不开
         tools.append(WEB_SEARCH)
+    if cfg.image_lookup and ctx.images:
+        # 有图才给这个工具：没图时它只会回「这次没有图片」，白占 schema 额度
+        tools.append(LOOKUP_ANIME_IMAGE)
     if cfg.mention_enabled and ctx.mention_targets:
         tools.append(MENTION)
     if memory_cfg.enabled:

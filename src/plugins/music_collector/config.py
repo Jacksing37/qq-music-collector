@@ -590,6 +590,17 @@ class LLMConfig(BaseModel):
     #: workbuddy-tools 目录。留空 = 仓库里的 ``vendor/workbuddy-tools``；
     #: 相对路径按仓库根解析
     search_tools_dir: str = ""
+    #: 是否提供 lookup_anime_image（以图搜番）。有人发图问「这是谁 / 出自哪部」时，
+    #: 拿这张图去 trace.moe 查作品名和集数。**这是认出动画截图的唯一有效路径**——
+    #: 用文字搜索堆「发色 + 眼镜」这类形容词是认不出来的（实测返回颜色表/词典）。
+    #: 免 API key，免费额度约 100 次/天；只在当前消息带图时才注册这个工具
+    image_lookup: bool = True
+    #: 以图搜番超时秒数（下载图片 + 查询一起算）
+    image_lookup_timeout: float = Field(30.0, ge=5, le=90)
+    #: 两次以图搜番的最小间隔（秒）。免费额度 100 次/天，别连着打
+    image_lookup_interval: float = Field(3.0, ge=0, le=120)
+    #: 相似度低于这个值的候选直接丢掉——给模型一串 0.3 的噪声，它反而会挑一个错的
+    image_lookup_min_similarity: float = Field(0.7, ge=0.3, le=1.0)
     #: 是否启用技能包（扫描技能目录下的 SKILL.md）
     skills: bool = True
     #: 技能目录；留空 = data/skills；相对路径按 data/ 解析

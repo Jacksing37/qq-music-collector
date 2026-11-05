@@ -1781,6 +1781,8 @@ const BOT_GROUPS=[
          "llm.web_search","llm.search_engine","llm.search_max","llm.search_snippet_chars",
          "llm.search_timeout","llm.search_interval",
          "llm.search_node","llm.search_tools_dir",
+         "llm.image_lookup","llm.image_lookup_timeout","llm.image_lookup_interval",
+         "llm.image_lookup_min_similarity",
          "llm.skills","llm.skills_dir","llm.skill_body_chars","llm.skill_file_chars",
          "llm.skill_scripts","llm.skill_timeout"]},
   {title:"上下文与频率限制",

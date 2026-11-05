@@ -702,10 +702,11 @@ def test_install_denied() -> None:
     check("没有任何安装类工具",
           not [n for n in names if tl.looks_like_install(n)], str(names))
     # mention 是「模型自己决定 @ 谁」，但仍然只是给模型的一个工具，白名单要显式写上
-    check("白名单就是这九个工具（新增的必须显式加进来）",
+    check("白名单就是这十一个工具（新增的必须显式加进来）",
           tl.ALLOWED_TOOL_NAMES == {
-              "fetch_url", "web_search", "list_skills", "use_skill", "read_skill_file",
-              "run_skill_script", "mention", "remember", "recall", "forget",
+              "fetch_url", "web_search", "lookup_anime_image", "list_skills", "use_skill",
+              "read_skill_file", "run_skill_script", "mention", "remember", "recall",
+              "forget",
           },
           str(sorted(tl.ALLOWED_TOOL_NAMES)))
 
