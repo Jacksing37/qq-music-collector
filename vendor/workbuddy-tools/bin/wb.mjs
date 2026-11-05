@@ -93,21 +93,30 @@ async function cmdSelftest() {
   const cases = [];
   const record = (name, ok, detail) => cases.push({ name, ok, detail });
 
+  // 本项目补丁（见 ../PATCHES.md）：原版这里写死 `D:/...` 盘符，而 POSIX 上
+  // `path.isAbsolute('D:/a.jpg')` 是 false，selftest 会在第 2 个用例就抛错退出（Linux 服务器上踩到）。
+  // 改成按平台算绝对路径，Windows / Linux 都能跑。
+  const path = await import('node:path');
+  const absImg = path.resolve('a.jpg');
+  // execute() 内部会 path.resolve() 一次，这里先解析好，断言才能逐字对上（Windows 会补盘符）
+  const missingImg = path.resolve(path.join(path.sep, 'definitely', 'not', 'here.png'));
+  const badExtImg = path.resolve('a.txt');
+
   // 1) ViewImage 参数校验
   record('view: 相对路径被拒绝',
     validateView({ image_path: 'rel/a.jpg', query: 'x' })?.includes('absolute') === true,
     validateView({ image_path: 'rel/a.jpg', query: 'x' }));
   record('view: 空 query 被拒绝',
-    validateView({ image_path: 'D:/a.jpg', query: '  ' })?.includes('non-empty') === true,
-    validateView({ image_path: 'D:/a.jpg', query: '  ' }));
+    validateView({ image_path: absImg, query: '  ' })?.includes('non-empty') === true,
+    validateView({ image_path: absImg, query: '  ' }));
 
   // 2) ViewImage 错误矩阵
   const tool = new ViewImageTool({ mode: 'direct' });
-  const t1 = await tool.execute({ image_path: 'D:/definitely/not/here.png', query: 'x' }, {});
+  const t1 = await tool.execute({ image_path: missingImg, query: 'x' }, {});
   record('view: 不存在文件 -> file not found',
-    t1.error === 'Error: file not found: D:\\definitely\\not\\here.png', t1.error);
+    t1.error === `Error: file not found: ${missingImg}`, t1.error);
 
-  const t2 = await tool.execute({ image_path: 'D:/tmp/a.txt', query: 'x' }, {});
+  const t2 = await tool.execute({ image_path: badExtImg, query: 'x' }, {});
   record('view: 非法扩展名 -> unsupported format',
     t2.error?.startsWith('Error: unsupported format'), t2.error);
 
@@ -115,7 +124,6 @@ async function cmdSelftest() {
   // 造一张 1x1 PNG：omit 分支在 stat 之后，必须先存在真实文件
   const { writeFileSync, mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
-  const path = await import('node:path');
   const probeDir = mkdtempSync(path.join(tmpdir(), 'wb-selftest-'));
   const probePng = path.join(probeDir, 'probe.png');
   writeFileSync(probePng, Buffer.from(

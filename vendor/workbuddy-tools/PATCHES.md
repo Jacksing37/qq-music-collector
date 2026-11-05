@@ -22,7 +22,7 @@ node vendor/workbuddy-tools/bin/wb.mjs search "<query>" --json
 
 `ViewImage` 没接（项目自己的图片走 `llm.vision` + `ToolContext.images`）。
 
-## 本项目补丁（2 处，其余保持原样）
+## 本项目补丁（3 处，其余保持原样）
 
 ### 1. `src/constants.mjs` —— 条数可由环境变量控制
 
@@ -35,12 +35,19 @@ node vendor/workbuddy-tools/bin/wb.mjs search "<query>" --json
 进模型（5 条结果里 12 处）。这里对齐项目 `websearch.decode_entities` 的表：补
 `&ensp;` / `&emsp;` / `&hellip;` / `&mdash;` / `&ndash;` / `&#x27;` 和数字实体。
 
+### 3. `bin/wb.mjs` —— selftest 不再写死 Windows 盘符
+
+原版自检里写死 `D:/a.jpg` 这类路径，而 POSIX 上 `path.isAbsolute('D:/a.jpg')` 是
+**false**，于是 Linux 上跑 `selftest` 会在第 2 个用例直接抛
+`image_path: An absolute image path is required` 然后 `exit 1`（线上验收时踩到，
+白排查了两轮）。改成用 `path.resolve()` 现算绝对路径，两个平台都是 10/10。
+
 ## 升级上游时怎么办
 
-重新拷 `bin/` + `src/`，**再把上面两处补丁重打一遍**，然后跑：
+重新拷 `bin/` + `src/`，**再把上面三处补丁重打一遍**，然后跑：
 
 ```
-node vendor/workbuddy-tools/bin/wb.mjs selftest     # 应为 10/10 passed
+node vendor/workbuddy-tools/bin/wb.mjs selftest     # 应该 10/10 passed（Windows / Linux 都行）
 python tests/test_websearch.py                      # 第 10 段覆盖 wb 引擎
 ```
 
