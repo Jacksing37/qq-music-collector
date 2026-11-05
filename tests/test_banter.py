@@ -486,6 +486,68 @@ def test_reset_on_reply() -> None:
         (cfg.speak_proactive, cfg.speak_check_minutes) = saved
 
 
+
+def test_gate_reason(tmp: Path) -> None:
+    """概率门拦下时，返回值必须**说得出原因**。
+
+    以前统一返回 ``no_seed``，2026-11-05 线上就吃了亏：连着六轮"没发"，
+    日志里全是同一句话，分不清是没素材、太旧还是概率门拦的。这里钉住
+    「门拦下 → status 为 gate 且 reasons 记账」。
+    """
+    section("12. 概率门拦下要留下可分辨的原因")
+    store = _setup_store(tmp / "gate")
+    old_store = service.store
+    old_bot = bt.Bot
+    old_get = bt.nonebot.get_bot
+    old_chat = bt.llm_bot.chat
+    old_decide = bt.speak_mod.decide_speak
+    fake = FakeBot()
+    cfg = config_manager.config.llm
+    saved = (cfg.speak_proactive, cfg.groups, cfg.speak_quiet,
+             cfg.speak_daily_max, cfg.speak_fresh_minutes, cfg.enabled)
+
+    async def fake_chat(*a, **k):  # 不该被调用
+        raise AssertionError("概率门拦下了，不该去调模型")
+
+    def refuse(gid, kind, text="", nick="", **kw):
+        return False, 0.05
+
+    try:
+        service.store = store
+        bt.Bot = FakeBot               # type: ignore[assignment]
+        bt.nonebot.get_bot = lambda: fake  # type: ignore[assignment]
+        bt.llm_bot.chat = fake_chat    # type: ignore[assignment]
+        bt.speak_mod.decide_speak = refuse  # type: ignore[assignment]
+        bt.reset_quota()
+        bt.reset_cursor()
+
+        cfg.enabled = True
+        cfg.speak_proactive = True
+        cfg.speak_quiet = []
+        cfg.speak_daily_max = 0
+        cfg.speak_fresh_minutes = 20
+        cfg.groups = [GID]
+        asyncio.run(store.append_chat(GID, 71, "小明", "user",
+                                      "刚看完那部剧，结尾有点崩", kind="listen"))
+        res = asyncio.run(bt.run_banter())
+        check("门拦下 → status 是 gate（不再笼统叫 no_seed）",
+              res["status"] == "gate", f"{res}")
+        check("门拦下 → 一条都没发", res["sent"] == 0, f"{res}")
+        check("原因里记下了 gate 次数", res.get("why", {}).get("gate") == 1, f"{res}")
+        check("门拦下不会留下假消息", fake.sent == [], str(fake.sent))
+    finally:
+        service.store = old_store
+        bt.Bot = old_bot               # type: ignore[assignment]
+        bt.nonebot.get_bot = old_get   # type: ignore[assignment]
+        bt.llm_bot.chat = old_chat     # type: ignore[assignment]
+        bt.speak_mod.decide_speak = old_decide  # type: ignore[assignment]
+        bt.reset_schedule()
+        bt.reset_quota()
+        bt.reset_cursor()
+        (cfg.speak_proactive, cfg.groups, cfg.speak_quiet,
+         cfg.speak_daily_max, cfg.speak_fresh_minutes, cfg.enabled) = saved
+
+
 def test_defaults() -> None:
     section("10. 配置默认值（改默认值时要同步改这里）")
     cfg = LLMConfig()
@@ -556,6 +618,7 @@ def main() -> None:
     test_clip_and_format()
     test_store_recent(tmp)
     test_reset_on_reply()
+    test_gate_reason(tmp)
     test_defaults()
     test_reload_trigger()
     print(f"\n通过 {PASSED} 项，失败 {FAILED} 项")

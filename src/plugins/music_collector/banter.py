@@ -347,7 +347,9 @@ async def run_banter() -> dict:
     - ``off`` —— 总开关关着 / ``llm.enabled`` 关着；
     - ``quiet`` —— 此刻仍在勿扰时段；
     - ``no_group`` —— 没有任何可搭话的群；
-    - ``no_seed`` —— 所有群都没有可接的素材（没新消息 / 太旧 / 全是短句）；
+    - ``empty`` / ``stale`` / ``gate`` / ``short`` / ``quota`` / ``cooldown`` ——
+      一个群都没发出去时，取**最主要的原因**：没新消息 / 素材太旧 / 概率门拦下 /
+      整批不够格 / 当天配额用尽 / 刚回过话还在冷却；
     - ``ok`` —— 至少发出去一条。
 
     摘要里还带 ``skipped``（跳过的群数）：``sent`` 为 0 时看它就知道是没素材
@@ -357,7 +359,7 @@ async def run_banter() -> dict:
     if not llm_cfg.speak_proactive or not llm_cfg.enabled:
         return {"status": "off", "sent": 0}
     # 素材只来自旁听。旁听关着就没话可接——这里直接说明，免得每半小时跑一次
-    # 只在日志里留一句「no_seed」，看的人以为出了 bug
+    # 只在日志里留一句泛泛的状态，看的人以为出了 bug
     if not service.config.memory.listen:
         logger.info("[banter] 群记忆的「旁听群消息」没开，没有素材可用，本轮跳过")
         return {"status": "no_listen", "sent": 0}
@@ -391,13 +393,19 @@ async def run_banter() -> dict:
     day = _today(now)
     sent = 0
     skipped = 0
+    # 为什么没说话，分门别类记下来。以前统一返回 ``no_seed``，结果
+    # 「群里没人说话」「素材太旧」「概率门拦下」「配额用尽」在日志里长得一模一样，
+    # 排查「怎么一句都不说」时只能靠猜（2026-11-05 就是这么踩的）
+    reasons = {"quota": 0, "cooldown": 0, "empty": 0, "stale": 0, "gate": 0, "short": 0}
     fresh = max(60.0, llm_cfg.speak_fresh_minutes * 60.0)
     for gid in groups:
         if not _quota_left(gid, day, llm_cfg.speak_daily_max):
+            reasons["quota"] += 1
             skipped += 1
             continue
         # 刚在群里回过话，这一轮先不插嘴——计时已按被动回复那一刻重算过
         if waiting(gid):
+            reasons["cooldown"] += 1
             skipped += 1
             continue
 
@@ -414,6 +422,8 @@ async def run_banter() -> dict:
             logger.warning(f"[banter] 群{gid} 取最近消息失败: {exc}")
             continue
         if not rows:
+            logger.info(f"[banter] 群{gid} 上次开口之后没有新消息")
+            reasons["empty"] += 1
             skipped += 1
             continue
 
@@ -425,7 +435,11 @@ async def run_banter() -> dict:
         # 判的是**最后一条**而不是第一条：聊了半小时的对话，只要刚还在继续就值得接
         if age > fresh:
             _advance(gid, last_id)
-            logger.info(f"[banter] 群{gid} 最后一条已是 {age / 60:.0f} 分钟前，这批凉了，跳过")
+            logger.info(
+                f"[banter] 群{gid} 最后一条已是 {age / 60:.0f} 分钟前"
+                f"（阈值 {llm_cfg.speak_fresh_minutes:.0f} 分钟），这批凉了，跳过"
+            )
+            reasons["stale"] += 1
             skipped += 1
             continue
 
@@ -442,6 +456,12 @@ async def run_banter() -> dict:
             str(rows[-1].get("nick") or ""),
         )
         if not speak_ok:
+            # 拦下原本只记 DEBUG（热群里链接太多怕刷屏），但主动搭话每 30~60 分钟
+            # 才一次，必须看得见——这是「群里怎么一句都不说」最常见的原因
+            logger.info(
+                f"[banter] 群{gid} 说话时机拦下（p={_speak_p:.2f}，群正热闹或刚聊完）"
+            )
+            reasons["gate"] += 1
             skipped += 1
             continue
 
@@ -452,7 +472,9 @@ async def run_banter() -> dict:
                 idx = i
                 break
         if idx < 0:
+            logger.info(f"[banter] 群{gid} 整批都不够格（太短/纯符号/命令）")
             _advance(gid, last_id)
+            reasons["short"] += 1
             skipped += 1
             continue
 
@@ -505,8 +527,16 @@ async def run_banter() -> dict:
         else:
             skipped += 1
 
+    if sent:
+        status = "ok"
+    elif any(reasons.values()):
+        # 取最主要的原因，日志里那行「本轮没发（gate）」就直接说明问题在哪
+        status = max(reasons, key=lambda k: reasons[k])
+    else:
+        status = "ok"
     return {
-        "status": "ok" if sent else "no_seed",
+        "status": status,
         "sent": sent,
         "skipped": skipped,
+        "why": reasons,
     }
