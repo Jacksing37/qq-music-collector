@@ -287,7 +287,7 @@ def test_bot_groups_reference_only_existing_keys():
     assert not dupes, f"同一个键被放进多张卡片: {sorted(dupes)}"
 
     speak = [k for k in grouped if ".speak_" in k]
-    assert len(speak) == 23, f"speak_* 应有 23 个进了卡片，实际 {len(speak)}: {sorted(speak)}"
+    assert len(speak) == 22, f"speak_* 应有 22 个进了卡片，实际 {len(speak)}: {sorted(speak)}"
 
     # 本次新增的几组都该有专属卡片，不许再落在「其它」里
     for key in (

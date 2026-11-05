@@ -294,6 +294,13 @@ async def _speak_account(bot: Bot, event: GroupMessageEvent) -> None:
     )
     if not engaged:
         speak_mod.note_group_message(gid)
+        # 事件驱动的主动搭话：**算完账再**判一次「现在插一句合不合适」。
+        # 放后台——生成要几秒，不能拖慢这条消息的其他处理；异常在 tick 内部吞掉。
+        # 只对「群友之间在聊」的消息判定：被 @ / 点名的走各自链路，不在这里
+        # 再插一句（那就是抢话了）。
+        service._spawn_bg(
+            banter_mod.tick(bot, gid, uid, _sender_nick(event), text)
+        )
 
 
 # ----------------------------------------------------- 被 @ 时回复自我介绍

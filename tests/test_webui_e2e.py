@@ -62,9 +62,9 @@ def test_endpoints():
 
         with mock.patch.object(wui, "reload_jobs") as rj:
             p3 = client.patch("/api/music-admin/config", headers=H,
-                              json={"values": {"llm.speak_check_minutes": "90-120"}})
+                              json={"values": {"llm.speak_daily_max": 5}})
             assert p3.status_code == 200 and p3.json()["ok"] is True
-            assert rj.called, "改了 llm.speak_check_minutes 却没重排定时任务"
+            assert rj.called, "改了 llm.speak_daily_max 却没重排定时任务"
 
         # 对照：改个跟定时无关的项，不该白重建一轮任务
         with mock.patch.object(wui, "reload_jobs") as rj2:

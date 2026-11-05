@@ -42,6 +42,7 @@ from .config import (
     reset_config_value,
 )
 from . import logbuffer
+from . import banter as banter_mod
 from . import heart as heart_mod
 from . import llmtrace as llmtrace_mod
 from . import memory as memory_mod
@@ -1252,17 +1253,11 @@ def current_values(group_id: typing.Optional[int] = None) -> dict[str, object]:
 
 FIELD_META["llm.speak_proactive"] = (
     "主动搭话总开关",
-    "打开后它会在非勿扰时段里自己冒泡：每隔「检查间隔」看一次，接住群里刚才那一段。"
-    "<b>要不要开口由上面的概率模型决定</b>——群正热闹或刚聊完就不说话。"
-    "<br>素材取自「群记忆」的旁听记录，<b>旁听也要开着</b>，否则没有可接的话。"
+    "打开后它会<b>顺着群里的聊天插一句</b>：每来一条群消息都判一次「现在说合不合适」，合适就接住那句话。"
+    "要不要开口由上面的概率模型决定——群正热闹就让位，冷清时才捧场。"
+    "<br>素材取自「群记忆」的旁听记录，<b>旁听也要开着</b>，否则没有背景可用。"
+    "<br>⚠️ 还需要上面的「说话时机（概率模型）」一起开着——没有概率门就是逢话必接。"
     "<br>⚠️ 关掉＝完全不主动说话（@ / 戳一戳 / 非音乐链接照旧）。",
-    False,
-)
-FIELD_META["llm.speak_check_minutes"] = (
-    "检查间隔（分钟）",
-    "多久唤醒一次去判断该不该开口，写法 <code>30-60</code>。"
-    "<b>这是检查节奏，不是「到点必说」</b>——到点还要过概率门与勿扰。"
-    "想安静就把它拉长（如 <code>90-180</code>）",
     False,
 )
 FIELD_META["llm.speak_quiet"] = (
@@ -1273,13 +1268,12 @@ FIELD_META["llm.speak_quiet"] = (
 )
 FIELD_META["llm.speak_daily_max"] = (
     "每群每天最多几次",
-    "0 = 不限。控制「吵不吵」最直接的总量旋钮：间隔决定节奏，上限决定总量",
+    "0 = 不限。控制「吵不吵」最直接的总量旋钮",
     False,
 )
-FIELD_META["llm.speak_fresh_minutes"] = (
-    "太旧的批次不接（分钟）",
-    "批次里<b>最后一条</b>超过这么多分钟就不接了——半夜三点回一句两小时前的话比不说还怪。"
-    "判的是最后一条：聊了半小时的对话，只要刚还在继续就还值得接",
+FIELD_META["llm.speak_min_gap_minutes"] = (
+    "两次开口最少隔多久（分钟）",
+    "它主动说过一句之后，这么多分钟内不再插话；<b>被动回完话（@ / 戳 / 链接）也会重新起算</b>，免得刚答完人又自己冒泡。想更活跃就调小（如 5），想更安静调大（如 60）",
     False,
 )
 FIELD_META["llm.speak_batch_max"] = (
@@ -1308,7 +1302,7 @@ def needs_job_reload(values: dict[str, object]) -> bool:
     """这批改动里有没有影响定时任务的。
 
     注意要按**前缀**判断，不能只比对 ``llm.speak_proactive`` 这一个键——用户改的
-    通常只是 ``speak_check_minutes`` / ``speak_quiet`` 这些，「开关没动」就不重排，
+    通常只是 ``speak_daily_max`` / ``speak_quiet`` 这些，「开关没动」就不重排，
     表现成「改了间隔没反应」。
     """
     return any(str(k).startswith(_RELOAD_PREFIXES) for k in values)
@@ -2449,18 +2443,17 @@ async def _api_bot(request: Request):
             },
             # 「实际发出去的参数」预览：让「思考模式到底有没有生效」一眼可见
             "payload": payload_preview(cfg),
-            # 主动搭话：自己排自己，``next`` 是已经排好的下一次（排查「开了没动静」用）。
-            # 2026-11-05 起与「说话时机」合并，判官已删——频率由概率模型决定
+            # 主动搭话：**事件驱动**（2026-11-05），没有「下次几点」这种概念了，
+            # 改成报告「哪些群还在冷却里」——排查「怎么一直不说话」时先看这个
             "proactive": {
                 "enabled": bool(cfg.speak_proactive),
-                "minutes": cfg.speak_check_minutes,
                 "quiet": list(cfg.speak_quiet),
                 "daily_max": int(cfg.speak_daily_max),
-                "fresh_minutes": float(cfg.speak_fresh_minutes),
+                "min_gap": float(cfg.speak_min_gap_minutes),
                 "groups": list(cfg.groups),
                 "batch_max": int(cfg.speak_batch_max),
                 "batch_chars": int(cfg.speak_batch_chars),
-                "next": _fmt_when(next_run_of("banter")),
+                "cooling": _fmt_when(banter_mod.next_gate_at()),
             },
         },
     })

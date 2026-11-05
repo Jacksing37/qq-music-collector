@@ -1808,15 +1808,14 @@ const BOT_GROUPS=[
       + "<b>先开「干跑」跑一周</b>：只把概率写进运行日志、不拦任何消息，去「运行日志」搜 <code>[speak]</code> "
       + "看分布合不合理（冷群应接近上限、刷屏时接近下限），再关掉干跑真正接管。<br>"
       + "只影响<b>非音乐链接</b>和<b>主动搭话</b>两处；被 @ 与戳一戳恒放行，音乐收集链路不受影响。<br>"
-      + "下面的<b>主动搭话</b>那几项是 2026-11-05 从原来独立的一套合并过来的：调度仍按间隔唤醒，但<b>要不要开口由上面的概率决定</b>，原来的 LLM 判官已删除。",
+      + "下面的<b>主动搭话</b>那几项是 2026-11-05 从原来独立的一套合并过来的：<b>每来一条群消息都判一次</b>（不再是每半小时醒一次的定时轮询），要不要开口由上面的概率决定，原来的 LLM 判官已删除。",
    keys:["llm.speak_enabled","llm.speak_dry_run","llm.speak_p_max","llm.speak_p_min",
          "llm.speak_heat_per_message","llm.speak_heat_fast_half_life","llm.speak_heat_slow_half_life",
          "llm.speak_self_bump","llm.speak_engage_peak","llm.speak_engage_up",
          "llm.speak_engage_up_followup","llm.speak_engage_keyword","llm.speak_engage_self_damp",
          "llm.speak_engage_followup_window","llm.speak_engage_half_life","llm.speak_keywords",
-         "llm.speak_proactive","llm.speak_check_minutes","llm.speak_quiet",
-         "llm.speak_daily_max","llm.speak_fresh_minutes",
-         "llm.speak_batch_max","llm.speak_batch_chars"]},
+         "llm.speak_proactive","llm.speak_quiet","llm.speak_daily_max",
+         "llm.speak_min_gap_minutes","llm.speak_batch_max","llm.speak_batch_chars"]},
   {title:"时间感与花费",
    note:"<b>时间感</b>：白天（06:00–20:00）回复里冒出「晚安 / 今晚 / 早点睡」这类夜间用语时，按时段改写一次；"
       + "改写不出来就用词表硬替换兜底，全程不抛异常。<br>"
@@ -1903,9 +1902,10 @@ function renderBotStatus(st){
   if(pro.enabled){
     const quiet=(pro.quiet||[]).join("、")||"无";
     const cap=pro.daily_max>0?`每天最多 ${pro.daily_max} 次`:"每天不限";
-    parts.push(`主动搭话：<b>每 ${esc(pro.minutes||"30-60")} 分钟看一次</b>　勿扰：<code>${esc(quiet)}</code>　`
-      + `${esc(cap)}　下次：<b>${esc(pro.next||"待排期")}</b>`);
+    parts.push(`主动搭话：<b>跟着每条群消息判</b>　勿扰：<code>${esc(quiet)}</code>　`
+      + `${esc(cap)}　两次之间至少隔 <b>${esc(String(pro.min_gap||20))}</b> 分钟`);
     parts.push(`　一次最多看 <b>${esc(String(pro.batch_max||40))}</b> 条消息　`
+      + `冷却到：<b>${esc(pro.cooling||"无")}</b>　`
       + `<span class="muted">（开不开口由概率模型定，判官已删）</span>`);
   } else {
     parts.push(`主动搭话：<span class="muted">关（打开后没人叫它也自己冒泡）</span>`);

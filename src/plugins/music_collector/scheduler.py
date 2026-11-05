@@ -24,7 +24,6 @@ from nonebot.adapters.onebot.v11 import Bot, Message
 from nonebot.log import logger
 from nonebot_plugin_apscheduler import scheduler
 
-from . import banter as banter_mod
 from . import heart as heart_mod
 from . import persona as persona_mod
 from . import style as style_mod
@@ -346,56 +345,6 @@ async def job_persona() -> None:
         logger.warning(f"[persona] 提议失败：{res.get('why')}")
 
 
-async def job_banter() -> None:
-    """主动搭话：非勿扰时段里自己冒个泡，接住群里最近的一段对话。
-
-    和别的任务最大的不同是**它是自己排自己的**：跑完（不管成没成）都要重新
-    挑一个随机时间点，否则只会响一次。``date`` 触发器 + 自我重排，比固定
-    ``interval`` 更贴近「在 30~60 分钟之间随机取一个点」这个要求。
-    """
-    try:
-        result = await banter_mod.run_banter()
-        if result.get("sent"):
-            logger.info(
-                f"[banter] 本轮发了 {result['sent']} 条"
-                f"（跳过 {result.get('skipped', 0)} 个群）"
-            )
-        elif result.get("status") not in ("ok", "quiet"):
-            logger.info(f"[banter] 本轮没发（{result.get('status')}）")
-    except Exception as exc:  # noqa: BLE001 — 冒泡失败绝不能影响别的任务
-        logger.warning(f"[banter] 本轮异常: {exc}")
-    finally:
-        # 放 finally 里：就算上面抛了异常，节奏也不能断（断了就再也不说话了）
-        _schedule_banter_next()
-
-
-def _schedule_banter_next() -> None:
-    """排下一次主动搭话。关掉开关时什么都不做（已注册的那次会自己跑空）。"""
-    cfg = service.config.llm
-    if not cfg.speak_proactive:
-        return
-    try:
-        now = datetime.now(service.resolver.tz)
-        when = banter_mod.next_run_at(cfg, now)
-        # 某个群刚被 @ 过、计时重算过：就排到它解禁那一刻，别提前空跑一轮
-        # （提前跑也只会因为冷却被跳过，日志里白白多一句「跳过」）
-        gate = banter_mod.next_gate_at(now)
-        if gate is not None and gate > when:
-            when = gate
-        scheduler.add_job(
-            job_banter, "date", run_date=when,
-            id=JOB_PREFIX + "banter", replace_existing=True, misfire_grace_time=300,
-        )
-        logger.info(f"[banter] 下次主动搭话 {when:%m-%d %H:%M}")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"[banter] 排下一次失败（本轮节奏中断）: {exc}")
-
-
-def reschedule_banter() -> None:
-    """把主动搭话的计时重新排一次（被动回复完之后调，见 ``banter.note_reply``）。"""
-    _schedule_banter_next()
-
-
 _JOB_FUNCS = {
     "start": job_start,
     "summary": job_summary,
@@ -408,7 +357,6 @@ _JOB_FUNCS = {
     "style": job_style,
     "heart": job_heart,
     "persona": job_persona,
-    "banter": job_banter,
 }
 
 
@@ -521,20 +469,6 @@ def _persona_spec() -> Optional[tuple[str, str, dict]]:
     return ("persona", "interval", {"hours": float(pcfg.propose_hours)})
 
 
-def _banter_spec() -> Optional[tuple[str, str, dict]]:
-    """主动搭话：只排**第一次**，之后由任务自己在每次跑完时重排。
-
-    用 ``date`` 而不是 ``interval``：APScheduler 的 interval 是等距的，做不出
-    「每次都在 30~60 分钟里重新抽一个数」；顺带 ``next_runs()`` 里也能直接看到
-    下一次的具体时刻，排查「怎么没动静」时很有用。
-    """
-    cfg = service.config.llm
-    if not cfg.speak_proactive or not cfg.enabled:
-        return None
-    when = banter_mod.next_run_at(cfg, datetime.now(service.resolver.tz))
-    return ("banter", "date", {"run_date": when})
-
-
 def _register(name: str, trigger: str, kwargs: dict, group_id: Optional[int] = None):
     """注册一个任务；``group_id`` 非空时任务只处理该群。"""
     func = _JOB_FUNCS[name]
@@ -561,7 +495,7 @@ def reload_jobs() -> tuple[bool, str]:
 
     for extra in (
         _clean_spec(), _prune_spec(), _descfix_spec(), _memory_spec(),
-        _style_spec(), _heart_spec(), _persona_spec(), _banter_spec(),
+        _style_spec(), _heart_spec(), _persona_spec(),
     ):
         if extra is not None:
             specs.append(extra)

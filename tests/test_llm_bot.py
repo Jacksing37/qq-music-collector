@@ -1219,7 +1219,7 @@ async def test_reply_resets_banter() -> None:
     from music_collector import banter as bt
 
     cfg = config_manager.config.llm
-    saved = (cfg.speak_proactive, cfg.speak_check_minutes, cfg.at_sender)
+    saved = (cfg.speak_proactive, cfg.speak_min_gap_minutes, cfg.at_sender)
     old_chat = mc.llm_bot.chat
     bt.reset_schedule()
 
@@ -1228,7 +1228,7 @@ async def test_reply_resets_banter() -> None:
 
     try:
         cfg.speak_proactive = True
-        cfg.speak_check_minutes = "30-60"
+        cfg.speak_min_gap_minutes = 20
         cfg.at_sender = False
         mc.llm_bot.chat = fake_chat  # type: ignore[assignment]
 
@@ -1245,7 +1245,7 @@ async def test_reply_resets_banter() -> None:
     finally:
         mc.llm_bot.chat = old_chat
         bt.reset_schedule()
-        (cfg.speak_proactive, cfg.speak_check_minutes, cfg.at_sender) = saved
+        (cfg.speak_proactive, cfg.speak_min_gap_minutes, cfg.at_sender) = saved
 
 
 async def test_trace_has_background() -> None:
