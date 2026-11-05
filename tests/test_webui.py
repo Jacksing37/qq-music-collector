@@ -301,6 +301,59 @@ def test_bot_groups_reference_only_existing_keys():
         assert key in grouped, f"{key} 没有归到任何分组卡片"
 
 
+
+def test_bot_card_fields_have_chinese_labels():
+    """机器人页每张卡片里的字段都必须有**中文**标题和说明。
+
+    页面上出现英文键名有两类原因，这条断言两样都抓：
+
+    1. 忘了写 ``FIELD_META``；
+    2. 写了，但写在 ``SCHEMA = build_schema()`` **之后**——字典里有、schema 里没有，
+       页面照样显示 ``Speak Proactive``。（2026-11-05 就这么翻过车：六条主动搭话的
+       元数据加在构建之后，本地查 FIELD_META 全都「有」，线上页面全是英文。）
+    """
+    import re
+
+    src = F.__file__
+    body = Path(src).read_text(encoding="utf-8")
+    seg = body[body.index("const BOT_GROUPS=["): body.index("BOT_GROUPS.forEach")]
+    keys = re.findall(r'"((?:llm|memory|persona)\.[a-z_0-9]+)"', seg)
+
+    fields = {f["key"]: f for s in W.SCHEMA for f in s["fields"]}
+    bad = []
+    for k in keys:
+        f = fields.get(k)
+        if not f:
+            bad.append((k, "不在 SCHEMA 里"))
+            continue
+        label = str(f.get("label") or "")
+        hint = str(f.get("hint") or "")
+        # 兜底文案就是 key.replace("_"," ").title()（见 webui._field_desc）：
+        # 命中它说明 FIELD_META 没生效。这样既能抓「忘写 / 写晚了」，
+        # 又不会误伤 API Key 这种有意保留英文的专名
+        auto = str(f.get("name") or "").replace("_", " ").title()
+        if label == auto:
+            bad.append((k, f"标题还是自动兜底名：{label!r}"))
+        elif not hint.strip():
+            bad.append((k, "没有说明"))
+
+    assert not bad, f"这些设置项在网页上是英文或没说明：{bad}"
+    assert len(keys) >= 50, f"卡片字段数异常（{len(keys)}），是不是把 BOT_GROUPS 改坏了"
+
+
+def test_field_meta_declared_before_schema():
+    """所有 ``FIELD_META[...]`` 必须写在 ``SCHEMA = build_schema()`` 之前。"""
+    from pathlib import Path as _P
+
+    body = _P(W.__file__).read_text(encoding="utf-8")
+    build_at = body.index("SCHEMA = build_schema()")
+    late = [
+        line.strip()[:60]
+        for line in body[build_at:].splitlines()
+        if line.lstrip().startswith("FIELD_META[")
+    ]
+    assert not late, f"这些 FIELD_META 写在 schema 构建之后，页面不会生效：{late}"
+
 if __name__ == "__main__":
     import tempfile
 
@@ -320,4 +373,6 @@ if __name__ == "__main__":
     test_apply_updates_rollback_save_failure_no_500(_tmp)
     test_netease_section_and_secret_fields()
     test_bot_groups_reference_only_existing_keys()
+    test_bot_card_fields_have_chinese_labels()
+    test_field_meta_declared_before_schema()
     print("webui tests OK")
