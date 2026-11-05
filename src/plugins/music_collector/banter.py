@@ -457,10 +457,10 @@ async def run_banter() -> dict:
         )
         if not speak_ok:
             # 拦下原本只记 DEBUG（热群里链接太多怕刷屏），但主动搭话每 30~60 分钟
-            # 才一次，必须看得见——这是「群里怎么一句都不说」最常见的原因
-            logger.info(
-                f"[banter] 群{gid} 说话时机拦下（p={_speak_p:.2f}，群正热闹或刚聊完）"
-            )
+            # 才一次，必须看得见——这是「群里怎么一句都不说」最常见的原因。
+            # ⚠️ 只报 p，别解释成「群正热闹」：p 高（如 0.7）恰恰说明群很冷、
+            # 只是这次掷骰没过。上一次就是被这句误导的。
+            logger.info(f"[banter] 群{gid} 说话时机掷骰未过（p={_speak_p:.2f}）")
             reasons["gate"] += 1
             skipped += 1
             continue
