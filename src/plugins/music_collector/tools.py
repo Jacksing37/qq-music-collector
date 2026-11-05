@@ -79,6 +79,10 @@ TOOL_RULES = (
     "碰到会过时效、或你拿不准的事实（新闻、价格、比分、谁的现任职位、软件版本、"
     "某个事件的前因后果），**先用 web_search 搜一下再答**，别凭记忆硬编；"
     "搜不到就说搜不到，不要编造搜索结果的细节。"
+    "**搜索结果不保证相关，要你自己判断**：标题/摘要明显跟问题无关（搜「某车 刹车」却返回"
+    "「某」字的字典释义、搜角色名却返回颜色表）就换实体词重搜或直接说搜不到；"
+    "**关键数字、日期、结论必须用 fetch_url 打开原网页核对后再答**——摘要常常不全、过时，"
+    "甚至整批都是无关页。要实时数值（天气、股价、比分）也直接 fetch_url 打开官网，摘要里没有。"
     "**搜索要用实体词**（作品名、人名、官方全名）。有人发图问「这是谁 / 出自哪部」时，"
     "先用 lookup_anime_image 拿到作品名，再用作品名去搜角色；"
     "不要照着画面写「粉发 + 圆框眼镜 + 蓝眼睛」去 web_search——这种形容词堆叠会被拆成"
@@ -294,8 +298,6 @@ async def _handle_web_search(args: dict, ctx: ToolContext) -> str:
         freshness=freshness,
     )
     if found["error"]:
-        if found.get("reason") == "off_topic":
-            return _off_topic_hint(query, ctx)
         # 不抛异常：搜不到也要让模型能接话（说「搜不到」比整轮崩掉强）
         return f"搜索失败：{found['error']}。不要编造搜索结果，可以告诉群友你搜不到。"
     rows = found["results"]
@@ -306,23 +308,6 @@ async def _handle_web_search(args: dict, ctx: ToolContext) -> str:
         )
     logger.info(f"[search] 「{query[:30]}」→ {len(rows)} 条")
     return websearch_mod.format_results(query, rows, int(ctx.cfg.search_snippet_chars))
-
-
-def _off_topic_hint(query: str, ctx: ToolContext) -> str:
-    """结果跑偏被拦下时给模型的说明。
-
-    ⚠️ **不要写「换个说法再试」**：那句话会让模型把同一类形容词查询换个排列再打十次。
-    2026-11-05 线上实测：一句「粉色长发 金丝圆框眼镜 动漫角色 蓝眼睛」连搜 10 次、40 秒，
-    每次都返回颜色表/词典/视频站。要告诉它**为什么**搜不到、**换什么**才对。
-    """
-    head = (
-        f"搜索「{query}」被搜索引擎理解成了别的意思，返回的全是无关内容，已经丢掉（不能当答案用）。"
-        "别再用「发色 + 眼镜 + 瞳色 + 场景」这类**形容词组合**重试：这种查询会被拆成单个词，"
-        "越描述越跑偏。"
-    )
-    if ctx.cfg.image_lookup and ctx.images:
-        return head + "要认「图里是谁」，直接调 lookup_anime_image（把图丢给以图搜番）。"
-    return head + "改用一个**实体词**（作品名 / 角色名 / 官方全名）再搜；凑不出实体就直接说搜不到。"
 
 
 WEB_SEARCH = Tool(
@@ -336,6 +321,8 @@ WEB_SEARCH = Tool(
         "**查资料要用实体词**（作品名 / 人名 / 官方全名），不要堆形容词——"
         "「粉发 + 圆框眼镜 + 蓝眼睛」这种描述会被搜索引擎拆成单个词，返回颜色表、词典之类的无关内容。"
         "有人发图问「这是谁」，先调 lookup_anime_image，不要用它。"
+        "**结果要你自己核对**：先看标题/摘要跟问题对不对得上，对不上就换实体词重搜、或直接说搜不到；"
+        "关键数字 / 日期 / 结论必须用 fetch_url 打开原网页确认后再回答——摘要经常不全、过时，甚至整批无关。"
     ),
     parameters={
         "type": "object",

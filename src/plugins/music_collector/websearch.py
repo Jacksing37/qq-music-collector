@@ -6,8 +6,12 @@
   见那边的 ``PATCHES.md``。它自己带本地 Bing provider，**不需要任何凭据**；
 - ``bing``：以前那套纯 Python 的 Bing HTML 抓取，留着以便这台机器没有 node 时兜底。
 
-两个引擎共用同一条流水线：限流 → 抓 → **跑偏检测（跑偏就简化查询重试一次，还不对
-就说没搜到）** → 一行一条格式化。护栏都在这里，不在 node 那边。
+两个引擎共用同一条流水线：限流 → 抓 → 一行一条格式化。**相关性判断交给模型**——
+这里只负责「把搜索结果原样拿回来」，不猜哪条有用、也不替模型拦结果。理由：本地没有
+查询改写能力，靠「标题里有没有查询词」这种机械规则判相关性误杀率极高（实测 2026-11-05：
+38 次搜索里 29 次被旧规则判跑偏，其中「350234 是什么编号」返回的三条全对却被整批丢弃）。
+改成由提示词要求模型自己核对：结果照给，模型负责判断相关性、必要时用 ``fetch_url``
+打开原网页验证。
 
 最早的来源是 ``standalone-websearch/websearch.mjs``（WorkBuddy CLI 的 WebSearch 契约还原版），
 只保留 Bing HTML 端点——DuckDuckGo 的 ``html.duckduckgo.com`` 国内连不通（原项目实测超时），
@@ -77,23 +81,6 @@ ENGINES = {"wb": "_search_wb", "bing": "_search_bing"}
 #: ``freshness`` 的合法值：``d1``~``d30`` / ``m1``~``m12`` / ``y1``~``y5``，数字可省。
 #: 契约来自 vendored 工具（``WB_SEARCH_MONTH_RE`` 那套），只有 ``wb`` 引擎真支持
 FRESHNESS_RE = re.compile(r"^(?:d(?:[1-9]|[12]\d|30)?|m(?:[1-9]|1[0-2])?|y[1-5]?)$")
-
-#: 加在查询里会让 Bing 改写成「新闻式」查询、结果反而完全不相干的词。
-#: 实测（2026-10）：「尊界V800 刹车」能搜到刹车踏板断裂的报道，
-#: 换成「尊界V800 刹车事件」就变成「尊」字的字典释义——这种素材喂给模型，
-#: 它会一本正经地拿字典条目回答汽车事故。所以宁可重试或说没搜到。
-_NOISE_WORDS = (
-    "事件", "怎么回事", "什么情况", "怎么样了", "发生了什么",
-    "新闻", "最新消息", "最新进展", "后续",
-)
-
-#: 取查询里的「实词」：2 字以上的中文片段 + 英文/数字词（用来判断结果是否跑偏）
-_TOKEN_RE = re.compile(r"[A-Za-z0-9]{2,}|[\u4e00-\u9fff]{2,}")
-
-#: 判定跑偏时给模型的**原因串**（不含建议）。建议在 :mod:`tools` 的 handler 里拼——
-#: 那里才知道这次有没有以图搜番等其他出路。原来自带「换个说法再试」，实测会让模型
-#: 连着重试十次（2026-11-05 线上，10 次调用 40 秒，全是形容词堆叠查询）
-OFF_TOPIC = "没搜到相关内容：搜索引擎返回的是无关结果"
 
 
 # ---------------------------------------------------------------- 限流
@@ -273,47 +260,6 @@ def _usable(url: str) -> bool:
     return parts.scheme in ("http", "https") and bool(parts.hostname)
 
 
-# ---------------------------------------------------------------- 跑偏检测
-
-def query_tokens(query: str) -> list[str]:
-    """从查询里取实词（2 字以上，纯数字不算）。
-
-    用来判断「结果跟查询有没有关系」。纯数字排除掉是因为 ``17`` 这种太容易
-    在别的数字里撞上，反而会把跑偏的结果当成相关的。
-    """
-    tokens = []
-    for token in _TOKEN_RE.findall(query or ""):
-        stripped = token.strip()
-        if stripped.isdigit():
-            continue
-        if stripped not in tokens:
-            tokens.append(stripped)
-    return tokens
-
-
-def looks_off_topic(rows: list[dict], tokens: list[str]) -> bool:
-    """结果的标题/摘要里**一条都没提到**查询里的实词 → 判定跑偏。
-
-    宁可判它跑偏（多说一句「没搜到」），也不要把字典释义、同名商品这类
-    无关内容交给模型——它没法分辨，只会照着编。
-    """
-    if not rows or not tokens:
-        return False
-    blob = " ".join(
-        f"{row.get('title') or ''} {row.get('snippet') or ''}" for row in rows
-    ).lower()
-    return not any(token.lower() in blob for token in tokens)
-
-
-def simplify_query(query: str) -> str:
-    """去掉 :data:`_NOISE_WORDS` 再试。没得可去就返回空串（表示「不用重试」）。"""
-    out = query or ""
-    for word in _NOISE_WORDS:
-        out = out.replace(word, " ")
-    out = " ".join(out.split()).strip(" 的了呢吗啊，,、")
-    return out if out and out != (query or "").strip() else ""
-
-
 def _real_url(href: str) -> str:
     """Bing 有时把结果包成 ``bing.com/ck/a?…&u=a1<base64url>``，这里解出真实地址。
 
@@ -373,8 +319,7 @@ async def _fetch(
 ) -> tuple[list[dict], str]:
     """抓一次，把各种失败翻成一句中文原因。返回 ``(结果, 错误原因)``。
 
-    抽出来是因为「跑偏重试」还要再抓一次，而异常处理不该抄两遍。
-    ``extra`` 是引擎私有参数（``wb`` 要 node 路径和工具目录），原样透传。
+    ``extra`` 是引擎私有参数（``wb`` 要 node 路径、工具目录和 freshness），原样透传。
     """
     func = globals().get(ENGINES.get(name, ""), None)
     if not callable(func):
@@ -408,27 +353,23 @@ async def search(
     tools_dir: str = "",
     freshness: str = "",
 ) -> dict:
-    """搜一次。返回 ``{"query", "engine", "results", "error", "reason"}``。
+    """搜一次。返回 ``{"query", "engine", "results", "error"}``。
 
     ``engine`` 的**函数默认**是 ``bing``（纯 Python，测试和兜底用）；线上由
     ``llm.search_engine`` 传进来，缺省 ``wb``。加了新引擎记得在这儿登记两份。
 
     ``node`` / ``tools_dir`` / ``freshness`` 只有 ``wb`` 用得到，其它引擎忽略。
 
-    ``reason`` 只在需要区分失败类型时给值（目前只有 ``"off_topic"``，
-    意思是「拿到了结果但跟查询无关，已丢弃」）——工具层据此给出更准的建议。
-
     **不抛异常**：超时、被反爬、Bing 改版导致解析出 0 条，全部落进 ``error``，
     由工具层翻成一句人话回给模型——工具挂了不该让整轮对话崩掉。
 
-    **跑偏也算失败**：搜索引擎偶尔会把查询改写成别的意思（例如加个「事件」就跑去
-    查「尊」字的字典释义，Bing 机房 IP 还会莫名吐一批无关页）。这时先去掉
-    :data:`_NOISE_WORDS` 重试一次，还不对就返回空——「没搜到」比「给你一堆无关
-    内容」安全得多。
+    **不做相关性过滤**：引擎返回什么就交什么（清洗掉 ``javascript:`` 这类坏链接而已）。
+    「这条结果跟问题有没有关系」由模型判断，配合 ``format_results`` 末尾的提醒
+    和 ``fetch_url`` 核对。本地判相关性的机械规则误杀率太高（实测 76%），已删除。
     """
     text = (query or "").strip()
     want = max(1, min(MAX_RESULTS, int(max_results or DEFAULT_RESULTS)))
-    # 本地清洗会淘汰结果，所以引擎侧多要一批再截
+    # 引擎侧多要一批：本地还要剔掉没标题/坏链接的行
     pool = max(want * _POOL_FACTOR, _MIN_POOL)
     name = (engine or "bing").strip().lower()
     extra = (
@@ -436,11 +377,8 @@ async def search(
         if name == "wb" else {}
     )
 
-    def pack(rows: list[dict], error: str = "", reason: str = "") -> dict:
-        return {
-            "query": text, "engine": name, "results": rows[:want],
-            "error": error, "reason": reason,
-        }
+    def pack(rows: list[dict], error: str = "") -> dict:
+        return {"query": text, "engine": name, "results": rows[:want], "error": error}
 
     if name not in ENGINES:
         return pack([], f"不支持的引擎 {name}")
@@ -452,20 +390,7 @@ async def search(
         logger.info(f"[search] 解析出 0 条: {text[:40]}（搜索引擎可能返回了验证页或改版了）")
         return pack([])
 
-    tokens = query_tokens(text)
-    if looks_off_topic(rows, tokens):
-        simple = simplify_query(text)
-        logger.info(
-            f"[search] 「{text[:30]}」结果跑偏（首条是「{(rows[0].get('title') or '')[:24]}」）"
-            + (f"→ 去掉口语词改用「{simple[:30]}」重试" if simple else "，且没有可简化的写法")
-        )
-        if simple:
-            again, again_error = await _fetch(name, simple, pool, timeout, extra)
-            if not again_error and not looks_off_topic(again, tokens):
-                logger.info(f"[search] 重试成功，拿到 {len(again)} 条")
-                return pack(again)
-        return pack([], OFF_TOPIC, reason="off_topic")
-
+    logger.info(f"[search] 「{text[:30]}」→ {len(rows[:want])} 条")
     return pack(rows)
 
 
@@ -489,7 +414,12 @@ def format_results(query: str, rows: list[dict], snippet_chars: int = 200) -> st
         if snippet:
             head += f" — {snippet}"
         lines.append(f"{head}（{row.get('url') or ''}）")
-    lines.append("要看某条的具体内容，用 fetch_url 打开它的网址。")
+    lines.append(
+        "这些是搜索引擎原样给的结果，**相关性你自己判断**：标题/摘要明显跟问题无关"
+        "（例如搜「某车 刹车」返回「某」字的字典释义、搜角色名返回颜色表），就不要当答案用——"
+        "换更具体的实体词（作品名/人名/官方全名）重搜，或直接说搜不到。"
+        "摘要也可能不全或过时：关键数字、日期、结论用 fetch_url 打开那条网址核对后再答。"
+    )
     return "\n".join(lines)
 
 

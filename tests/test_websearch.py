@@ -210,79 +210,33 @@ def test_throttle() -> None:
     asyncio.run(case())
 
 
-def test_off_topic() -> None:
-    section("6. 跑偏检测（Bing 改写查询时会把无关结果当答案）")
-
-    check("取实词：中文片段 + 英文数字",
-          ws.query_tokens("尊界V800 刹车事件") == ["尊界", "V800", "刹车事件"],
-          str(ws.query_tokens("尊界V800 刹车事件")))
-    check("纯数字不算实词（7 会在 2026 里误命中）",
-          ws.query_tokens("2026 价格") == ["价格"], str(ws.query_tokens("2026 价格")))
-    check("重复的实词只留一次",
-          ws.query_tokens("尊界 尊界") == ["尊界"], str(ws.query_tokens("尊界 尊界")))
-
-    right = [{"title": "尊界V800刹车踏板断裂事件", "url": "https://a.com", "snippet": "懂车帝测评"}]
-    wrong = [{"title": "尊（汉语文字）_百度百科", "url": "https://b.com", "snippet": "尊的本义指盛酒的器具"}]
-    tokens = ws.query_tokens("尊界V800 刹车事件")
-    check("结果提到实词 → 不算跑偏", ws.looks_off_topic(right, tokens) is False)
-    check("结果只有「尊」字 → 判定跑偏", ws.looks_off_topic(wrong, tokens) is True)
-    check("空结果不判跑偏（那是另一条路径）", ws.looks_off_topic([], tokens) is False)
-    check("没有实词时也不判（例如查纯数字）",
-          ws.looks_off_topic(wrong, ws.query_tokens("2026")) is False)
-
-    check("简化：去掉「事件」",
-          ws.simplify_query("尊界V800 刹车事件") == "尊界V800 刹车",
-          ws.simplify_query("尊界V800 刹车事件"))
-    check("简化：去掉「怎么回事」",
-          ws.simplify_query("尊界V800 刹车怎么回事") == "尊界V800 刹车",
-          ws.simplify_query("尊界V800 刹车怎么回事"))
-    check("没有可去的词 → 返回空串（表示不用重试）",
-          ws.simplify_query("尊界V800 售价") == "", ws.simplify_query("尊界V800 售价"))
-
-    # ---- 端到端：跑偏 → 简化后重试 ----
+def test_no_relevance_filter() -> None:
+    section("6. 不做相关性过滤（结果原样交给模型自己判断）")
+    wrong = [
+        {"title": "尊（汉语文字）_百度百科", "url": "https://b.com", "snippet": "尊的本义指盛酒的器具"}
+    ]
     calls: list[str] = []
 
-    async def bing(query, count, timeout):
+    async def always_wrong(query, count, timeout):
         calls.append(query)
-        if "事件" in query:
-            return list(wrong)
-        return list(right)
+        return list(wrong)
 
     original = ws._search_bing
     try:
-        ws._search_bing = bing  # type: ignore[assignment]
+        ws._search_bing = always_wrong  # type: ignore[assignment]
         r = asyncio.run(ws.search("尊界V800 刹车事件", max_results=3))
-        check("跑偏后重试拿到了正确结果", len(r["results"]) == 1 and "尊界" in r["results"][0]["title"],
-              str(r))
-        check("真的重试了一次（两次请求）", len(calls) == 2, str(calls))
-        check("重试用的是简化后的查询", calls[1] == "尊界V800 刹车", str(calls))
+        check("结果跟查询无关也照样返回（不再整批丢弃）", len(r["results"]) == 1,
+              str(r["results"]))
+        check("不再有 error", r["error"] == "", r["error"])
+        check("只请求一次（旧版会简化查询再试一次）", len(calls) == 1, str(calls))
+        check("跑偏检测那套 API 已经删掉",
+              not hasattr(ws, "looks_off_topic") and not hasattr(ws, "simplify_query")
+              and not hasattr(ws, "query_tokens"))
 
-        # ---- 端到端：重试也跑偏 → 宁可说没搜到 ----
-        calls.clear()
-
-        async def always_off(query, count, timeout):
-            calls.append(query)
-            return list(wrong)
-
-        ws._search_bing = always_off  # type: ignore[assignment]
-        r = asyncio.run(ws.search("尊界V800 刹车事件", max_results=3))
-        check("两次都跑偏 → 不返回无关结果", r["results"] == [], str(r["results"]))
-        check("两次都跑偏 → error 说明没搜到相关内容", "没搜到相关内容" in r["error"], r["error"])
-        check("跑偏的 error 不再说「换个说法再试」（那句话会诱发连搜十次）",
-              "换个说法再试" not in r["error"], r["error"])
-        check("跑偏给机器可读的 reason", r.get("reason") == "off_topic", str(r.get("reason")))
-
-        # ---- 正常查询不该多打一次请求 ----
-        calls.clear()
-
-        async def ok(query, count, timeout):
-            calls.append(query)
-            return list(right)
-
-        ws._search_bing = ok  # type: ignore[assignment]
-        r = asyncio.run(ws.search("尊界V800 刹车", max_results=3))
-        check("结果正确时只请求一次", len(calls) == 1, str(calls))
-        check("结果原样返回", len(r["results"]) == 1, str(len(r["results"])))
+        text = ws.format_results("尊界V800 刹车事件", r["results"], 200)
+        check("结果末尾交给模型自己判断相关性", "相关性你自己判断" in text, text[-240:])
+        check("结果末尾要求用 fetch_url 核对", "fetch_url" in text and "核对" in text,
+              text[-240:])
     finally:
         ws._search_bing = original  # type: ignore[assignment]
 
@@ -415,12 +369,12 @@ def test_wb_engine() -> None:
     detail = asyncio.run(raw_error())
     check("超时 → 抛 WbError 说「搜索超时」而不是崩掉", "搜索超时" in detail, detail)
 
-    # ---- 10.4 护栏在 wb 路径上同样生效 ----
+    # ---- 10.4 wb 路径也不做相关性过滤 ----
     os.environ["FAKE_MODE"] = "off"
     r = asyncio.run(ws.search("尊界V800 刹车事件", engine="wb", node=sys.executable,
                               tools_dir=str(fake)))
-    check("wb 返回无关结果 → 照样判跑偏、不交给模型",
-          r["results"] == [] and "没搜到相关内容" in r["error"], f"{r['results']} / {r['error']}")
+    check("wb 返回无关结果 → 照样交给模型（不再拦）",
+          len(r["results"]) == 1 and r["error"] == "", f"{r['results']} / {r['error']}")
     os.environ.pop("FAKE_MODE", None)
 
 
@@ -481,7 +435,7 @@ def test_tool_handler() -> None:
 
 
 def test_freshness_and_hints() -> None:
-    section("11. freshness 透传 + 跑偏时的引导文案")
+    section("11. freshness 透传 + 结果原样交付")
     captured: dict = {}
 
     async def fake_wb(query, count, timeout, *, node="", tools_dir="", freshness=""):
@@ -511,32 +465,27 @@ def test_freshness_and_hints() -> None:
                                 {"query": "尊界 v800", "freshness": "d99"}, ctx)
         check("handler 挡住非法 freshness", "freshness" in out, out)
 
+        # 无关结果也照给模型，且随结果附上「自己判断 + fetch_url 核对」的提醒
         original = ws._search_bing
 
-        async def always_off(*a, **k):
+        async def unrelated(*a, **k):
             return [{"title": "向日葵远程控制官网", "url": "https://x.com", "snippet": "远程桌面"}]
 
         try:
-            ws._search_bing = always_off  # type: ignore[assignment]
+            ws._search_bing = unrelated  # type: ignore[assignment]
             out = await tl.dispatch(tools, "web_search", {"query": "尊界V800 刹车事件"}, ctx)
         finally:
             ws._search_bing = original  # type: ignore[assignment]
-        check("跑偏 → 说清楚是形容词堆叠的锅", "形容词" in out, out)
-        check("跑偏 → 不再怂恿「换个说法再试」", "换个说法再试" not in out, out)
-
-        # 有图时把模型指向以图搜番
-        cfg2 = LLMConfig(web_search=True, search_engine="bing", search_interval=0,
-                         image_lookup=True)
-        tools2, ctx2 = tl.build(cfg2, mem=MemoryConfig(enabled=False),
-                                images=["https://x.com/a.jpg"])
-        try:
-            ws._search_bing = always_off  # type: ignore[assignment]
-            out = await tl.dispatch(tools2, "web_search", {"query": "尊界V800 刹车事件"}, ctx2)
-        finally:
-            ws._search_bing = original  # type: ignore[assignment]
-        check("有图时跑偏 → 指向 lookup_anime_image", "lookup_anime_image" in out, out)
+        check("无关结果也交给模型（不再拦）", "向日葵" in out, out)
+        check("附上「相关性你自己判断」", "相关性你自己判断" in out, out)
+        check("附上「用 fetch_url 核对」", "fetch_url" in out and "核对" in out, out)
 
     asyncio.run(case())
+
+    rules = tl.TOOL_RULES
+    check("提示词要求关键信息用 fetch_url 核对", "fetch_url" in rules and "核对" in rules)
+    check("提示词要求模型自己判断相关性", "要你自己判断" in rules, rules[-400:])
+    check("提示词警告形容词堆叠", "实体词" in rules, rules[-400:])
 
 
 def main() -> None:
@@ -545,7 +494,7 @@ def main() -> None:
     test_format()
     test_search_errors()
     test_throttle()
-    test_off_topic()
+    test_no_relevance_filter()
     test_build()
     test_defaults()
     test_tool_handler()
