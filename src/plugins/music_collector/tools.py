@@ -377,18 +377,18 @@ async def _handle_image_lookup(args: dict, ctx: ToolContext) -> str:
     found = await imagelookup_mod.search(
         url,
         timeout=float(ctx.cfg.image_lookup_timeout),
-        min_similarity=float(ctx.cfg.image_lookup_min_similarity),
     )
     if found["error"]:
         return f"以图搜番失败：{found['error']}。别猜作品名，直接告诉群友查不到。"
     if not found["best"]:
         return (
-            "以图搜番没有匹配。trace.moe 只索引动画正片——插画、同人图、漫画分镜、"
+            "以图搜番没有任何结果。trace.moe 只索引动画正片——插画、同人图、漫画分镜、"
             "游戏截图、真人照片本来就查不到。别猜，直接说你认不出来。"
         )
     best = found["best"]
     logger.info(
-        f"[image] sim={best['similarity']:.2f} 《{best['title'][:24]}》{best['episode']} {best['at']}"
+        f"[image] {len(found['results'])} 条，首条 sim={best['similarity']:.2f} "
+        f"《{best['title'][:24]}》{best['episode']} {best['at']}"
     )
     return imagelookup_mod.format_result(found)
 
@@ -396,12 +396,13 @@ async def _handle_image_lookup(args: dict, ctx: ToolContext) -> str:
 LOOKUP_ANIME_IMAGE = Tool(
     name="lookup_anime_image",
     description=(
-        "以图搜番：把这张动画截图交给 trace.moe，返回作品名、集数、那一帧的时间点和相似度。"
-        "**有人发图问「这是谁 / 出自哪部 / 第几集」时用它**，一次就能拿到作品，"
-        "再用 web_search 查角色名。"
+        "以图搜番：把这张动画截图交给 trace.moe，返回若干候选（作品名、集数、那一帧的时间点、"
+        "相似度分档）。**有人发图问「这是谁 / 出自哪部 / 第几集」时用它**。"
+        "结果按相似度排序但**不过滤**：哪条对得上画面由你判断——对照发色、瞳色、制服、场景、"
+        "字幕，别只看第一条。截图被裁过或带字幕时相似度会偏低（0.6 上下也可能是对的）。"
         "**不要用 web_search 去认图**：照着画面写「粉发 + 圆框眼镜 + 蓝眼睛」去搜，"
         "搜索引擎会拆成单个词，返回颜色表/词典这类无关内容（实测）。"
-        "它只认**动画正片**：插画、同人图、漫画、游戏截图、真人照片会返回「没匹配」，"
+        "它只认**动画正片**：插画、同人图、漫画、游戏截图、真人照片会一条都不返回，"
         "那就直接说认不出来，别猜。"
     ),
     parameters={

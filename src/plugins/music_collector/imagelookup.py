@@ -47,8 +47,13 @@ _HEADERS = {
     )
 }
 
-#: 相似度分档（只用于把话说清楚，不参与过滤）
-_TIERS = ((0.90, "基本就是这部"), (0.80, "很可能是"), (0.0, "只能当线索"))
+#: 相似度分档。**只用来把话说清楚，不做过滤**——哪条对得上画面由模型判断
+_TIERS = (
+    (0.90, "基本就是这部"),
+    (0.80, "很可能是"),
+    (0.50, "只能当线索"),
+    (0.0, "基本不相关"),
+)
 
 
 # ---------------------------------------------------------------- 限流与缓存
@@ -205,17 +210,16 @@ async def search(
     url: str,
     *,
     timeout: float = 30.0,
-    min_similarity: float = 0.45,
 ) -> dict:
     """拿一张图的地址去 trace.moe 查。返回 ``{"url", "error", "quota", "used", "results", "best"}``。
 
     **不抛异常**：下载失败、额度用完、trace.moe 报错，全落进 ``error``，
     由工具层翻成一句人话——工具挂了不该让整轮对话崩掉。
 
-    ``min_similarity`` 以下算噪声，会被剔掉；**但剔完一条不剩时仍保留最高那条**：
-    宽幅裁切 + 带字幕的正片截图相似度本来就低（实测同一张 1280×940 截图是 0.638，
-    而 trace.moe 自己切的关键帧是 0.99），一刀砍掉等于把正确答案丢掉。
-    低分怎么用交给 :func:`format_result` 的分档文案 + 模型自己判断。
+    **不做相似度阈值过滤**：trace.moe 给几条就交几条（按相似度排序、最多 5 条），
+    每条带分档词。哪条对得上画面由模型判断——本地设阈值只会重演「正确答案被砍」：
+    同一张 1280×940 的裁切截图 trace.moe 只给 0.638，而它自己切的关键帧是 0.99，
+    一刀切 0.7 就把对的结果丢了（2026-11-06 线上事故）。
     """
     text = (url or "").strip()
     try:
@@ -266,62 +270,47 @@ async def search(
         if isinstance(item, dict)
     ]
     rows.sort(key=lambda row: -row["similarity"])
-    kept = [row for row in rows if row["similarity"] >= float(min_similarity)]
-    if not kept and rows:
-        # 全都低于阈值：仍把最高那条给出去。宽幅裁切/带字幕的正片截图相似度天然偏低
-        # （同一张 1280×940 截图是 0.638），一刀砍光等于把正确答案丢掉。
-        # 分档文案会写明「只能当线索」，用不用由模型判断。
-        kept = rows[:1]
-        logger.info(
-            f"[image] 全部低于阈值 {min_similarity}（最高 {rows[0]['similarity']:.2f}），"
-            "仍交出最高那条当线索"
-        )
-    found = _pack(text, quota=quota, used=used, rows=kept[:5])
+    # 不过滤：几条就交几条（最多 5 条），每条带分档词，由模型判断哪条对得上画面
+    found = _pack(text, quota=quota, used=used, rows=rows[:5])
     _cache_put(text, found)
     logger.info(
         f"[image] 以图搜番 {len(found['results'])} 条"
         + (f"，首条 {found['best']['title'][:24]} sim={found['best']['similarity']:.2f}"
-           if found["best"] else "（都低于阈值）")
+           if found["best"] else "（trace.moe 没给结果）")
     )
     return found
 
 
 def format_result(found: dict) -> str:
-    """拼成给模型看的一段。**带判据和下一步**，不然它只会照抄第一个标题。"""
+    """拼成给模型看的一段。**列全部候选 + 每条分档 + 判据**，判断权交给模型。"""
     best = found.get("best")
     if not best:
         return (
-            "以图搜番没有匹配结果。trace.moe 只索引动画正片——插画、同人图、漫画分镜、"
+            "以图搜番没有任何结果。trace.moe 只索引动画正片——插画、同人图、漫画分镜、"
             "游戏截图、真人照片本来就查不到。别猜作品名，直接告诉群友你认不出来。"
         )
-    head = (
-        f"以图搜番（trace.moe）最可能：《{best['title']}》"
-        f"{('，' + str(best['year'])) if best.get('year') else ''}"
-        f"{('，' + best['format']) if best.get('format') else ''}"
-        f"，{best['episode']} {best['at']}（从 {best['at']} 到 {best['to']}），"
-        f"相似度 {best['similarity']:.2f}（{tier_of(best['similarity'])}）。"
-    )
-    lines = [head]
-    others = [row for row in found.get("results", [])[1:] if row["title"] != best["title"]]
-    if others:
-        lines.append("其它候选：")
-        for index, row in enumerate(others[:3], 2):
-            lines.append(
-                f"{index}. 《{row['title']}》{row['episode']} {row['at']}"
-                f"（相似度 {row['similarity']:.2f}）"
-            )
-    lines.append(
-        "判据：相似度 ≥0.90 基本就是这部；0.80~0.90 很可能是；更低只能当线索，"
-        "要跟群友说清楚是猜的。"
-    )
-    if best["similarity"] < 0.80:
-        lines.append(
-            "相似度偏低常见于「截图被裁过 / 带字幕」——同一张图 trace.moe 自己切的关键帧能到 0.99。"
-            "所以：作品名跟画面特征（发色、瞳色、制服、场景）对得上就按它去查角色；对不上就当没查到。"
+    lines = [
+        f"以图搜番（trace.moe）共 {len(found['results'])} 条候选，按相似度排序。"
+        "**哪条对得上画面由你判断**（对照发色/瞳色/制服/场景/字幕），不要只看第一条。"
+    ]
+    for index, row in enumerate(found["results"], 1):
+        head = (
+            f"{index}. 《{row['title']}》"
+            f"{('，' + str(row['year'])) if row.get('year') else ''}"
+            f"{('，' + row['format']) if row.get('format') else ''}"
+            f"，{row['episode']} {row['at']}（{row['at']}–{row['to']}）"
+            f"，相似度 {row['similarity']:.2f}（{tier_of(row['similarity'])}）"
         )
+        lines.append(head)
     lines.append(
-        "下一步：拿这个**作品名**去 web_search 查角色（例如「<作品名> 登场角色」），"
-        "别再用「发色 + 眼镜 + 瞳色」这类形容词组合去搜——那种查询搜索引擎会拆成单个词，"
+        "判据：≥0.90 基本就是这部；0.80~0.90 很可能是；0.50~0.80 只能当线索"
+        "（截图被裁过或带字幕会让分数偏低，同一张图 trace.moe 自己切的关键帧能到 0.99）；"
+        "<0.50 基本不相关。"
+    )
+    lines.append("没有一条对得上画面时：直接说认不出来，别硬挑一个。")
+    lines.append(
+        "下一步：选定作品后，拿**作品名**去 web_search 查角色（例如「<作品名> 登场角色」），"
+        "别再用「发色 + 眼镜 + 瞳色」这类形容词组合去搜——那种查询会被拆成单个词，"
         "返回的通常是颜色表、词典之类无关内容。"
     )
     if found.get("quota") is not None:

@@ -641,14 +641,6 @@ FIELD_META["llm.image_lookup_interval"] = (
     "0 = 不限，不推荐",
     False,
 )
-FIELD_META["llm.image_lookup_min_similarity"] = (
-    "最低相似度",
-    "低于这个值的候选当噪声剔掉（**一条不剩时仍保留最高那条当线索**）。"
-    "别设太高：截图被裁过或带字幕时相似度天然偏低（同一张图实测 0.64，"
-    "而 trace.moe 自己切的关键帧是 0.99），设 0.7 会把正确答案直接砍掉。"
-    "0.45 是稳妥值",
-    False,
-)
 FIELD_META["llm.skills"] = (
     "启用技能包",
     "扫描技能目录下的 SKILL.md：模型先看「名字 + 简介」，需要时才读全文照着做。"

@@ -154,11 +154,11 @@ def test_parse() -> None:
     il.reset()
     stub = _Stub().install()
     try:
-        found = asyncio.run(il.search(IMG, min_similarity=0.5))
+        found = asyncio.run(il.search(IMG))
     finally:
         stub.restore()
 
-    check("阈值 0.5 → 保留 2 条（0.42 的噪声被丢）", len(found["results"]) == 2,
+    check("三条全给（含 0.42 的低分候选，不过滤）", len(found["results"]) == 3,
           str([r["similarity"] for r in found["results"]]))
     best = found["best"] or {}
     check("首条按相似度排序", best.get("similarity") == 0.938, str(best.get("similarity")))
@@ -176,8 +176,8 @@ def test_parse() -> None:
     check("分档：0.64 → 只能当线索", il.tier_of(0.64) == "只能当线索")
 
 
-def test_threshold() -> None:
-    section("3. 阈值：剔噪声，但**别把正确答案一起砍掉**")
+def test_no_threshold() -> None:
+    section("3. 不做阈值过滤：几条就给几条，判断权交给模型")
     # 线上真实情形：截图被裁过 + 带字幕，trace.moe 只给 0.638（关键帧是 0.99）
     low = {
         "quota": 92, "quotaUsed": 8,
@@ -195,16 +195,19 @@ def test_threshold() -> None:
     il.reset()
     stub = _Stub(resp=_Resp(payload=low)).install()
     try:
-        found = asyncio.run(il.search(IMG, min_similarity=0.7))
+        found = asyncio.run(il.search(IMG))
         text = il.format_result(found)
     finally:
         stub.restore()
-    check("全都低于阈值 → 仍保留最高那条（上线前就是这么丢的正确答案）",
-          len(found["results"]) == 1, str(found["results"]))
-    check("保留的正是最高分那条", found["best"]["similarity"] == 0.638,
+    check("低分候选一条都不删（0.638 和 0.42 都在）", len(found["results"]) == 2,
+          str([r["similarity"] for r in found["results"]]))
+    check("仍按相似度排序", found["best"]["similarity"] == 0.638,
           str(found["best"]["similarity"]))
-    check("文案写明只能当线索", "只能当线索" in text, text[:220])
-    check("文案解释低分原因（裁切/字幕）", "裁过" in text or "字幕" in text, text[:500])
+    check("文案把判断权交给模型", "由你判断" in text and "不要只看第一条" in text, text[:200])
+    check("每条候选都带分档词（0.64 线索 / 0.42 基本不相关）",
+          "（只能当线索）" in text and "（基本不相关）" in text, text[:600])
+    check("文案解释低分原因（裁切/字幕）", "裁过" in text or "字幕" in text, text)
+    check("文案允许「都不可信就说认不出来」", "认不出来" in text, text[-400:])
 
     # trace.moe 一条都没给：才是真的「认不出来」
     il.reset()
@@ -215,7 +218,7 @@ def test_threshold() -> None:
     finally:
         stub.restore()
     check("trace.moe 没有结果 → 0 条", found["results"] == [], str(found["results"]))
-    check("这时才说「认不出来」", "没有匹配" in text and "认不出来" in text, text)
+    check("这时才说「认不出来」", "没有任何结果" in text and "认不出来" in text, text)
 
 
 def test_failures() -> None:
@@ -283,7 +286,7 @@ def test_format() -> None:
     il.reset()
     stub = _Stub().install()
     try:
-        text = il.format_result(asyncio.run(il.search(IMG, min_similarity=0.5)))
+        text = il.format_result(asyncio.run(il.search(IMG)))
     finally:
         stub.restore()
     check("有作品名", "春の陽だまり" in text, text[:120])
@@ -372,19 +375,18 @@ def test_defaults() -> None:
     check("默认超时 30 秒", cfg.image_lookup_timeout == 30.0, str(cfg.image_lookup_timeout))
     check("默认间隔 3 秒（护额度）", cfg.image_lookup_interval == 3.0,
           str(cfg.image_lookup_interval))
-    check("默认最低相似度 0.45（别设太高，会把裁切过的截图砍掉）",
-          cfg.image_lookup_min_similarity == 0.45, str(cfg.image_lookup_min_similarity))
+    check("没有「最低相似度」这个开关（判断权在模型）",
+          not hasattr(cfg, "image_lookup_min_similarity"))
 
     example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
-    for key in ("image_lookup", "image_lookup_timeout", "image_lookup_interval",
-                "image_lookup_min_similarity"):
+    for key in ("image_lookup", "image_lookup_timeout", "image_lookup_interval"):
         check(f"示例配置里有 {key}", key in example)
 
 
 def main() -> None:
     test_params()
     test_parse()
-    test_threshold()
+    test_no_threshold()
     test_failures()
     test_cache()
     test_format()
