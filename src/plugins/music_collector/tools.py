@@ -6,7 +6,8 @@
 当前内置五类：
 
 - ``fetch_url``：抓网页正文（后端在 :mod:`webtool`，抽取用 trafilatura）；
-- ``web_search``：搜网页拿摘要（后端在 :mod:`websearch`，走 Bing HTML 端点，默认关）；
+- ``web_search``：搜网页拿摘要（后端在 :mod:`websearch`，默认跑仓库里 vendored
+  的 ``vendor/workbuddy-tools``，可切回纯 Python 的 Bing 抓取，默认关）；
 - ``list_skills`` / ``use_skill`` / ``read_skill_file``：技能清单、正文、附属文件
   （渐进披露，见 :mod:`skills`）；
 - ``run_skill_script``：执行技能自带脚本（需显式开启，且只能跑技能目录内的白名单脚本）；
@@ -274,6 +275,9 @@ async def _handle_web_search(args: dict, ctx: ToolContext) -> str:
         query,
         max_results=int(ctx.cfg.search_max),
         timeout=float(ctx.cfg.search_timeout),
+        engine=str(ctx.cfg.search_engine),
+        node=str(ctx.cfg.search_node),
+        tools_dir=str(ctx.cfg.search_tools_dir),
     )
     if found["error"]:
         # 不抛异常：搜不到也要让模型能接话（说「搜不到」比整轮崩掉强）

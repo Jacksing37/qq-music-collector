@@ -573,9 +573,17 @@ FIELD_META["llm.web_search"] = (
     "允许模型搜网页",
     "给它一个 web_search 工具：问的是新闻、价格、比分、谁的现任职位、软件最新版本这类"
     "会过时效的东西时，它会先搜再答，而不是凭记忆编。"
-    "<br>走 Bing 的公开页面，不需要 API Key，但<b>搜得太密会被要求验证码</b>——"
+    "<br>抓的是 Bing 的公开结果页，**不需要 API Key**，但搜得太密会被要求验证码——"
     "先用两天看看日志里有没有「搜索失败」，再决定要不要一直开着。"
     "<br>只有「抓网页」也开着时这个工具才会出现（搜到网址却打不开没意义）",
+    False,
+)
+FIELD_META["llm.search_engine"] = (
+    "搜索后端",
+    "<b>wb</b>：跑仓库里自带的 <code>vendor/workbuddy-tools</code>（需要服务器上有 node，"
+    "版本 ≥ 18），摘要更规整，抓取逻辑独立于本项目。"
+    "<br><b>bing</b>：以前那套纯 Python 的抓取，不依赖 node，node 装不上或出问题时切回它。"
+    "<br>两个后端共用同一套护栏（最小间隔、跑偏检测、一行一条输出），换后端不影响配置项",
     False,
 )
 FIELD_META["llm.search_max"] = (
@@ -597,6 +605,18 @@ FIELD_META["llm.search_interval"] = (
     "两次搜索的最小间隔（秒）",
     "防止被搜索引擎要求验证码：一次回复里模型可能连着搜好几次，间隔太小就会被拦。"
     "0 = 不限，不推荐",
+    False,
+)
+FIELD_META["llm.search_node"] = (
+    "node 路径",
+    "只在搜索后端选 <b>wb</b> 时用。留空 = 用 PATH 里的 <code>node</code>；"
+    "装不上或者想固定版本，就填绝对路径（本机调试可以用 WorkBuddy 自带的那个 node.exe）",
+    False,
+)
+FIELD_META["llm.search_tools_dir"] = (
+    "搜索工具目录",
+    "只在搜索后端选 <b>wb</b> 时用。留空 = 仓库里的 <code>vendor/workbuddy-tools</code>；"
+    "相对路径按仓库根解析。目录里必须有 <code>bin/wb.mjs</code>",
     False,
 )
 FIELD_META["llm.skills"] = (

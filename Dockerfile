@@ -11,8 +11,11 @@ ENV PYTHONUNBUFFERED=1 \
 
 # fonts-noto-cjk：长图里的中文，不装会渲染成方块
 # tzdata：容器默认 UTC，不设时区所有定时任务会差 8 小时
+# nodejs：web_search 的默认后端 wb 要跑 vendor/workbuddy-tools（bookworm 自带 18.x，
+#         满足 ≥18 的要求）；不想装也可以把 llm.search_engine 改成 bing
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends fonts-noto-cjk tzdata ca-certificates \
+    && apt-get install -y --no-install-recommends \
+       fonts-noto-cjk tzdata ca-certificates nodejs \
     && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
     && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
@@ -26,6 +29,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY bot.py config.example.yaml ./
 COPY src ./src
 COPY scripts ./scripts
+COPY vendor ./vendor
 
 # data/ 由 volume 挂载，这里只保证目录存在
 RUN mkdir -p data/cache

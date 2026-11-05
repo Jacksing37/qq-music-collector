@@ -195,10 +195,10 @@ git pull && docker compose up -d --build
 ```bash
 # Debian/Ubuntu:
 sudo apt update
-sudo apt install -y python3 python3-venv python3-pip git curl fonts-noto-cjk
+sudo apt install -y python3 python3-venv python3-pip git curl fonts-noto-cjk nodejs
 
 # RHEL / CentOS / Rocky / Alma（dnf 系）:
-sudo dnf install -y python3 python3-pip git curl google-noto-sans-cjk-ttc-fonts
+sudo dnf install -y python3 python3-pip git curl google-noto-sans-cjk-ttc-fonts nodejs
 # 备选：sudo dnf install -y wqy-zenhei
 
 cd /opt/qq-music-collector
@@ -206,6 +206,11 @@ cd /opt/qq-music-collector
 
 中文字体（`fonts-noto-cjk` / `google-noto-sans-cjk-ttc-fonts` / `wqy-zenhei` 任一即可）是为了
 长图里的中文不变方块。`render.py` 会自动扫描系统字体目录兜底，实在找不到再配 `render.font_path`。
+
+`nodejs`（**要 ≥18**）只有 `web_search` 的默认后端 `wb` 用得到——它跑仓库里自带的
+`vendor/workbuddy-tools`。Debian 12 / Ubuntu 22.04 自带的就够；装不上或版本太老时，
+把 `llm.search_engine` 改成 `bing`，搜索会退回纯 Python 的实现，别的功能不受影响。
+`node -v` 能出数字就行，不用 `npm install`（那套工具零依赖）。
 
 ## 2. 配置
 

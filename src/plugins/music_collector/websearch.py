@@ -1,6 +1,15 @@
 """``web_search`` 工具的后端：搜一次，返回几条「标题 + 摘要 + 网址」。
 
-移植自 ``standalone-websearch/websearch.mjs``（WorkBuddy CLI 的 WebSearch 契约还原版），
+两个引擎，由 ``llm.search_engine`` 选：
+
+- ``wb``（默认）：跑仓库里 vendored 的 ``vendor/workbuddy-tools``（node CLI），
+  见那边的 ``PATCHES.md``。它自己带本地 Bing provider，**不需要任何凭据**；
+- ``bing``：以前那套纯 Python 的 Bing HTML 抓取，留着以便这台机器没有 node 时兜底。
+
+两个引擎共用同一条流水线：限流 → 抓 → **跑偏检测（跑偏就简化查询重试一次，还不对
+就说没搜到）** → 一行一条格式化。护栏都在这里，不在 node 那边。
+
+最早的来源是 ``standalone-websearch/websearch.mjs``（WorkBuddy CLI 的 WebSearch 契约还原版），
 只保留 Bing HTML 端点——DuckDuckGo 的 ``html.duckduckgo.com`` 国内连不通（原项目实测超时），
 留着只是多一条永远走不到的分支。
 
@@ -20,7 +29,10 @@
 
 import asyncio
 import base64
+import json
+import os
 import re
+from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlsplit
 
@@ -51,9 +63,16 @@ _HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6",
 }
 
+#: ``vendor/workbuddy-tools`` 的相对位置（相对仓库根）
+_WB_HOME = Path("vendor") / "workbuddy-tools"
+#: 仓库根：``src/plugins/music_collector/websearch.py`` 往上四级
+_ROOT = Path(__file__).resolve().parents[3]
+#: ``wb`` 引擎用的 node 可执行文件（留空 = PATH 里的 ``node``）
+DEFAULT_NODE = "node"
+
 #: 引擎分发表。加新引擎只要写一个 ``async def _search_xxx(query, count, timeout)``
 #: 再登记进来，调用方（工具层 / 配置 / 前端）一处都不用改
-ENGINES = {"bing": "_search_bing"}
+ENGINES = {"wb": "_search_wb", "bing": "_search_bing"}
 
 #: 加在查询里会让 Bing 改写成「新闻式」查询、结果反而完全不相干的词。
 #: 实测（2026-10）：「尊界V800 刹车」能搜到刹车踏板断裂的报道，
@@ -115,6 +134,89 @@ async def _search_bing(query: str, count: int, timeout: float) -> list[dict]:
         resp.raise_for_status()
         html = resp.text
     return _parse_bing(html)
+
+
+class WbError(Exception):
+    """``wb`` 引擎自己报的错：node 不在、工具目录不对、CLI 退出码非 0、输出不是 JSON。
+
+    单独一个类型是为了让 :func:`_fetch` 把中文原因原样交给模型，
+    不被兜底成「搜索请求失败：...」。
+    """
+
+
+def resolve_tools_dir(explicit: str = "") -> Path:
+    """``vendor/workbuddy-tools`` 在哪。留空用仓库里那份；相对路径按仓库根解析。"""
+    text = (explicit or "").strip()
+    if not text:
+        return _ROOT / _WB_HOME
+    path = Path(text)
+    return path if path.is_absolute() else _ROOT / path
+
+
+async def _search_wb(
+    query: str, count: int, timeout: float, *, node: str = "", tools_dir: str = ""
+) -> list[dict]:
+    """跑 vendored 的 ``bin/wb.mjs search --json``，把 JSON 结果换成 ``[{title, url, snippet}]``。
+
+    **只要 JSON、不要它的文本**：那边是 markdown（URL 写两遍、每条另起 ``**URL:**``），
+    5 条就 1500 字，比项目一行一条多一半，而 ``tools.dispatch()`` 是从尾部截
+    ``tool_chars`` 的——直接用它的文本会把最后几条吃掉。
+
+    ``WB_MAX_RESULTS`` 传的是「引擎侧多要几条」，由 :func:`search` 决定（本地还要清洗）。
+    """
+    exe = (node or "").strip() or DEFAULT_NODE
+    cli = resolve_tools_dir(tools_dir) / "bin" / "wb.mjs"
+    if not cli.is_file():
+        raise WbError(f"找不到搜索工具（{cli}），检查 llm.search_tools_dir")
+    env = {
+        **os.environ,
+        "WB_SEARCH_BACKEND": "bing",
+        "WB_MAX_RESULTS": str(int(count)),
+    }
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            exe,
+            str(cli),
+            "search",
+            query,
+            "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+    except FileNotFoundError:
+        raise WbError(
+            f"找不到 node（{exe}）：装一个，或把 llm.search_node 指到现成的，或切回 bing 引擎"
+        )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=float(timeout))
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise WbError(f"搜索超时（{timeout:g} 秒）")
+
+    if proc.returncode != 0:
+        reason = err.decode("utf-8", "replace").strip().splitlines()
+        raise WbError(reason[-1] if reason else f"搜索工具退出码 {proc.returncode}")
+    text = out.decode("utf-8", "replace").strip()
+    if not text:
+        raise WbError("搜索工具没有输出")
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        raise WbError("搜索工具输出的不是 JSON")
+
+    rows = (payload.get("rawResponse") or {}).get("results") or []
+    found: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title") or "")
+        url = str(row.get("url") or "")
+        if not title or not _usable(url):
+            continue
+        found.append({"title": title, "url": url, "snippet": str(row.get("snippet") or "")})
+    return found
 
 
 # ---------------------------------------------------------------- 解析
@@ -251,16 +353,22 @@ def decode_entities(text: str) -> str:
 
 # ---------------------------------------------------------------- 对外
 
-async def _fetch(name: str, query: str, count: int, timeout: float) -> tuple[list[dict], str]:
+async def _fetch(
+    name: str, query: str, count: int, timeout: float, extra: Optional[dict] = None
+) -> tuple[list[dict], str]:
     """抓一次，把各种失败翻成一句中文原因。返回 ``(结果, 错误原因)``。
 
     抽出来是因为「跑偏重试」还要再抓一次，而异常处理不该抄两遍。
+    ``extra`` 是引擎私有参数（``wb`` 要 node 路径和工具目录），原样透传。
     """
     func = globals().get(ENGINES.get(name, ""), None)
     if not callable(func):
         return [], f"不支持的引擎 {name}"
     try:
-        return await func(query, count, timeout), ""
+        return await func(query, count, timeout, **(extra or {})), ""
+    except WbError as exc:
+        logger.warning(f"[search] wb 引擎失败: {exc}（{query[:40]}）")
+        return [], str(exc)
     except httpx.TimeoutException:
         logger.debug(f"[search] 超时（{timeout:g}s）: {query[:40]}")
         return [], f"搜索超时（{timeout:g} 秒）"
@@ -281,21 +389,30 @@ async def search(
     max_results: int = DEFAULT_RESULTS,
     timeout: float = 20.0,
     engine: str = "bing",
+    node: str = "",
+    tools_dir: str = "",
 ) -> dict:
     """搜一次。返回 ``{"query", "engine", "results", "error"}``。
+
+    ``engine`` 的**函数默认**是 ``bing``（纯 Python，测试和兜底用）；线上由
+    ``llm.search_engine`` 传进来，缺省 ``wb``。加了新引擎记得在这儿登记两份。
+
+    ``node`` / ``tools_dir`` 只有 ``wb`` 用得到，其它引擎忽略。
 
     **不抛异常**：超时、被反爬、Bing 改版导致解析出 0 条，全部落进 ``error``，
     由工具层翻成一句人话回给模型——工具挂了不该让整轮对话崩掉。
 
-    **跑偏也算失败**：Bing 偶尔会把查询改写成别的意思（例如加个「事件」就跑去
-    查「尊」字的字典释义）。这时先去掉 :data:`_NOISE_WORDS` 重试一次，还不对就
-    返回空——「没搜到」比「给你一堆无关内容」安全得多。
+    **跑偏也算失败**：搜索引擎偶尔会把查询改写成别的意思（例如加个「事件」就跑去
+    查「尊」字的字典释义，Bing 机房 IP 还会莫名吐一批无关页）。这时先去掉
+    :data:`_NOISE_WORDS` 重试一次，还不对就返回空——「没搜到」比「给你一堆无关
+    内容」安全得多。
     """
     text = (query or "").strip()
     want = max(1, min(MAX_RESULTS, int(max_results or DEFAULT_RESULTS)))
     # 本地清洗会淘汰结果，所以引擎侧多要一批再截
     pool = max(want * _POOL_FACTOR, _MIN_POOL)
     name = (engine or "bing").strip().lower()
+    extra = {"node": node, "tools_dir": tools_dir} if name == "wb" else {}
 
     def pack(rows: list[dict], error: str = "") -> dict:
         return {"query": text, "engine": name, "results": rows[:want], "error": error}
@@ -303,11 +420,11 @@ async def search(
     if name not in ENGINES:
         return pack([], f"不支持的引擎 {name}")
 
-    rows, error = await _fetch(name, text, pool, timeout)
+    rows, error = await _fetch(name, text, pool, timeout, extra)
     if error:
         return pack([], error)
     if not rows:
-        logger.info(f"[search] 解析出 0 条: {text[:40]}（Bing 可能返回了验证页或改版了）")
+        logger.info(f"[search] 解析出 0 条: {text[:40]}（搜索引擎可能返回了验证页或改版了）")
         return pack([])
 
     tokens = query_tokens(text)
@@ -318,7 +435,7 @@ async def search(
             + (f"→ 去掉口语词改用「{simple[:30]}」重试" if simple else "，且没有可简化的写法")
         )
         if simple:
-            again, again_error = await _fetch(name, simple, pool, timeout)
+            again, again_error = await _fetch(name, simple, pool, timeout, extra)
             if not again_error and not looks_off_topic(again, tokens):
                 logger.info(f"[search] 重试成功，拿到 {len(again)} 条")
                 return pack(again)

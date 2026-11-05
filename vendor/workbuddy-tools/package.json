@@ -1,0 +1,18 @@
+{
+  "name": "workbuddy-tools",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Reverse-engineered, behaviour-compatible reimplementation of the ViewImage and WebSearch agent tools",
+  "bin": {
+    "wb": "./bin/wb.mjs"
+  },
+  "scripts": {
+    "selftest": "node bin/wb.mjs selftest",
+    "trace": "node scripts/trace.mjs",
+    "schema": "node bin/wb.mjs schema"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

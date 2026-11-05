@@ -7,9 +7,11 @@
 """
 
 import asyncio
+import os
+import sys
+import tempfile
 import time
 from pathlib import Path
-import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src" / "plugins"))
@@ -305,22 +307,136 @@ def test_build() -> None:
 
     check("web_search 在白名单里", "web_search" in tl.ALLOWED_TOOL_NAMES,
           str(sorted(tl.ALLOWED_TOOL_NAMES)))
-    check("白名单共 9 个（新增必须显式加）", len(tl.ALLOWED_TOOL_NAMES) == 9,
+    check("白名单共 10 个（新增必须显式加）", len(tl.ALLOWED_TOOL_NAMES) == 10,
           str(len(tl.ALLOWED_TOOL_NAMES)))
+
+
+#: 假扮 node 的脚本：``_search_wb`` 会跑 ``node <cli> search <query> --json``，
+#: 这里用 python 冒充 node，命令行参数和 stdout 契约保持一致（不用装 node 也能测全程）
+WB_SCRIPT = r'''
+import json, os, sys, time
+
+# node 永远写 UTF-8；python 假扮时得自己指定，否则 Windows 管道会按 GBK 编码，
+# 解码成 U+FFFD 之后「跑偏检测」就永远匹配不上（踩过一次）
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
+mode = os.environ.get("FAKE_MODE", "ok")
+if mode == "sleep":
+    time.sleep(5)
+if mode == "fail":
+    sys.stderr.write("boom: bing 429\n")
+    sys.exit(1)
+if mode == "notjson":
+    print("这不是 JSON")
+    sys.exit(0)
+
+if mode == "off":
+    rows = [{"title": "向日葵远程控制官网", "url": "https://sunlogin.example.com", "snippet": "远程桌面"}]
+else:
+    # 标题里带上查询词：项目会在本地做「跑偏检测」，结果必须提到查询里的实词
+    query = sys.argv[2] if len(sys.argv) > 2 else "q"
+    rows = [
+        {"title": query + "-t-" + os.environ.get("WB_MAX_RESULTS", "?"),
+         "url": "https://a.com/1", "snippet": "摘要一"},
+        {"title": "坏链接", "url": "javascript:void(0)", "snippet": ""},
+        {"url": "https://b.com/2", "snippet": "没有标题"},
+        {"title": "t2", "url": "https://b.com/3", "snippet": "摘要二"},
+    ]
+print(json.dumps({"title": "x", "rawResponse": {"results": rows}}, ensure_ascii=False))
+'''
+
+
+def _fake_tools() -> Path:
+    """造一个只有 ``bin/wb.mjs`` 的假工具目录（内容是上面的 python 脚本）。"""
+    root = Path(tempfile.mkdtemp(prefix="wb-fake-"))
+    (root / "bin").mkdir(parents=True, exist_ok=True)
+    (root / "bin" / "wb.mjs").write_text(WB_SCRIPT, encoding="utf-8")
+    return root
+
+
+def test_wb_engine() -> None:
+    section("10. wb 引擎（vendor/workbuddy-tools 的 node CLI）")
+
+    # ---- 10.0 仓库里那份工具在不在 ----
+    cli = ws.resolve_tools_dir() / "bin" / "wb.mjs"
+    check("默认工具目录指向仓库里的 vendor/workbuddy-tools", cli.is_file(), str(cli))
+    check("两个引擎都登记了（wb / bing）", set(ws.ENGINES) == {"wb", "bing"}, str(sorted(ws.ENGINES)))
+    check("相对路径按仓库根解析",
+          ws.resolve_tools_dir("vendor/workbuddy-tools") == ws.resolve_tools_dir(),
+          str(ws.resolve_tools_dir("vendor/workbuddy-tools")))
+
+    # ---- 10.1 找不到工具 / 找不到 node ----
+    r = asyncio.run(ws.search("随便", engine="wb", tools_dir=str(Path(tempfile.mkdtemp()))))
+    check("工具目录里没有 bin/wb.mjs → 明说找不到工具", "找不到搜索工具" in r["error"], r["error"])
+
+    fake = _fake_tools()
+    r = asyncio.run(ws.search("随便", engine="wb", node="no-such-node-xyz", tools_dir=str(fake)))
+    check("node 不存在 → 明说找不到 node", "找不到 node" in r["error"], r["error"])
+    check("node 不存在 → 提示可以切回 bing", "bing 引擎" in r["error"], r["error"])
+
+    # ---- 10.2 用 python 假扮 node：正常 JSON 走完全程 ----
+    os.environ.pop("FAKE_MODE", None)
+    r = asyncio.run(ws.search("尊界 v800", engine="wb", max_results=2,
+                              node=sys.executable, tools_dir=str(fake)))
+    check("正常 JSON → 拿到结果", len(r["results"]) == 2, str(r["results"]))
+    check("engine 记成 wb", r["engine"] == "wb", r["engine"])
+    check("javascript: 链接被丢掉（只剩 2 条合法行）",
+          all(row["url"].startswith("https://") for row in r["results"]), str(r["results"]))
+    check("没标题的行被丢掉", all(row["title"] for row in r["results"]), str(r["results"]))
+    check("引擎侧多要一批（WB_MAX_RESULTS = pool，不是 search_max）",
+          r["results"][0]["title"].endswith(f"-{max(2 * ws._POOL_FACTOR, ws._MIN_POOL)}"),
+          r["results"][0]["title"])
+    check("结果截到 max_results", len(r["results"]) == 2, str(len(r["results"])))
+
+    # ---- 10.3 CLI 侧的三种失败 ----
+    os.environ["FAKE_MODE"] = "fail"
+    r = asyncio.run(ws.search("随便", engine="wb", node=sys.executable, tools_dir=str(fake)))
+    check("退出码非 0 → 把 stderr 最后一行给模型", "429" in r["error"], r["error"])
+
+    os.environ["FAKE_MODE"] = "notjson"
+    r = asyncio.run(ws.search("随便", engine="wb", node=sys.executable, tools_dir=str(fake)))
+    check("输出不是 JSON → 明说", "不是 JSON" in r["error"], r["error"])
+
+    os.environ["FAKE_MODE"] = "sleep"
+    r = asyncio.run(ws.search("随便", engine="wb", timeout=5.5, node=sys.executable,
+                              tools_dir=str(fake)))
+    check("脚本睡 5 秒、超时 5.5 秒 → 正常拿到结果", r["error"] == "", r["error"])
+    async def raw_error() -> str:
+        try:
+            await ws._search_wb("随便", 5, 0.3, node=sys.executable, tools_dir=str(fake))
+        except ws.WbError as exc:
+            return str(exc)
+        return ""
+
+    detail = asyncio.run(raw_error())
+    check("超时 → 抛 WbError 说「搜索超时」而不是崩掉", "搜索超时" in detail, detail)
+
+    # ---- 10.4 护栏在 wb 路径上同样生效 ----
+    os.environ["FAKE_MODE"] = "off"
+    r = asyncio.run(ws.search("尊界V800 刹车事件", engine="wb", node=sys.executable,
+                              tools_dir=str(fake)))
+    check("wb 返回无关结果 → 照样判跑偏、不交给模型",
+          r["results"] == [] and "没搜到相关内容" in r["error"], f"{r['results']} / {r['error']}")
+    os.environ.pop("FAKE_MODE", None)
 
 
 def test_defaults() -> None:
     section("8. 配置默认值（改默认值时要同步改这里）")
     cfg = LLMConfig()
     check("搜索默认关（避免没确认就吃验证码）", cfg.web_search is False)
+    check("默认后端是 wb（仓库自带那套）", cfg.search_engine == "wb", cfg.search_engine)
+    check("默认 node 留空 = PATH 里的 node", cfg.search_node == "", cfg.search_node)
+    check("默认工具目录留空 = vendor/workbuddy-tools", cfg.search_tools_dir == "",
+          cfg.search_tools_dir)
     check("默认 5 条", cfg.search_max == 5)
     check("默认每条摘要 200 字", cfg.search_snippet_chars == 200)
     check("默认超时 20 秒", cfg.search_timeout == 20.0)
     check("默认间隔 1 秒", cfg.search_interval == 1.0)
 
     example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
-    for key in ("web_search", "search_max", "search_snippet_chars",
-                "search_timeout", "search_interval"):
+    for key in ("web_search", "search_engine", "search_max", "search_snippet_chars",
+                "search_timeout", "search_interval", "search_node", "search_tools_dir"):
         check(f"示例配置里有 {key}", key in example)
 
 
@@ -328,7 +444,9 @@ def test_tool_handler() -> None:
     section("9. 工具 handler 的三条失败文案")
 
     async def case() -> None:
-        cfg = LLMConfig(web_search=True, search_interval=0)
+        # 这一段测的是 bing 引擎那份 handler 文案（下面打桩的是 _search_bing），
+        # 所以显式指定 search_engine="bing"，别跟着默认的 wb 走
+        cfg = LLMConfig(web_search=True, search_engine="bing", search_interval=0)
         ctx = tl.build(cfg, mem=MemoryConfig(enabled=False))[1]
 
         out = await tl.dispatch(tl.build(cfg, mem=MemoryConfig(enabled=False))[0],
@@ -369,6 +487,7 @@ def main() -> None:
     test_build()
     test_defaults()
     test_tool_handler()
+    test_wb_engine()
     print(f"\n通过 {PASSED} 项，失败 {FAILED} 项")
     sys.exit(1 if FAILED else 0)
 

@@ -510,10 +510,13 @@ netease:
 > | `llm.fetch_summarize` | 开 | 模型带 `prompt` 时，长网页按问题摘要 |
 > | `llm.fetch_summarize_chars` | `4000` | 正文超过多少字才摘要 |
 > | `llm.web_search` | 关 | 提供 `web_search`（模型自己搜网页） |
+> | `llm.search_engine` | `wb` | 搜索后端：`wb` = 仓库自带 `vendor/workbuddy-tools`（要 node ≥18）；`bing` = 纯 Python 抓取 |
 > | `llm.search_max` | `5` | 一次搜几条（1~8） |
 > | `llm.search_snippet_chars` | `200` | 每条摘要上限，`0` = 不截 |
 > | `llm.search_timeout` | `20` | 搜索超时秒数 |
 > | `llm.search_interval` | `1` | 两次搜索最小间隔（秒），`0` = 不限 |
+> | `llm.search_node` | 空 | `wb` 后端用的 node 路径，留空 = PATH 里的 `node` |
+> | `llm.search_tools_dir` | 空 | `workbuddy-tools` 目录，留空 = `vendor/workbuddy-tools` |
 > | `llm.skills` | 开 | 启用技能包（扫 `data/skills`） |
 > | `llm.skills_dir` | 空 | 技能目录，留空 = `data/skills` |
 > | `llm.skill_body_chars` | `3000` | `use_skill` 返回的技能正文上限 |
@@ -528,7 +531,7 @@ netease:
 | 工具 | 干什么 | 什么时候用 |
 |---|---|---|
 | `fetch_url` | 抓网页正文并抽成纯文本；长文可带 `prompt` 按问题摘要 | 有人发了链接、它需要知道里面写了什么 |
-| `web_search` | 搜网页，返回几条「标题 — 摘要（网址）」（默认关闭） | 问的是新闻、价格、比分、谁的现任职位、软件最新版本这类会过时效的事 |
+| `web_search` | 搜网页，返回几条「标题 — 摘要（网址）」（默认关闭；后端见 `llm.search_engine`） | 问的是新闻、价格、比分、谁的现任职位、软件最新版本这类会过时效的事 |
 | `list_skills` | 列出已安装技能的名字 + 简介 | 遇到不熟的任务，先看有没有现成方法 |
 | `use_skill` | 读某个技能的完整说明 | 照技能里的步骤做事 |
 | `read_skill_file` | 读技能目录里的附加文件（`references/xxx.md`） | 技能正文让你「读取 references/…」时；一次一个文件 |
@@ -1247,6 +1250,10 @@ Wk.86 线上学习歌单，共 12 首。
    **泰文**：歌单图片里若出现泰文昵称/歌名，主字体（CJK）不含泰文，需单独装泰文字体——
    Debian/Ubuntu：`apt install fonts-noto-sans-thai`；dnf 系：`dnf install google-noto-sans-thai-fonts`。
    装好后渲染会自动探测到，无需改配置；也可在 `render.thai_font_path` 显式指定。
+5. **Node.js**：`web_search` 的默认后端 `wb` 要跑仓库自带的 `vendor/workbuddy-tools`，
+   所以需要 **node ≥ 18**（Docker 镜像已内置；裸机 `apt install nodejs` / `dnf install nodejs`）。
+   `node -v` 出得来就行，不用 `npm install`。没有 node 或版本太老时，把
+   `llm.search_engine` 改成 `bing` 就退回纯 Python 的搜索实现，其余功能不受影响。
 
 ### 方式一：Docker（NapCat 也是 Docker 时首选）
 

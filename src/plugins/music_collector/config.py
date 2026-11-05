@@ -570,9 +570,12 @@ class LLMConfig(BaseModel):
     fetch_summarize: bool = True
     #: 正文超过这么多字才值得摘要。太短直接给原文更省，也更准
     fetch_summarize_chars: int = Field(4000, ge=500, le=100000)
-    #: 是否提供 web_search（让模型自己搜网页）。**默认关**：搜的是 Bing 的
-    #: 公开 HTML 端点，机房 IP 搜密了会吃验证码，确认能跑再打开
+    #: 是否提供 web_search（让模型自己搜网页）。**默认关**：不管走哪个后端，
+    #: 抓的都是 Bing 的公开结果页，机房 IP 搜密了会吃验证码，确认能跑再打开
     web_search: bool = False
+    #: 搜索后端：``wb`` = 仓库里 vendored 的 workbuddy-tools（node 跑 CLI，摘要更规整、
+    #: 还能带 freshness/域名过滤）；``bing`` = 以前那套纯 Python 抓取，node 不可用时兜底
+    search_engine: Literal["wb", "bing"] = "wb"
     #: 一次搜几条（1~8）。条数越多越费 token，5 条够回答绝大多数问题
     search_max: int = Field(5, ge=1, le=8)
     #: 每条摘要最多多少字。'' = 不截；摘要本来就短，200 字基本是全文
@@ -581,6 +584,12 @@ class LLMConfig(BaseModel):
     search_timeout: float = Field(20.0, ge=5, le=60)
     #: 两次搜索的最小间隔（秒）。防反爬；0 = 不限（不推荐，容易被要求验证码）
     search_interval: float = Field(1.0, ge=0, le=30)
+    #: ``search_engine='wb'`` 时用的 node 路径。留空 = PATH 里的 ``node``；
+    #: 本机调试可以填绝对路径（例如 WorkBuddy 自带的那个 node.exe）
+    search_node: str = ""
+    #: workbuddy-tools 目录。留空 = 仓库里的 ``vendor/workbuddy-tools``；
+    #: 相对路径按仓库根解析
+    search_tools_dir: str = ""
     #: 是否启用技能包（扫描技能目录下的 SKILL.md）
     skills: bool = True
     #: 技能目录；留空 = data/skills；相对路径按 data/ 解析
