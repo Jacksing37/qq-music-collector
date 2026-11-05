@@ -599,8 +599,10 @@ class LLMConfig(BaseModel):
     image_lookup_timeout: float = Field(30.0, ge=5, le=90)
     #: 两次以图搜番的最小间隔（秒）。免费额度 100 次/天，别连着打
     image_lookup_interval: float = Field(3.0, ge=0, le=120)
-    #: 相似度低于这个值的候选直接丢掉——给模型一串 0.3 的噪声，它反而会挑一个错的
-    image_lookup_min_similarity: float = Field(0.7, ge=0.3, le=1.0)
+    #: 相似度低于这个值的候选当噪声剔掉；**但一条不剩时仍会保留最高那条当线索**。
+    #: 别设太高：宽幅裁切 + 带字幕的正片截图相似度天然偏低（同一张 1280×940 截图实测
+    #: 0.638，trace.moe 自己切的关键帧是 0.99），0.7 会把正确答案直接砍掉
+    image_lookup_min_similarity: float = Field(0.45, ge=0.2, le=1.0)
     #: 是否启用技能包（扫描技能目录下的 SKILL.md）
     skills: bool = True
     #: 技能目录；留空 = data/skills；相对路径按 data/ 解析

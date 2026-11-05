@@ -177,17 +177,45 @@ def test_parse() -> None:
 
 
 def test_threshold() -> None:
-    section("3. 阈值把噪声挡在外面")
+    section("3. 阈值：剔噪声，但**别把正确答案一起砍掉**")
+    # 线上真实情形：截图被裁过 + 带字幕，trace.moe 只给 0.638（关键帧是 0.99）
+    low = {
+        "quota": 92, "quotaUsed": 8,
+        "result": [
+            {"anilist": {"id": 173174,
+                         "title": {"native": "BanG Dream! It's MyGO!!!!! 春の陽だまり、迷い猫"},
+                         "format": "MOVIE", "startDate": {"year": 2024}},
+             "filename": "[Shiniori-Raws] ...", "episode": 1,
+             "from": 2389.0, "to": 2398.0, "similarity": 0.638, "image": ""},
+            {"anilist": {"id": 1914, "title": {"native": "彩雲国物語"}},
+             "filename": "[TXXZ]...", "episode": 22,
+             "from": 422.0, "to": 426.0, "similarity": 0.42, "image": ""},
+        ],
+    }
     il.reset()
-    stub = _Stub().install()
+    stub = _Stub(resp=_Resp(payload=low)).install()
     try:
-        found = asyncio.run(il.search(IMG, min_similarity=0.95))
+        found = asyncio.run(il.search(IMG, min_similarity=0.7))
         text = il.format_result(found)
     finally:
         stub.restore()
-    check("阈值高于所有候选 → 0 条", found["results"] == [], str(found["results"]))
-    check("best 为 None", found["best"] is None, str(found["best"]))
-    check("生成「认不出来」的文案而不是硬猜", "没有匹配" in text and "认不出来" in text, text)
+    check("全都低于阈值 → 仍保留最高那条（上线前就是这么丢的正确答案）",
+          len(found["results"]) == 1, str(found["results"]))
+    check("保留的正是最高分那条", found["best"]["similarity"] == 0.638,
+          str(found["best"]["similarity"]))
+    check("文案写明只能当线索", "只能当线索" in text, text[:220])
+    check("文案解释低分原因（裁切/字幕）", "裁过" in text or "字幕" in text, text[:500])
+
+    # trace.moe 一条都没给：才是真的「认不出来」
+    il.reset()
+    stub = _Stub(resp=_Resp(payload={"quota": 90, "quotaUsed": 10, "result": []})).install()
+    try:
+        found = asyncio.run(il.search(IMG))
+        text = il.format_result(found)
+    finally:
+        stub.restore()
+    check("trace.moe 没有结果 → 0 条", found["results"] == [], str(found["results"]))
+    check("这时才说「认不出来」", "没有匹配" in text and "认不出来" in text, text)
 
 
 def test_failures() -> None:
@@ -344,8 +372,8 @@ def test_defaults() -> None:
     check("默认超时 30 秒", cfg.image_lookup_timeout == 30.0, str(cfg.image_lookup_timeout))
     check("默认间隔 3 秒（护额度）", cfg.image_lookup_interval == 3.0,
           str(cfg.image_lookup_interval))
-    check("默认最低相似度 0.7", cfg.image_lookup_min_similarity == 0.7,
-          str(cfg.image_lookup_min_similarity))
+    check("默认最低相似度 0.45（别设太高，会把裁切过的截图砍掉）",
+          cfg.image_lookup_min_similarity == 0.45, str(cfg.image_lookup_min_similarity))
 
     example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
     for key in ("image_lookup", "image_lookup_timeout", "image_lookup_interval",

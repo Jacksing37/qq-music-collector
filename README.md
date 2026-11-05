@@ -520,7 +520,7 @@ netease:
 > | `llm.image_lookup` | 开 | 提供 `lookup_anime_image`（以图搜番，认动画截图出自哪部） |
 > | `llm.image_lookup_timeout` | `30` | 以图搜番超时秒数（下载图 + 查询） |
 > | `llm.image_lookup_interval` | `3` | 两次以图搜番最小间隔（秒） |
-> | `llm.image_lookup_min_similarity` | `0.7` | 相似度低于它就丢弃，不喂给模型 |
+> | `llm.image_lookup_min_similarity` | `0.45` | 低于它当噪声（一条不剩时仍保留最高那条当线索） |
 > | `llm.skills` | 开 | 启用技能包（扫 `data/skills`） |
 > | `llm.skills_dir` | 空 | 技能目录，留空 = `data/skills` |
 > | `llm.skill_body_chars` | `3000` | `use_skill` 返回的技能正文上限 |

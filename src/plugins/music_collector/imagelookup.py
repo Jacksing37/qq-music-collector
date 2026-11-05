@@ -205,14 +205,17 @@ async def search(
     url: str,
     *,
     timeout: float = 30.0,
-    min_similarity: float = 0.7,
+    min_similarity: float = 0.45,
 ) -> dict:
     """拿一张图的地址去 trace.moe 查。返回 ``{"url", "error", "quota", "used", "results", "best"}``。
 
     **不抛异常**：下载失败、额度用完、trace.moe 报错，全落进 ``error``，
     由工具层翻成一句人话——工具挂了不该让整轮对话崩掉。
 
-    ``min_similarity`` 以下的候选直接丢掉：给模型一串 0.3 的噪声，它反而会挑一个错的。
+    ``min_similarity`` 以下算噪声，会被剔掉；**但剔完一条不剩时仍保留最高那条**：
+    宽幅裁切 + 带字幕的正片截图相似度本来就低（实测同一张 1280×940 截图是 0.638，
+    而 trace.moe 自己切的关键帧是 0.99），一刀砍掉等于把正确答案丢掉。
+    低分怎么用交给 :func:`format_result` 的分档文案 + 模型自己判断。
     """
     text = (url or "").strip()
     try:
@@ -262,9 +265,18 @@ async def search(
         for item in (payload.get("result") or [])
         if isinstance(item, dict)
     ]
-    rows = [row for row in rows if row["similarity"] >= float(min_similarity)]
     rows.sort(key=lambda row: -row["similarity"])
-    found = _pack(text, quota=quota, used=used, rows=rows[:5])
+    kept = [row for row in rows if row["similarity"] >= float(min_similarity)]
+    if not kept and rows:
+        # 全都低于阈值：仍把最高那条给出去。宽幅裁切/带字幕的正片截图相似度天然偏低
+        # （同一张 1280×940 截图是 0.638），一刀砍光等于把正确答案丢掉。
+        # 分档文案会写明「只能当线索」，用不用由模型判断。
+        kept = rows[:1]
+        logger.info(
+            f"[image] 全部低于阈值 {min_similarity}（最高 {rows[0]['similarity']:.2f}），"
+            "仍交出最高那条当线索"
+        )
+    found = _pack(text, quota=quota, used=used, rows=kept[:5])
     _cache_put(text, found)
     logger.info(
         f"[image] 以图搜番 {len(found['results'])} 条"
@@ -302,6 +314,11 @@ def format_result(found: dict) -> str:
         "判据：相似度 ≥0.90 基本就是这部；0.80~0.90 很可能是；更低只能当线索，"
         "要跟群友说清楚是猜的。"
     )
+    if best["similarity"] < 0.80:
+        lines.append(
+            "相似度偏低常见于「截图被裁过 / 带字幕」——同一张图 trace.moe 自己切的关键帧能到 0.99。"
+            "所以：作品名跟画面特征（发色、瞳色、制服、场景）对得上就按它去查角色；对不上就当没查到。"
+        )
     lines.append(
         "下一步：拿这个**作品名**去 web_search 查角色（例如「<作品名> 登场角色」），"
         "别再用「发色 + 眼镜 + 瞳色」这类形容词组合去搜——那种查询搜索引擎会拆成单个词，"
