@@ -274,25 +274,13 @@ def reset_schedule() -> None:
 # ---------------------------------------------------------------- 主流程
 
 
-async def tick(
-    bot: Bot, group_id: int, user_id: int, nick: str, text: str
-) -> dict:
-    """**每来一条群消息**调一次：现在插一句合不合适？返回可断言的摘要，不抛异常。
+def _gates(gid: int, nick: str, text: str) -> dict:
+    """把所有「便宜的门」+ 概率门过一遍。返回 ``{"status": ...}``，``ok`` 才该发。
 
-    ``status`` 取值：
-
-    - ``off`` —— 三个开关任一关着；
-    - ``no_group`` —— 这个群不在 ``llm.groups`` 里；
-    - ``no_listen`` —— 没开旁听，没有背景素材；
-    - ``quiet`` —— 此刻在勿扰时段；
-    - ``quota`` —— 今天这个群说够了；
-    - ``cooldown`` —— 刚说过话 / 刚被动回过话 / 正在生成；
-    - ``short`` —— 这句话不值得接（太短 / 命令 / 纯符号）；
-    - ``gate`` —— 概率门拦下（群正热闹，让位）；
-    - ``empty`` —— 生成失败或没发出去；
-    - ``ok`` —— 发出去了。
+    抽出来是为了让网页能问一句「现在插一句会被哪道门挡住」——
+    2026-11-05 排查「群里怎么一句都不说」时，缺的就是这个。
     """
-    gid = int(group_id or 0)
+    gid = int(gid or 0)
     cfg = service.config.llm
 
     # ---- 便宜的门先过一遍，一次 API 都不花 ----
@@ -323,6 +311,54 @@ async def tick(
         # 只是这次掷骰没过。
         logger.info(f"[banter] 群{gid} 说话时机掷骰未过（p={p:.2f}）")
         return {"status": "gate", "p": p}
+    return {"status": "ok", "p": p}
+
+
+def probe(group_id: int, nick: str = "自检", text: str = "自检：现在插一句会被哪道门挡住") -> dict:
+    """**只读**自检：完整过一遍门控（含概率门），但不生成、不发送、不记账。
+
+    注意概率门是**掷骰**的，同一个状态连问两次可能一次 ok 一次 gate——
+    要看「理论上限」得连问十几次，或看返回的 ``p``。
+    """
+    gid = int(group_id or 0)
+    try:
+        res = dict(_gates(gid, nick, text))
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "error", "why": str(exc)[:120]}
+    res["group"] = gid
+    res["quiet"] = list(service.config.llm.speak_quiet)
+    res["daily_max"] = int(service.config.llm.speak_daily_max)
+    res["min_gap"] = float(service.config.llm.speak_min_gap_minutes)
+    res["cooling_until"] = (next_gate_at().strftime("%H:%M:%S")
+                            if next_gate_at() else None)
+    res["sent_today"] = _DAILY.get((gid, _today(datetime.now(service.resolver.tz))), 0)
+    return res
+
+
+async def tick(
+    bot: Bot, group_id: int, user_id: int, nick: str, text: str
+) -> dict:
+    """**每来一条群消息**调一次：现在插一句合不合适？返回可断言的摘要，不抛异常。
+
+    ``status`` 取值：
+
+    - ``off`` —— 三个开关任一关着；
+    - ``no_group`` —— 这个群不在 ``llm.groups`` 里；
+    - ``no_listen`` —— 没开旁听，没有背景素材；
+    - ``quiet`` —— 此刻在勿扰时段；
+    - ``quota`` —— 今天这个群说够了；
+    - ``cooldown`` —— 刚说过话 / 刚被动回过话 / 正在生成；
+    - ``short`` —— 这句话不值得接（太短 / 命令 / 纯符号）；
+    - ``gate`` —— 概率门拦下（群正热闹，让位）；
+    - ``empty`` —— 生成失败或没发出去；
+    - ``ok`` —— 发出去了。
+    """
+    gid = int(group_id or 0)
+    cfg = service.config.llm
+    gates = _gates(gid, nick, text)
+    if gates["status"] != "ok":
+        return gates
+    day = _today(datetime.now(service.resolver.tz))
 
     # 先占位再干活：生成要几秒，期间又来一条消息不能重复开口
     _BUSY.add(gid)

@@ -1576,6 +1576,20 @@ async def _api_patch(request: Request):
     })
 
 
+async def _api_banter_probe(request: Request):
+    """「现在插一句会被哪道门挡住」——只读自检，不生成、不发送、不记账。
+
+    主动搭话改成事件驱动后，没有「下次几点」可看了；群里一直不说话时，
+    想判断是「没人说话」还是「被门挡住了」，就查这个接口。
+    """
+    if not _token_ok(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    gid = _group_id_param(request)
+    text = request.query_params.get("text") or "自检：现在插一句会被哪道门挡住"
+    res = banter_mod.probe(gid, "自检", text)
+    return JSONResponse(res)
+
+
 async def _api_status(request: Request):
     if not _token_ok(request):
         raise HTTPException(status_code=401, detail="unauthorized")
@@ -2730,6 +2744,7 @@ def register_webui() -> None:
     app.add_api_route("/api/music-admin/config", _api_patch, methods=["PATCH"])
     app.add_api_route("/api/music-admin/groups", _api_groups, methods=["GET"])
     app.add_api_route("/api/music-admin/status", _api_status, methods=["GET"])
+    app.add_api_route("/api/music-admin/banter/probe", _api_banter_probe, methods=["GET"])
     app.add_api_route("/api/music-admin/overview", _api_overview, methods=["GET"])
     app.add_api_route("/api/music-admin/action", _api_action, methods=["POST"])
     app.add_api_route("/api/music-admin/admin", _api_admin, methods=["GET", "POST"])

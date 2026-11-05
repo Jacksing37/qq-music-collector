@@ -352,6 +352,29 @@ def test_tick_send(tmp: Path) -> None:
         check("没生成就不发消息", len(bot.sent) == 1, str(bot.sent))
 
 
+def test_probe(tmp: Path) -> None:
+    section("13. probe()：只读自检，不发送不记账")
+    with _Env(tmp / "probe") as env:
+        cfg = config_manager.config.llm
+        res = bt.probe(GID, "自检", "今天好热啊，不想出门")
+        check("过门时返回 ok", res["status"] == "ok", str(res))
+        check("带上群号与当日已发数", res.get("group") == GID and res.get("sent_today") == 0, str(res))
+        check("带上当前参数快照",
+              res.get("min_gap") == 20 and res.get("daily_max") == 0, str(res))
+        check("自检不发送", env.fake.sent == [], str(env.fake.sent))
+        check("自检不调模型", env.calls == [], str(env.calls))
+        check("自检不记账", bt._DAILY == {}, str(bt._DAILY))
+
+        cfg.speak_quiet = ["00:00-23:59"]
+        res = bt.probe(GID, "自检", "今天好热啊")
+        check("勿扰时段能问出 quiet", res["status"] == "quiet", str(res))
+        cfg.speak_quiet = []
+
+        bt.note_reply(GID)
+        res = bt.probe(GID, "自检", "今天好热啊")
+        check("冷却中能问出 cooldown", res["status"] == "cooldown", str(res))
+        check("并给出解禁时刻", res.get("cooling_until") is not None, str(res))
+        bt.reset_schedule()
 def test_defaults() -> None:
     section("10. 配置默认值（改默认值时要同步改这里）")
     cfg = LLMConfig()
@@ -399,6 +422,7 @@ def main() -> None:
     test_cooldown()
     test_tick_gates(tmp)
     test_tick_send(tmp)
+    test_probe(tmp)
     test_defaults()
     test_reload_trigger()
     test_store_recent(tmp)
