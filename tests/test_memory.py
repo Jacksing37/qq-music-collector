@@ -207,6 +207,21 @@ def test_group_note() -> None:
     check("两条都在", "awsl" in note and "不刷屏" in note, note)
     check("空追加返回 0", mm.append_group_note(mem, 500, [])[0] == 0)
 
+    # 正文里带标题：写盘时会补一次，再带就会叠成三个 `# 群概况`（线上踩过）
+    mm.write_group_note(mem, 501, "# 群概况\n\n# 群概况\n- 黑话：yyds=永远的神")
+    note = mm.read_group_note(mem, 501)
+    check("正文里的重复标题被剥掉", note.count("# 群概况") == 1, note)
+    check("剥标题后内容还在", "yyds" in note, note)
+
+    # 条数上限：只按字符截的话，模型一次塞 160 条平铺短句也能进来
+    capped = MemoryConfig(enabled=True, dir=mem.dir, l1_max_facts=6)
+    added, _ = mm.append_group_note(capped, 502, [f"a{i}" for i in range(1, 9)])
+    lines = [ln for ln in mm.read_group_note(capped, 502).splitlines() if ln.startswith("- ")]
+    check("条数按 l1_max_facts 截，留最新的",
+          lines == [f"- a{i}" for i in range(3, 9)], str(lines))
+    check("新增条数照实报", added == 8, str(added))
+    check("纯标题不算一条", mm.append_group_note(capped, 502, ["# 群概况"])[0] == 0)
+
 
 # ---------------------------------------------------------------- 聊天记录
 

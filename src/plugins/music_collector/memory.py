@@ -580,6 +580,15 @@ def delete_person(mem: MemoryConfig, group_id: int, uid: object) -> bool:
 
 # ---------------------------------------------------------------- 群概况
 
+#: 群概况自带的标题行。写盘时统一补一次，正文里出现的都要剥掉，否则会一层层叠上去
+_GROUP_TITLE_RE = re.compile(r"^\s*#{1,6}\s*群概况\s*$")
+
+
+def _strip_group_titles(text: str) -> str:
+    """去掉正文里所有 ``# 群概况`` 标题行（保留其余行原样）。"""
+    lines = [ln for ln in (text or "").splitlines() if not _GROUP_TITLE_RE.match(ln.strip())]
+    return "\n".join(lines).strip()
+
 
 def group_note_path(mem: MemoryConfig, group_id: int) -> Path:
     return group_dir(mem, group_id) / "group.md"
@@ -605,6 +614,11 @@ def write_group_note(
         return False, "内容为空。"
     if body.startswith("---"):
         body = "\n".join(body.splitlines()[1:]).lstrip("-\n").strip()
+    # 标题由这里补：正文里再带一层（模型/人手贴的可能带）就会越叠越多，
+    # 线上真的叠出过三个 `# 群概况`（2026-11-05）
+    body = _strip_group_titles(body)
+    if not body:
+        return False, "内容为空。"
     if len(body) > limit:
         body = body[:limit].rstrip() + "…"
     _atomic_write(group_note_path(mem, group_id), "# 群概况\n\n" + body + "\n")
@@ -617,33 +631,45 @@ def append_group_note(
     """往群概况末尾追加几条（去重）。返回 ``(新增几条, 说明)``。
 
     和 ``append_note`` 一样，满了就丢最早的——群概况不该无限长，否则它会把
-    「成员档案」的注入预算挤掉。
+    「成员档案」的注入预算挤掉。**条数上限用 ``l1_max_facts``**（和「他是谁」
+    一档的量级一致）：只按字符截的话，模型一次塞 160 条平铺短句也能塞进来，
+    而它读起来是噪声。
     """
     limit = max(500, int(mem.note_chars) * 2)
+    cap = max(1, int(mem.l1_max_facts))
     fresh = [str(x).strip() for x in lines if str(x).strip()]
     if not fresh:
         return 0, "没有新内容。"
     current = read_group_note(mem, group_id)
-    existing = [ln.strip() for ln in current.splitlines() if ln.strip()]
-    if existing and existing[0].startswith("# 群概况"):
-        existing = existing[1:]
-    # 去掉列表符号后比较：手写的「群规：不刷屏」和追加的「- 群规：不刷屏」是同一条
-    seen = {ln[2:].strip() if ln.startswith(("- ", "* ")) else ln for ln in existing}
+    # 去重按「整行文字」比：手写的「群规：不刷屏」和追加的「- 群规：不刷屏」是同一条
+    existing: list[str] = []
+    seen: set[str] = set()
+    for line in current.splitlines():
+        text = line.strip()
+        if not text or _GROUP_TITLE_RE.match(text):
+            continue
+        if text.startswith(("- ", "* ")):
+            text = text[2:].strip()
+        if text and text not in seen:
+            seen.add(text)
+            existing.append(text)
     added = 0
     for item in fresh:
         text = item[2:].strip() if item.startswith(("- ", "* ")) else item
-        if not text or text in seen:
+        if not text or _GROUP_TITLE_RE.match(text) or text in seen:
             continue
         seen.add(text)
-        existing.append(f"- {text}")
+        existing.append(text)
         added += 1
     if not added:
         return 0, "这些内容已经记过了。"
-    dropped = 0
-    while sum(len(x) for x in existing) > limit and len(existing) > 1:
+    dropped = max(0, len(existing) - cap)
+    if dropped:
+        existing = existing[dropped:]
+    while sum(len(x) + 2 for x in existing) > limit and len(existing) > 1:
         existing.pop(0)
         dropped += 1
-    body = "\n".join(existing)
+    body = "\n".join(f"- {x}" for x in existing)
     if len(body) > limit:
         body = body[:limit].rstrip() + "…"
     _atomic_write(group_note_path(mem, group_id), "# 群概况\n\n" + body + "\n")

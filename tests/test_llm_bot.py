@@ -387,6 +387,12 @@ def test_sampling_and_thinking() -> None:
     check("0 值惩罚项不发（少发无用参数）",
           "presence_penalty" not in p and "frequency_penalty" not in p, str(p))
 
+    # (a2) max_tokens <= 0 = 不设上限：这个字段干脆不发（记忆整理靠它一次写完 JSON）
+    p0 = build_payload(msgs, LLMConfig().model_copy(update={"max_tokens": 0}))
+    check("max_tokens=0 时请求体里没有这个字段", "max_tokens" not in p0, str(p0))
+    check("正常配置仍然发 max_tokens",
+          build_payload(msgs, LLMConfig(max_tokens=800)).get("max_tokens") == 800)
+
     # (b) 推理模型：采样参数一律省掉，否则可能 400
     for name in ("o3-mini", "gpt-5", "deepseek-reasoner", "Qwen3-32B-thinking"):
         model_p = build_payload(msgs, LLMConfig(model=name))

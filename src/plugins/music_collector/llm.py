@@ -561,8 +561,11 @@ def build_payload(
         "model": (cfg.model or "").strip(),
         "messages": messages,
         "stream": False,
-        "max_tokens": int(cfg.max_tokens),
     }
+    # ``max_tokens <= 0`` = 不设上限：这个字段干脆不发，交给服务端/模型自己决定。
+    # 只有后台任务（记忆整理的 ``complete()``）会这么传；聊天那条路有 ge=1 约束
+    if int(cfg.max_tokens) > 0:
+        payload["max_tokens"] = int(cfg.max_tokens)
     # 推理模型不认采样参数，发了可能直接 400
     if not is_reasoning_model(cfg.model):
         payload["temperature"] = float(cfg.temperature)
@@ -1482,7 +1485,7 @@ class LLMBot:
         *,
         system: str = "",
         model: str = "",
-        max_tokens: int = 0,
+        max_tokens: Optional[int] = None,
         temperature: float = 0.3,
     ) -> tuple[str, str]:
         """一次性纯文本补全：不带历史、不带工具、不占冷却、不写上下文。
@@ -1490,6 +1493,9 @@ class LLMBot:
         专给后台任务用（目前是「整理群成员记忆」）。这类任务要的是模型的阅读
         理解能力，不是聊天人格——所以 ``system`` 由调用方给任务说明，**不拼人设
         也不拼记忆**，免得让它总结别人的时候先把自己的人设演一遍。
+
+        ``max_tokens``：``None`` = 沿用 ``cfg.max_tokens``；**显式给 ``0`` = 不设上限**
+        （请求体里不发这个字段），整理记忆那种「一次重写整份 JSON」的任务就靠它。
 
         返回 ``(正文, 错误原因)``；失败时正文是空串，不抛异常。
         """
@@ -1503,7 +1509,8 @@ class LLMBot:
         probe = cfg.model_copy(
             update={
                 "model": (model or cfg.model),
-                "max_tokens": int(max_tokens or cfg.max_tokens),
+                # ``None`` = 沿用 ``cfg.max_tokens``；``0`` = 明确不设上限（build_payload 不发该字段）
+                "max_tokens": int(cfg.max_tokens) if max_tokens is None else int(max_tokens),
                 "temperature": float(temperature),
                 # 整理任务是「读一遍、归纳一下」，不需要长思考：既省钱也省时间
                 "thinking": "off",

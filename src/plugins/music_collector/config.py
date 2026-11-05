@@ -776,8 +776,10 @@ class MemoryConfig(BaseModel):
     digest_chars: int = Field(20000, ge=1000, le=300000)
     #: 整理用哪个模型；留空 = 跟 ``llm.model``
     digest_model: str = ""
-    #: 整理结果的 token 上限（要输出 JSON，别给太小）
-    digest_max_tokens: int = Field(4000, ge=256, le=32000)
+    #: 整理结果的 token 上限。**``0`` = 不设**（请求体里干脆不发 ``max_tokens``，由服务端/模型
+    #: 自己决定）——三桶模式要模型一次重写整份 JSON，卡死了它会把排在后面的人写薄
+    #: （实测 300 条素材 / 10 人时，后 5 人只剩 1~5 条，触发覆盖防护回滚）
+    digest_max_tokens: int = Field(0, ge=0, le=32000)
     #: 群聊记录在库里保留多少天（0 = 永久）。上下文与整理素材共用这张表。
     #: ⚠️ 名字里带 chat 是为了和 ``clear.keep_days``（收集记录，默认 30 天）区分开——
     #: 两者同名不同表，曾经极易改错

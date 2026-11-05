@@ -114,6 +114,33 @@ def test_endpoints():
         assert "next_digest" in mg.json(), "群记忆详情少了下次整理时间"
         assert client.get("/api/music-admin/memory").status_code == 401
 
+        # ---- 立即整理：partial（有人被覆盖防护回滚）不能被报成「失败：未知原因」 ----
+        # 2026-11-05 线上事故：整理其实跑完了，但 partial 落到 else 分支 → 400 +
+        # 「整理失败：未知原因」，页面标红还不刷新
+        import sys as _sys
+        # nonebot 用 load_plugins 加载，模块名是 `src.plugins.music_collector.webui`
+        webui_mod = next(
+            m for k, m in _sys.modules.items()
+            if k.endswith("music_collector.webui") and hasattr(m, "digest_group")
+        )
+        _orig_digest = webui_mod.digest_group
+
+        async def _fake_digest(gid, mem=None, force=False):
+            return {"status": "partial", "rows": 300, "people": 7, "facts": 12,
+                    "rolled_back": ["2948556271", "70321152"]}
+
+        webui_mod.digest_group = _fake_digest
+        try:
+            dp = client.post("/api/music-admin/memory", headers=H,
+                             json={"action": "digest", "group": 999000111})
+            assert dp.status_code == 200, dp.text
+            dj = dp.json()
+            assert dj["ok"] is True, dj
+            assert "未知原因" not in dj["message"], dj["message"]
+            assert "回滚" in dj["message"] and "7 人" in dj["message"], dj["message"]
+        finally:
+            webui_mod.digest_group = _orig_digest
+
         # ---- 人设修订接口：只读状态 + 抱怨流水，不带 token 要 401 ----
         pn = client.get("/api/music-admin/persona", headers=H)
         assert pn.status_code == 200

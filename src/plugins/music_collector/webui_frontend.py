@@ -1826,11 +1826,13 @@ const BOT_GROUPS=[
   {title:"记忆与心事",
    note:"<b>相关度检索</b>：按当前这句话给群成员档案打分挑选（群概况必带），关掉=以前那样按最近活跃装到预算满。<br>"
       + "<b>三桶结构</b>：档案正文改成「他是谁 / 我们之间 / 事件」+ 近期流水，按<b>条目数</b>配额度。"
-      + "⚠️ 它会重写档案格式，<b>开启前先备份 data/memory/</b>；大群建议把「整理输出上限」提到 6000~8000。<br>"
+      + "⚠️ 它会重写档案格式，<b>开启前先备份 data/memory/</b>。<br>"
+      + "<b>整理输出上限</b>默认 <b>0 = 不设</b>：一次要写完所有人的 JSON，卡死了模型会把排在后面的人写薄。<br>"
       + "<b>心事</b>：相处中长出来的内心（人设是出厂设定），整段重写、每轮注入；素材不足时直接跳过、保留旧版。<br>"
       + "⚠️ 各桶配额（l1_quota）是映射类型，网页表单不渲染，只能在 config.yaml 里改。",
    keys:["memory.recall_enabled","memory.recall_top","memory.recall_min","memory.recall_chars",
          "memory.buckets_enabled","memory.l1_max_facts","memory.recent_days",
+         "memory.digest_max_tokens",
          "persona.heart_enabled","persona.heart_chars","persona.heart_min_source"]},
   {title:"高级",
    note:"厂商私有参数（top_k、repetition_penalty、chat_template_kwargs…）在这里用 JSON 直接塞进请求体，会覆盖上面同名项。",

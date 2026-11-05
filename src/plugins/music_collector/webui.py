@@ -700,8 +700,11 @@ FIELD_META["memory.digest_model"] = (
     False,
 )
 FIELD_META["memory.digest_max_tokens"] = (
-    "整理输出上限",
-    "整理结果是 JSON，太小会被截断导致解析失败",
+    "整理输出上限（token）",
+    "<b>0 = 不设上限</b>（推荐）：请求里干脆不发上限，让模型一次把整份 JSON 写完。"
+    "三桶模式要重写所有人的档案，卡死了模型会把排在后面的人写薄——"
+    "实测 300 条素材 / 10 人时，后 5 人只剩 1~5 条，触发覆盖防护回滚。"
+    "<br>只有模型服务端自己要求必须给值时才填，例如 8000",
     False,
 )
 FIELD_META["memory.chat_keep_days"] = (
@@ -2267,13 +2270,23 @@ async def _api_memory(request: Request):
                 f"整理完成：{res.get('rows', 0)} 条消息 → "
                 f"{res.get('facts', 0)} 条新记忆（{res.get('people', 0)} 人）"
             )
+        elif status == "partial":
+            # 有人被「覆盖防护」回滚：整理其实跑完了，别报成失败。以前这里落到 else，
+            # 页面显示「整理失败：未知原因」+400、还因为 ok=false 不刷新（2026-11-05 事故）
+            rolled = res.get("rolled_back") or []
+            msg = (
+                f"整理完成（有回滚）：{res.get('rows', 0)} 条消息 → "
+                f"{res.get('people', 0)} 人已更新；"
+                f"{len(rolled)} 人的新结果不到旧档一半，判为疑似误删、整份保留旧档（档案没变）"
+            )
         elif status == "skipped":
             msg = res.get("why") or "没有新内容"
         else:
             msg = f"整理失败：{res.get('why') or '未知原因'}"
+        ok = status in ("ok", "partial")
         return JSONResponse(
-            {"ok": status == "ok", "message": msg, "detail": res},
-            status_code=200 if status == "ok" else 400,
+            {"ok": ok, "message": msg, "detail": res},
+            status_code=200 if ok else 400,
         )
 
     if action == "style":
