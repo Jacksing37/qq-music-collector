@@ -2823,9 +2823,10 @@ function renderLogs(items, st){
   if(st.installed===false) bits.push("⚠ 日志捕获未生效（请检查启动日志）");
   if(st.bridge===false) bits.push("⚠ 机器人自身的日志未接入（archiver/service 等模块的日志看不到）");
   bits.push(`本次启动共 ${st.total||0} 条`);
+  if(st.restored) bits.push(`含上次运行 ${st.restored} 条（来自 ${st.history_from||"落盘文件"}）`);
   bits.push(`缓冲 ${st.size||0}/${st.capacity||0}`);
   if(st.level) bits.push(`记录等级 ≥ ${st.level}`);
-  bits.push(st.file ? ("落盘 "+st.file) : "未落盘文件");
+  bits.push(st.file ? ("落盘 "+st.file) : "未落盘文件（重启后看不到历史，配 logs.file 即可）");
   if(st.started_at) bits.push("自 "+new Date(st.started_at*1000).toLocaleString()+" 起");
   $("#logMeta").textContent=bits.join(" · ");
   if(atBottom) view.scrollTop=view.scrollHeight;   // 原来就在底部才自动跟随，避免打断翻看

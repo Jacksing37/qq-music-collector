@@ -278,7 +278,9 @@ FIELD_META["logs.level"] = (
 )
 FIELD_META["logs.file"] = (
     "日志落盘路径",
-    "额外把日志写到该文件（相对路径基于项目根目录），按 5MB 轮转、保留 3 份，可跨重启留存；留空表示不落盘。内存缓冲不受影响",
+    "额外把日志写到该文件（相对路径基于项目根目录），按 5MB 轮转、保留 3 份。"
+    "<b>配了它，重启后日志页会把该文件尾部回灌进来</b>，还能看到上次运行干了什么；"
+    "留空 = 不落盘，重启后只剩本次启动的记录",
     False,
 )
 FIELD_META["logs.trace_messages"] = (
@@ -2049,7 +2051,8 @@ async def _api_action(request: Request):
 async def _api_logs(request: Request):
     """运行日志：GET 取（按等级 / 关键词过滤），POST 清空内存缓冲。
 
-    数据源是进程内的环形缓冲（见 ``logbuffer``），所以只含**本次启动后**的日志。
+    数据源是进程内的环形缓冲（见 ``logbuffer``）：含本次启动后的日志，
+    以及启动时从 ``logs.file`` 尾部回灌进来的上一次运行的日志（若配了落盘）。
     """
     if not _token_ok(request):
         raise HTTPException(status_code=401, detail="unauthorized")

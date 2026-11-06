@@ -295,6 +295,92 @@ def test_optional_file_sink_writes() -> None:
     assert logbuffer.stats()["file"] is None
 
 
+def test_history_is_restored_after_restart() -> None:
+    """重启后日志页还能看到上次运行：``install()`` 启动时回灌落盘文件的尾部。
+
+    直接写一个符合 loguru ``format=`` 的假历史文件，再 install()。
+    """
+    _reset()
+    td = Path(tempfile.mkdtemp(prefix="music-loghist-"))
+    try:
+        path = td / "bot.log"
+        path.write_text(
+            "2026-11-06 10:00:00 [INFO] music_collector | 上次启动的第一条\n"
+            "2026-11-06 10:00:01 [INFO] nonebot | 适配器连上了\n"
+            "2026-11-06 10:00:02 [DEBUG] music_collector | 低等级不该回灌\n"
+            "2026-11-06 10:00:03 [ERROR] music_collector | 出错了\n"
+            "Traceback (most recent call last):\n"
+            '  File "x.py", line 1, in <module>\n',
+            encoding="utf-8",
+        )
+        logbuffer.install(lines=500, level="INFO", file=str(path))
+        st = logbuffer.stats()
+        assert st["restored"] == 3, st                  # INFO / nonebot / ERROR，DEBUG 被过滤
+        assert st["history_from"] == str(path), st
+
+        rows = logbuffer.snapshot()
+        msgs = [r["message"] for r in rows]
+        assert "上次启动的第一条" in msgs, msgs
+        assert not any("低等级不该回灌" in m for m in msgs), msgs
+        # 异常的回溯是续行：必须并回上一条，不能变成一堆孤立行
+        err = [r for r in rows if "出错了" in r["message"]]
+        assert err and "Traceback" in err[0]["message"], err
+        # 时间要解析回原来的，不是「现在」
+        assert rows[0]["time"] == "2026-11-06 10:00:00", rows[0]
+        assert rows[0]["levelno"] == logbuffer.LEVEL_ORDER["INFO"], rows[0]
+
+        # 热更新再 install 一次，不能把历史读第二遍
+        logbuffer.install(lines=500, level="INFO", file=str(path))
+        assert logbuffer.stats()["restored"] == 3, logbuffer.stats()
+
+        # 本次启动的新日志接在历史后面
+        logger.info("本次启动的日志")
+        try:
+            logger.complete()
+        except Exception:
+            pass
+        msgs = [r["message"] for r in logbuffer.snapshot()]
+        assert msgs[-1] == "本次启动的日志", msgs
+        assert "上次启动的第一条" in msgs[0], msgs[0]
+    finally:
+        logbuffer.uninstall()                            # 释放文件句柄
+        shutil.rmtree(td, ignore_errors=True)
+    logbuffer.install(lines=500, level="INFO")           # 复位
+
+
+def test_history_respects_buffer_capacity() -> None:
+    """历史比容量多时只留最新的那些——别把刚启动的日志挤出去。"""
+    _reset()
+    td = Path(tempfile.mkdtemp(prefix="music-logcap-"))
+    try:
+        path = td / "bot.log"
+        lines = [
+            f"2026-11-06 09:{i // 60:02d}:{i % 60:02d} [INFO] music_collector | 历史第{i}条"
+            for i in range(60)
+        ]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        # 容量下限是 50（_norm_lines 夹过），所以这里只能验证「60 条历史 → 留最新 50 条」
+        logbuffer.install(lines=50, level="INFO", file=str(path))
+        rows = logbuffer.snapshot()
+        assert len(rows) == 50, len(rows)
+        assert "历史第59条" in rows[-1]["message"], rows[-1]
+        assert "历史第10条" in rows[0]["message"], rows[0]
+        assert "历史第0条" not in [r["message"] for r in rows]
+    finally:
+        logbuffer.uninstall()
+        shutil.rmtree(td, ignore_errors=True)
+    logbuffer.install(lines=500, level="INFO")
+
+
+def test_no_file_means_no_history() -> None:
+    """没配落盘就没有历史可回灌，统计里要如实说 0（前端据此提示去配置）。"""
+    _reset()
+    logbuffer.install(lines=500, level="INFO", file="")
+    st = logbuffer.stats()
+    assert st["file"] is None and st["history_from"] is None, st
+    assert st["restored"] == 0, st
+
+
 def test_configure_from_config_object() -> None:
     _reset()
     class _Cfg:
@@ -474,6 +560,9 @@ if __name__ == "__main__":
     test_exception_is_captured()
     test_uninstall_stops_capture()
     test_optional_file_sink_writes()
+    test_history_is_restored_after_restart()
+    test_history_respects_buffer_capacity()
+    test_no_file_means_no_history()
     test_configure_from_config_object()
     test_frontend_has_logs_entry_and_page()
     test_api_logs_route_registered()

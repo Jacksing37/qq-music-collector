@@ -6,8 +6,13 @@
   服务器上由 systemd 收进 journald，进程内读不到（Docker 里更不存在）。
 - 内存缓冲跨平台且行为可预期：只含本次进程启动后的日志，不混入历史噪声。
 
-需要跨重启留存时把 ``logs.file`` 配成路径，会**另外**用 loguru 轮转落盘一份，
-内存缓冲照旧（它是 WebUI 的数据源，与文件互不影响）。
+**跨重启留存（2026-11-06）**
+
+把 ``logs.file`` 配成路径（线上是 ``logs``）后会额外用 loguru 轮转落盘一份。
+以前这份文件只给人看，网页端重启后依旧是空的——「日志」页只剩本次启动的记录。
+现在 ``install()`` 启动时会把该文件的**尾部回灌**进内存缓冲（只读、不重写），
+所以重启后打开网页仍能看到上一次运行在干什么。回灌只在「换了落盘路径」时读一次，
+热更新重复调用 ``install()`` 不会读第二遍（否则会重复）。
 
 **为什么挂 loguru sink 而不是 stdlib logging.Handler**
 
@@ -18,6 +23,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 import traceback
@@ -58,6 +64,13 @@ LEVELS: tuple[str, ...] = tuple(sorted(LEVEL_ORDER, key=lambda k: LEVEL_ORDER[k]
 _FILE_ROTATION = "5 MB"
 _FILE_RETENTION = 3
 
+#: 回灌时读文件尾部多少字节。8MB 够覆盖 5MB 轮转阈值，再多也只是白读
+_HISTORY_TAIL_BYTES = 8 * 1024 * 1024
+#: 落盘行格式，必须与 :func:`install` 里 loguru 的 ``format=`` 一字不差
+_HISTORY_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[([A-Z]+)\] (\S+) \| (.*)$"
+)
+
 
 class LogBuffer:
     """定长环形缓冲，线程安全。
@@ -72,6 +85,8 @@ class LogBuffer:
         self._levelno = LEVEL_ORDER[self._level]
         self._started = time.time()
         self._total = 0
+        #: 从落盘文件回灌进来的条数（重启后仍能看到的那部分）
+        self._restored = 0
 
     # ------------------------------------------------------------ 写入
 
@@ -121,6 +136,23 @@ class LogBuffer:
             )
         except Exception:
             return
+
+    def restore(self, items: list[dict[str, Any]]) -> int:
+        """把历史日志塞到缓冲区**最前面**，返回实际塞进去的条数。
+
+        只塞「还装得下」的那部分（``capacity - 当前条数``）：``deque.extendleft``
+        在满员时会从**右端**丢数据，也就是把刚启动的日志丢掉——那是我们最想看的。
+        以 newest-first 倒序 appendleft，保证最终仍是时间升序。
+        """
+        if not items:
+            return 0
+        with self._lock:
+            room = (self._buf.maxlen or 0) - len(self._buf)
+            keep = items[-room:] if room > 0 else []
+            for item in reversed(keep):
+                self._buf.appendleft(item)
+            self._restored += len(keep)
+        return len(keep)
 
     # ------------------------------------------------------------ 读取
 
@@ -186,24 +218,28 @@ class LogBuffer:
         return rows
 
     def clear(self) -> int:
-        """清空缓冲，返回清掉的条数。"""
+        """清空缓冲，返回清掉的条数。落盘文件不动（下次重启仍会回灌）。"""
         with self._lock:
             n = len(self._buf)
             self._buf.clear()
+            self._restored = 0
         return n
 
     def stats(self) -> dict[str, Any]:
         with self._lock:
             size = len(self._buf)
             total = self._total
+            restored = self._restored
         return {
             "size": size,
             "capacity": self._buf.maxlen,
             "total": total,
+            "restored": restored,
             "level": self._level,
             "started_at": self._started,
             "installed": _sink_id is not None,
             "file": str(_file_path) if _file_path else None,
+            "history_from": str(_history_from) if _history_from else None,
             # stdlib→loguru 的桥是否装上：没装的话插件里用 logging.getLogger 的模块
             # （archiver / service / config…）的日志不会出现在这里
             "bridge": stdlib_bridge_installed(),
@@ -214,6 +250,15 @@ class LogBuffer:
     @property
     def level(self) -> str:
         return self._level
+
+    @property
+    def levelno(self) -> int:
+        """当前记录等级对应的数值（回灌时按它过滤历史行）。"""
+        return self._levelno
+
+    @property
+    def capacity(self) -> int:
+        return int(self._buf.maxlen or 0)
 
     def set_capacity(self, lines: int) -> None:
         n = _norm_lines(lines)
@@ -250,6 +295,54 @@ _sink_id: Optional[int] = None
 _sink_level: Optional[str] = None
 _file_id: Optional[int] = None
 _file_path: Optional[Path] = None
+#: 已经回灌过的落盘路径（同一个路径只读一次，避免热更新时重复塞历史）
+_history_from: Optional[Path] = None
+
+
+def _read_history(path: Path, min_levelno: int, limit: int) -> list[dict[str, Any]]:
+    """从落盘文件尾部读出最近的日志行，返回与 :meth:`LogBuffer.snapshot` 同构的条目。
+
+    格式必须与 :func:`install` 里那个 loguru ``format=`` 一致：
+    ``2026-11-06 18:00:20 [INFO] music_collector | 正文``。
+
+    以**续行**处理不匹配的行：loguru 把带换行的消息（以及异常 traceback）原样续在后面，
+    这些行归给上一条，否则回溯会被拆成一堆「无时间戳」的孤立行。
+    只读尾部 :data:`_HISTORY_TAIL_BYTES` 字节，被截断的首行直接丢弃。
+    """
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            if size > _HISTORY_TAIL_BYTES:
+                fh.seek(size - _HISTORY_TAIL_BYTES)
+                fh.readline()  # 丢掉可能被切掉一半的首行
+            text = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+
+    items: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        m = _HISTORY_RE.match(line)
+        if not m:
+            if items:                     # 续行：并入上一条
+                items[-1]["message"] += ("\n" + line) if line else "\n"
+            continue
+        when, lv, name, message = m.groups()
+        try:
+            ts = time.mktime(time.strptime(when, "%Y-%m-%d %H:%M:%S"))
+        except ValueError:
+            continue
+        items.append({
+            "ts": ts,
+            "time": when,
+            "level": lv,
+            "levelno": LEVEL_ORDER.get(lv, LEVEL_ORDER["INFO"]),
+            "name": name,
+            "message": message,
+            "exc": None,
+        })
+
+    items = [i for i in items if i["levelno"] >= min_levelno]
+    return items[-limit:] if limit > 0 else items
 
 
 def _resolve_path(raw: Any) -> Optional[Path]:
@@ -279,7 +372,7 @@ def install(
     等级变化需要重新注册 sink（loguru 的等级在 add 时固定）；条数与文件路径变化
     就地调整即可。重复调用不会装出多个 sink。
     """
-    global _sink_id, _sink_level, _file_id, _file_path
+    global _sink_id, _sink_level, _file_id, _file_path, _history_from
 
     buffer.set_capacity(lines)
     buffer.set_level(level)
@@ -321,6 +414,15 @@ def install(
     else:  # pragma: no cover - 仅缺 loguru 的极端环境
         _sink_id = None
         _file_path = _resolve_path(file)
+
+    # 回灌历史：只在「落盘路径变了」时读一次。重复 install（改配置热更新）不再读，
+    # 否则同一段历史会被塞进缓冲好几遍。
+    path_now = _resolve_path(file)
+    if path_now is not None and path_now != _history_from:
+        got = _read_history(path_now, buffer.levelno, buffer.capacity)
+        if got:
+            buffer.restore(got)
+        _history_from = path_now
 
     _install_stdlib_bridge()
     return buffer.stats()
@@ -373,13 +475,14 @@ def stdlib_bridge_installed() -> bool:
 
 def uninstall() -> None:
     """卸载全部 sink（测试收尾用，避免污染同进程后续用例）。"""
-    global _sink_id, _sink_level, _file_id, _file_path
+    global _sink_id, _sink_level, _file_id, _file_path, _history_from
     _drop(_sink_id)
     _drop(_file_id)
     _sink_id = None
     _sink_level = None
     _file_id = None
     _file_path = None
+    _history_from = None
 
 
 def configure_from(cfg: Any) -> dict[str, Any]:
