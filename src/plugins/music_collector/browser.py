@@ -67,6 +67,10 @@ _POLL_INTERVAL = 0.5
 #: 正文长度连续几次不变才算"渲染完"（动态页会分好几批塞内容）
 _STABLE_ROUNDS = 2
 
+#: 等渲染最多花多少秒。**必须封顶**：iframe 里的轮播广告/推荐位会一直变长度，
+#: 没有上限时 `_wait_rendered` 会把整个 timeout 吃光（实测 B 站 10 秒 → 44 秒）
+_RENDER_WAIT_MAX = 12.0
+
 #: 渲染后的 HTML 用 trafilatura 抽正文，抽出来至少这么多字才信它（否则退回 innerText）。
 #: 门槛给低一点：论坛/列表页抽不出"文章"，但那正是 innerText 表现更好的场景
 _MIN_EXTRACT_CHARS = 200
@@ -535,11 +539,24 @@ async def _try_eval(
     return default
 
 
-#: 一次 evaluate 同时取标题 / 最终地址 / 可见文本（少两次往返，也就少了两次卡住的机会）
-_STATE_JS = (
-    "(() => ({ title: document.title || '', url: location.href || '',"
-    " text: document.body ? document.body.innerText : '' }))()"
-)
+#: 一次 evaluate 同时取标题 / 最终地址 / 可见文本（少两次往返，也就少了两次卡住的机会）。
+#: **同源 iframe 的正文也要收**：网易云音乐（``music.163.com``）顶层只有一条导航栏
+#: （实测 121 字），真正内容全在 ``iframe#g_iframe`` 里（实测「我的音乐」11383 字）——
+#: 只读顶层文档等于什么都读不到。跨域 iframe 拿不到 ``contentDocument``，跳过即可。
+_STATE_JS = """(() => {
+  const parts = [];
+  if (document.body) parts.push(document.body.innerText || '');
+  let frames = 0;
+  for (const f of document.querySelectorAll('iframe')) {
+    try {
+      const d = f.contentDocument;
+      const t = d && d.body ? (d.body.innerText || '') : '';
+      if (t.trim()) { parts.push(t); frames += 1; }
+    } catch (e) { /* 跨域 iframe，读不到就算了 */ }
+  }
+  return { title: document.title || '', url: location.href || '',
+           text: parts.join('\\n'), frames: frames };
+})()"""
 
 
 async def _history_url(cdp: Cdp) -> str:
@@ -561,14 +578,15 @@ async def _history_url(cdp: Cdp) -> str:
 
 
 async def _read_state(cdp: Cdp, timeout: float) -> dict:
-    """标题 + 最终 URL + 可见文本。取不到就返回空串（不抛）。"""
+    """标题 + 最终 URL + 可见文本（含同源 iframe）。取不到就返回空串（不抛）。"""
     data = await _try_eval(cdp, _STATE_JS, timeout=timeout, default=None)
     if not isinstance(data, dict):
-        return {"title": "", "url": "", "text": ""}
+        return {"title": "", "url": "", "text": "", "frames": 0}
     return {
         "title": str(data.get("title") or ""),
         "url": str(data.get("url") or ""),
         "text": str(data.get("text") or ""),
+        "frames": int(data.get("frames") or 0),
     }
 
 
@@ -586,7 +604,12 @@ async def _wait_rendered(cdp: Cdp, timeout: float) -> None:
         await asyncio.sleep(_POLL_INTERVAL)
         state = await _try_eval(
             cdp,
-            "(() => ({ s: document.readyState, n: (document.body ? document.body.innerText : '').length }))()",
+            # 长度也把同源 iframe 算进去，否则 iframe 型站点（网易云）会"1 秒就稳定"，
+            # 结果读到空壳。只传长度、不传正文，和以前一样便宜
+            "(() => { let n = document.body ? document.body.innerText.length : 0;"
+            " for (const f of document.querySelectorAll('iframe')) { try {"
+            " const d = f.contentDocument; if (d && d.body) n += d.body.innerText.length;"
+            " } catch (e) {} } return { s: document.readyState, n: n }; })()",
             timeout=min(8.0, max(2.0, deadline - time.monotonic())),
             default=None,
             attempts=1,
@@ -801,7 +824,11 @@ async def browse(
                 return out
             raise exc
 
-        await _wait_rendered(cdp, timeout)
+        # ⚠️ 渲染等待单独封顶：iframe 里常有轮播广告/推荐位一直变，长度永远"不稳定"，
+        # 不加这个上限就会把整个 timeout 预算耗光（实测 B 站从 10 秒变 44 秒）。
+        # 反正后面还有校验，抓到半页也好过让群里等半分钟
+        render_budget = min(_RENDER_WAIT_MAX, max(4.0, timeout * 0.4))
+        await _wait_rendered(cdp, render_budget)
 
         wanted = [s for s in (steps or []) if isinstance(s, dict)][: max(0, int(max_steps))]
         for step in wanted:
