@@ -264,7 +264,7 @@ def test_build() -> None:
 
     check("web_search 在白名单里", "web_search" in tl.ALLOWED_TOOL_NAMES,
           str(sorted(tl.ALLOWED_TOOL_NAMES)))
-    check("白名单共 11 个（新增必须显式加）", len(tl.ALLOWED_TOOL_NAMES) == 11,
+    check("白名单共 12 个（新增必须显式加）", len(tl.ALLOWED_TOOL_NAMES) == 12,
           str(len(tl.ALLOWED_TOOL_NAMES)))
 
 

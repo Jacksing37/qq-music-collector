@@ -591,6 +591,29 @@ class LLMConfig(BaseModel):
     #: workbuddy-tools 目录。留空 = 仓库里的 ``vendor/workbuddy-tools``；
     #: 相对路径按仓库根解析
     search_tools_dir: str = ""
+
+    # ---- 真实浏览器（browse 工具）----
+    #: 是否提供 browse（让模型开一个真浏览器读动态渲染的网页）。
+    #: **默认关**：模型能驱动的浏览器等于「用服务器的身份上网」，只能对自己信任的群打开。
+    #: 开之前必须先在服务器上把 Chromium + Xvfb 服务起好（见 README「真实浏览器」节）
+    browser: bool = False
+    #: 允许使用浏览器的群号白名单。留空 = 不按群限制（仍受上面的总闸约束）。
+    #: ⚠️ 群消息任何人都能触发工具调用，白名单是防「群友拿你的服务器去爬东西」的第一道闸
+    browser_groups: list[int] = Field(default_factory=list)
+    #: 浏览器 CDP 地址。只该指向本机回环——Chromium 开着 remote-debugging 就等于
+    #: 「谁能连上谁就能完全控制这个浏览器（含全部 cookie）」，绝不能是 0.0.0.0
+    browser_cdp: str = "http://127.0.0.1:9222"
+    #: 打开 + 等待渲染的总超时秒数。动态页加载比静态页慢得多，30 秒是保险值
+    browser_timeout: float = Field(30.0, ge=5, le=120)
+    #: browse 返回给模型的可见正文上限（字）。比 fetch_chars 大：动态页常带一堆
+    #: 导航和推荐位，给宽一点模型才看得到真正的内容
+    browser_chars: int = Field(3000, ge=200, le=12000)
+    #: 允许浏览的域名白名单（逗号分隔，支持 ``example.com`` 与 ``.example.com`` 后缀）。
+    #: 留空 = 不限域名，**但仍然逐个请求做公网校验**（内网 / 环回 / 云元数据一律拒绝）
+    browser_allow_hosts: str = ""
+    #: 一次调用里最多执行几个点击 / 输入动作。模型可以在 read 之前先点一下
+    #: "展开全文" 之类的按钮；0 = 只读不点（最安全）
+    browser_max_steps: int = Field(3, ge=0, le=5)
     #: 是否提供 lookup_anime_image（以图搜番）。有人发图问「这是谁 / 出自哪部」时，
     #: 拿这张图去 trace.moe 查作品名和集数。**这是认出动画截图的唯一有效路径**——
     #: 用文字搜索堆「发色 + 眼镜」这类形容词是认不出来的（实测返回颜色表/词典）。

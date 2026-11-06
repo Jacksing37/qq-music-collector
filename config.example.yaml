@@ -352,6 +352,16 @@ llm:
   search_interval: 1.0        # 两次搜索最小间隔（秒），防反爬；0=不限
   search_node: ''             # search_engine=wb 时的 node 路径，留空=PATH 里的 node
   search_tools_dir: ''        # workbuddy-tools 目录，留空=vendor/workbuddy-tools；相对路径按仓库根解析
+  # ---- 真实浏览器（browse 工具）----
+  # 开之前必须先在服务器上把 Chromium + Xvfb 服务起好（README「真实浏览器」节），
+  # 否则模型一用就报「连不上浏览器」。等于「用服务器的身份上网」，只对自己信任的群打开。
+  browser: false              # 提供 browse（真浏览器读 JS 渲染页）；需要先部署浏览器服务
+  browser_groups: []          # 允许用浏览器的群号白名单，留空=不按群限制（仍受上一行总闸约束）
+  browser_cdp: 'http://127.0.0.1:9222'  # 浏览器 CDP 地址，只该是回环；写成 0.0.0.0 = 把浏览器连同登录态交给全网
+  browser_timeout: 30.0       # 打开 + 等待渲染的总超时（秒），5~120
+  browser_chars: 3000         # browse 返回的正文上限（字），200~12000
+  browser_allow_hosts: ''     # 只允许访问这些域名（逗号分隔）；留空=不限域名，但仍逐个请求做公网校验（防 SSRF）。填 example.com 只放行它自己，.example.com 才含子域
+  browser_max_steps: 3        # 一次调用最多几个点击/输入/滚动/等待动作，0=只读不点，0~5
   image_lookup: true          # 提供 lookup_anime_image（以图搜番，认动画截图出自哪部）；免 key，100 次/天
   image_lookup_timeout: 30.0  # 以图搜番超时秒数（下载图 + 查询）
   image_lookup_interval: 3.0  # 两次以图搜番最小间隔（秒）；0=不限
