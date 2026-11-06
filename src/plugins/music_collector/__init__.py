@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import time
 from datetime import datetime
 
@@ -762,6 +764,45 @@ def _mention_targets(event: object, llm_cfg, text: str, quote: str, group_id: in
     )
 
 
+#: 「还在查」的默认提示语（``llm.slow_hint_text`` 留空时用它）
+SLOW_HINT_DEFAULT = "查着呢，等我一下～"
+
+
+async def _slow_hint(bot: Bot, group_id: int, llm_cfg) -> None:
+    """模型这一轮跑太久时，先发一条「还在查」安抚群里。
+
+    三个约束（缺一个就会变成噪音源）：
+
+    - **只在真的慢时才发**：调用方拿到回复就 cancel 这个任务，正常 3~5 秒的问答
+      一条都不会发出去；
+    - **不进对话历史**：这是机器人自己的气泡，只记 ``kind='say'``（旁听背景能看见），
+      不会混进 user/assistant 成对历史里污染下一轮；
+    - **失败静默**：发不出去就当没这条，绝不能因为"安抚"把正式回复搞挂。
+    """
+    interval = float(getattr(llm_cfg, "slow_hint_seconds", 0) or 0)
+    if interval <= 0 or int(group_id) <= 0:
+        return
+    text = str(getattr(llm_cfg, "slow_hint_text", "") or "").strip() or SLOW_HINT_DEFAULT
+    try:
+        count = max(1, int(getattr(llm_cfg, "slow_hint_max", 1) or 1))
+    except (TypeError, ValueError):
+        count = 1
+    waited = 0.0
+    for index in range(count):
+        await asyncio.sleep(interval)
+        waited += interval
+        sent = await safe_send_group(bot, group_id, text)
+        if not sent:
+            return  # 发不出去就别再试了，正式回复比安抚重要
+        logger.info(
+            f"[llm] 群{group_id} 已等 {waited:.0f}s 还没出结果，先发「还在查」"
+            f"（第 {index + 1}/{count} 条）"
+        )
+        # 记成机器人自己说过的话：不然它下一轮不知道自己刚才插过一句
+        with contextlib.suppress(Exception):
+            await llm_bot.record_said(group_id, [text])
+
+
 async def _llm_answer(
     bot: Bot,
     event: object,
@@ -788,23 +829,30 @@ async def _llm_answer(
     # 发送失败的对话一旦落库，模型会记得自己没说过的话，后面几轮全错位，
     # 而且没有任何日志会暴露这件事。
     box: dict = {}
-    reply, reason = await llm_bot.chat(
-        group_id,
-        user_id,
-        _sender_nick(event),
-        text,
-        llm_cfg,
-        images=list(images or []),
-        quote=quote,
-        context=context,
-        # 单独传而不是并进 context：日志页要能还原「它当时读到了哪几句群聊」
-        background=background,
-        # 记忆配置挂在 AppConfig 顶层（memory: 段），llm_cfg 里没有它
-        mem=service.cfg(group_id).memory if group_id else None,
-        mention_targets=mention_targets,
-        mention_out=mentions,
-        body_out=box,
-    )
+    # 慢的时候先安抚一句（拿到回复就 cancel，正常问答一条都不会多发）
+    hint_task = asyncio.create_task(_slow_hint(bot, group_id, llm_cfg))
+    try:
+        reply, reason = await llm_bot.chat(
+            group_id,
+            user_id,
+            _sender_nick(event),
+            text,
+            llm_cfg,
+            images=list(images or []),
+            quote=quote,
+            context=context,
+            # 单独传而不是并进 context：日志页要能还原「它当时读到了哪几句群聊」
+            background=background,
+            # 记忆配置挂在 AppConfig 顶层（memory: 段），llm_cfg 里没有它
+            mem=service.cfg(group_id).memory if group_id else None,
+            mention_targets=mention_targets,
+            mention_out=mentions,
+            body_out=box,
+        )
+    finally:
+        hint_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await hint_task
     if not reply:
         return False, reason
     # 时间感兜底：白天开口说「今晚 / 晚安 / 早点睡」这类话时按当前时段改写一次。
