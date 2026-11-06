@@ -516,28 +516,91 @@ class _Guard:
                 await cdp.call("Fetch.continueRequest", {"requestId": request_id}, timeout=10.0)
 
 
+async def _try_eval(
+    cdp: Cdp, expression: str, timeout: float = 20.0, default=None, attempts: int = 2
+):
+    """取值，**失败不抛**：返回 ``default``。
+
+    为什么需要它：有些页（知乎 ``/signin`` 实测）会把渲染主线程占住几秒甚至更久，
+    ``Runtime.evaluate`` 就一直等不到回应。这时候整次读取不该退化成「打不开」——
+    标题/正文取不到还可能是验证页，依据 URL 仍然能判定。所以取值一律走这里，
+    拿不到就给空值，让上层按「能判多少判多少」往下走。
+    """
+    for _ in range(max(1, int(attempts))):
+        try:
+            return await cdp.evaluate(expression, timeout=timeout)
+        except CdpError as exc:
+            logger.debug(f"[browse] 取值失败（{timeout:g}s）: {exc}")
+            await asyncio.sleep(0.4)
+    return default
+
+
+#: 一次 evaluate 同时取标题 / 最终地址 / 可见文本（少两次往返，也就少了两次卡住的机会）
+_STATE_JS = (
+    "(() => ({ title: document.title || '', url: location.href || '',"
+    " text: document.body ? document.body.innerText : '' }))()"
+)
+
+
+async def _history_url(cdp: Cdp) -> str:
+    """从导航历史取当前 URL。**不经过渲染主线程**——页面 JS 卡死时它照样能回。
+
+    这条是给"重定向到验证页/登录页"兜底的：知乎实测会被 302 到 ``/signin``，
+    而那一页 JS 可能把主线程占住，``location.href`` 取不回来。历史记录走浏览器
+    进程，不排队等页面脚本。
+    """
+    try:
+        res = await cdp.call("Page.getNavigationHistory", {}, timeout=8.0)
+    except CdpError:
+        return ""
+    entries = res.get("entries") or []
+    index = int(res.get("currentIndex") or 0)
+    if 0 <= index < len(entries):
+        return str((entries[index] or {}).get("url") or "")
+    return ""
+
+
+async def _read_state(cdp: Cdp, timeout: float) -> dict:
+    """标题 + 最终 URL + 可见文本。取不到就返回空串（不抛）。"""
+    data = await _try_eval(cdp, _STATE_JS, timeout=timeout, default=None)
+    if not isinstance(data, dict):
+        return {"title": "", "url": "", "text": ""}
+    return {
+        "title": str(data.get("title") or ""),
+        "url": str(data.get("url") or ""),
+        "text": str(data.get("text") or ""),
+    }
+
+
 async def _wait_rendered(cdp: Cdp, timeout: float) -> None:
     """等页面"真的渲染完"：readyState=complete 且正文长度连续两轮不变。
 
     只看 ``readyState`` 不够——动态页在 complete 之后还会继续塞内容，
-    早读一步就是半页。
+    早读一步就是半页。轮询本身用短超时：万一主线程卡住，不能让一次轮询吃掉
+    整个时间预算。
     """
     deadline = time.monotonic() + max(1.0, timeout)
     last = -1
     stable = 0
     while time.monotonic() < deadline:
         await asyncio.sleep(_POLL_INTERVAL)
-        with contextlib.suppress(CdpError):
-            state = await cdp.evaluate("document.readyState")
-            raw = await cdp.evaluate("document.body ? document.body.innerText : ''") or ""
-            size = len(raw)
-            if state == "complete" and size > 0 and size == last:
-                stable += 1
-                if stable >= _STABLE_ROUNDS:
-                    return
-            else:
-                stable = 0
-            last = size
+        state = await _try_eval(
+            cdp,
+            "(() => ({ s: document.readyState, n: (document.body ? document.body.innerText : '').length }))()",
+            timeout=min(8.0, max(2.0, deadline - time.monotonic())),
+            default=None,
+            attempts=1,
+        )
+        if not isinstance(state, dict):
+            continue
+        size = int(state.get("n") or 0)
+        if state.get("s") == "complete" and size > 0 and size == last:
+            stable += 1
+            if stable >= _STABLE_ROUNDS:
+                return
+        else:
+            stable = 0
+        last = size
 
 
 async def _run_step(cdp: Cdp, step: dict) -> str:
@@ -617,7 +680,7 @@ async def _run_step(cdp: Cdp, step: dict) -> str:
 async def _screenshot(cdp: Cdp, shots_dir: Path, tag: str = "") -> str:
     """截一张 PNG 存到本地，返回路径（失败返回空串，绝不因此报错）。"""
     try:
-        result = await cdp.call("Page.captureScreenshot", {"format": "png"})
+        result = await cdp.call("Page.captureScreenshot", {"format": "png"}, timeout=12.0)
         data = result.get("data") or ""
         if not data:
             return ""
@@ -750,26 +813,40 @@ async def browse(
         if wanted:
             await _wait_rendered(cdp, min(10.0, timeout))
 
-        title = str(await cdp.evaluate("document.title") or "").strip()
-        final_url = str(await cdp.evaluate("location.href") or target)
-        raw = await cdp.evaluate("document.body ? document.body.innerText : ''") or ""
-        visible = normalize_text(str(raw))
+        # 一次取值同时拿标题 / 最终地址 / 可见文本；主线程卡住时返回空值而不是抛错，
+        # 让"能不能读懂正文"和"这是不是验证页"解耦（后者只看 URL 也常常够）
+        state = await _read_state(cdp, min(25.0, max(8.0, timeout)))
+        final_url = state["url"] or (await _history_url(cdp)) or target
+        title = state["title"].strip()
+        visible = normalize_text(state["text"])
 
-        # 渲染后的 HTML 再交给 trafilatura 抽一遍正文：innerText 里混着导航、
-        # 侧栏、"接下来播放"这类东西（B 站实测 1388 字里有三分之一是导航）。
-        # 抽得出来就用干净的，抽不出来（列表页/论坛/SPA）才退回 innerText。
+        # ① 只看 URL 就能判定的墙（/signin、wappass、/captcha …）：**不等正文**
+        #    实测知乎 /signin 会把渲染主线程占住，等正文就等于把整次读取等废
+        early = detect_challenge("", final_url, "")
+        if early:
+            out.update({"url": final_url, "title": title[:120], "needs_human": True,
+                        "reason": early, "chars": len(visible),
+                        "text": clip(visible, max_chars), "source": "innerText"})
+            out["screenshot"] = await _screenshot(cdp, shots, _host_of(final_url) or "page")
+            logger.info(f"[browse] 需要人工处理（URL 判定）: {final_url[:80]}")
+            return out
+
+        # ② 渲染后的 HTML 再交给 trafilatura 抽一遍正文：innerText 里混着导航、
+        #    侧栏、"接下来播放"这类东西（B 站实测 1388 字里有三分之一是导航）。
+        #    抽得出来就用干净的，抽不出来（列表页/论坛/SPA）才退回 innerText。
         text = visible
         source = "innerText"
-        with contextlib.suppress(CdpError):
-            html = await cdp.evaluate("document.documentElement.outerHTML") or ""
-            if html:
-                meta_title, clean = webtool.extract_content(str(html), final_url)
-                clean = normalize_text(clean)
-                if len(clean) >= _MIN_EXTRACT_CHARS:
-                    text = clean
-                    source = "extract"
-                    if not title and meta_title:
-                        title = meta_title
+        html = await _try_eval(
+            cdp, "document.documentElement.outerHTML", timeout=20.0, default="", attempts=1
+        )
+        if html:
+            meta_title, clean = webtool.extract_content(str(html), final_url)
+            clean = normalize_text(clean)
+            if len(clean) >= _MIN_EXTRACT_CHARS:
+                text = clean
+                source = "extract"
+                if not title and meta_title:
+                    title = meta_title
 
         out.update(
             {
@@ -781,8 +858,8 @@ async def browse(
             }
         )
 
-        # 验证页判定用**屏幕上真实显示的内容**（innerText），不用抽干净之后的正文：
-        # 验证控件常常在导航/侧栏里，trafilatura 会把它丢掉
+        # ③ 再按标题/正文控件判一次（验证页判定用**屏幕上真实显示的内容**，
+        #    不用抽干净之后的正文：验证控件常在导航/侧栏里，trafilatura 会丢掉）
         reason = detect_challenge(title, final_url, visible)
         if reason:
             out["needs_human"] = True
@@ -792,7 +869,9 @@ async def browse(
             return out
 
         if not text:
-            out["reason"] = "页面打开了但没有可读文字（可能是纯图片页，或者还在加载）"
+            out["reason"] = (
+                "页面打开了但读不到文字（纯图片页、还在加载，或者页面脚本把主线程占住了）"
+            )
             out["screenshot"] = await _screenshot(cdp, shots, host or "page")
             return out
 
