@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from datetime import datetime
 
@@ -35,7 +34,7 @@ from .bot_utils import (  # noqa: E402
     read_message,
     safe_send_group,
     send_music_card,
-    split_text,
+    send_reply_parts,
     trace_messages_enabled,
     trace_out,
 )
@@ -52,7 +51,6 @@ from . import budget as budget_mod  # noqa: E402  当日预算闸门（默认不
 from . import memory as memory_mod  # noqa: E402
 from . import mention as mention_mod  # noqa: E402  回复里 @ 谁，由模型自己点
 from . import persona as persona_mod  # noqa: E402  听群友抱怨「AI 味」，只记不吭声
-from . import replysplit  # noqa: E402  把一条回复拆成几条短消息发
 from . import speak as speak_mod  # noqa: E402  这一条到底该不该开口（概率门）
 from . import timeguard as timeguard_mod  # noqa: E402  白天说「晚安」时改写一次
 from .models import PLATFORM_NAMES, Song  # noqa: E402
@@ -751,25 +749,6 @@ def _mention_targets(event: object, llm_cfg, text: str, quote: str, group_id: in
     )
 
 
-def _split_reply_parts(reply: str, llm_cfg) -> list[str]:
-    """把回复拆成要依次发出的若干段，并保证每段不超过单条消息长度上限。
-
-    ``llm.reply_split`` 关掉时原样一条返回（不清理、不切分），输出与改造前一致；
-    打开时按模型给的换行分条，模型没给换行且正文很长才用标点兜底。
-
-    拆完每段还要过一遍 :func:`bot_utils.split_text`——那是**传输层**的长度上限，
-    与「想拆几条」是两件事：缺了它，超长单段会被服务端拒发。
-    """
-    out: list[str] = []
-    for part in replysplit.split_reply(
-        reply,
-        enabled=bool(llm_cfg.reply_split),
-        max_parts=int(llm_cfg.reply_split_max),
-    ):
-        out.extend(split_text(part))
-    return out or [reply]
-
-
 async def _llm_answer(
     bot: Bot,
     event: object,
@@ -844,29 +823,12 @@ async def _llm_answer(
         if dropped:
             logger.info(f"[mention] 群{group_id} 正文开头的「@{dropped}」已去掉（已经真 @ 过他）")
 
-    parts = _split_reply_parts(reply, llm_cfg)
-    first = Message()
-    # 模型自己点了人（mention 工具）就以它为准；它没点才按配置兜底 @ 提问者。
-    # 两者都上会变成「@提问者 @被评价的人」两个提醒，群里看着像拉人对峙
-    for qq in at_qqs:
-        first += MessageSegment.at(int(qq))
-        first += MessageSegment.text(" ")
-    first += MessageSegment.text(" " + parts[0])
-    # 每段都要拿到回执才计数：只要有一段没发出去，这一轮就不写进记忆
-    delivered = 0
-    if await safe_send_group(bot, group_id, first) is not None:
-        delivered += 1
-    for extra in parts[1:]:
-        # 段间停顿：真人连发几条不会同时弹出来。解析不出区间就是 0，不会卡住
-        delay = replysplit.between_delay(llm_cfg.reply_split_interval)
-        if delay > 0:
-            await asyncio.sleep(delay)
-        if await safe_send_group(
-            bot, group_id, Message(MessageSegment.text(extra))
-        ) is not None:
-            delivered += 1
+    # 拆条与发送统一走 bot_utils.send_reply_parts：主动搭话也调它，别再各写一份
+    delivered, total = await send_reply_parts(
+        bot, group_id, reply, llm_cfg, at_qqs=at_qqs
+    )
     # 全部段落都送达 → 才把这一轮写进 chat_log（内容就是 box 里那两行）
-    if delivered >= len(parts):
+    if delivered >= total:
         await llm_bot.persist_turn(
             group_id,
             user_id=int(box.get("user_id") or user_id),
@@ -886,7 +848,7 @@ async def _llm_answer(
         # 没全送到就别记：模型"以为自己说过"会让后面几轮全错位，
         # 而群里的人看到的是它答非所问。box 里的内容直接丢弃。
         logger.warning(
-            f"[llm] 群{group_id} 回复未送达（{delivered}/{len(parts)} 段成功）"
+            f"[llm] 群{group_id} 回复未送达（{delivered}/{total} 段成功）"
             f" → 不写记忆（本轮问答已丢弃）"
         )
     # 它刚在群里说过话 → 主动搭话的计时重新起算。否则排到的那一轮可能紧接着

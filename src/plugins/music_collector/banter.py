@@ -38,11 +38,12 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 
-from nonebot.adapters.onebot.v11 import Bot, Message
+from nonebot.adapters.onebot.v11 import Bot
 from nonebot.log import logger
 
 from . import speak as speak_mod
-from .bot_utils import safe_send_group
+from . import timeguard as timeguard_mod
+from .bot_utils import send_reply_parts
 from .config import LLMConfig
 from .llm import clip_tail, llm_bot
 from .service import service
@@ -430,8 +431,22 @@ async def _generate(
         logger.info(f"[banter] 群{gid} 未生成（{why}），跳过")
         return {"status": "empty", "why": why}
 
-    if not await safe_send_group(bot, gid, Message(reply)):
-        logger.warning(f"[banter] 群{gid} 发送失败，本轮不记账")
+    # 时间感兜底：白天冒出一句「今晚 / 晚安」同样要改写。放在拆条**之前**——
+    # 拆条会按换行/标点切开，之后改的就只是其中一段（与被动回复同一处顺序）
+    reply = await timeguard_mod.fix(
+        reply, datetime.now(service.resolver.tz), enabled=cfg.time_guard
+    )
+
+    # 拆条与发送和被动回复共用一个出口：``llm.reply_split`` 关掉时原样一条，
+    # 打开时按换行分条、段间按 ``reply_split_interval`` 停顿。主动搭话不 @ 人，
+    # 也不要正文前那个空格（那是被动回答的历史行为）
+    delivered, total = await send_reply_parts(
+        bot, gid, reply, cfg, pad_first=False
+    )
+    if delivered < total:
+        logger.warning(
+            f"[banter] 群{gid} 回复未送达（{delivered}/{total} 段成功），本轮不记账"
+        )
         return {"status": "empty", "why": "send_failed"}
 
     _bump(gid, day)
@@ -440,6 +455,7 @@ async def _generate(
     logger.info(
         f"[banter] 群{gid} 接住 {nick}({uid}) 的「{text[:20]}」"
         f"（背景 {len(rows)} 条）→ 回复 {len(reply)} 字"
+        + (f"，分 {total} 条发" if total > 1 else "")
     )
     return {"status": "ok", "reply": reply}
 

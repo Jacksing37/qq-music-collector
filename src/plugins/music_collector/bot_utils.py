@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 from typing import Optional, Sequence
@@ -9,6 +10,7 @@ from typing import Optional, Sequence
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
 from nonebot.log import logger
 
+from . import replysplit
 from .models import Song
 
 # QQ 单条文本消息过长容易被截断，超过就拆分
@@ -535,6 +537,73 @@ async def send_report(
         seg = image_segment(path)
         if seg is not None:
             await safe_send_group(bot, group_id, Message(seg))
+
+
+# ---------------------------------------------------------------- 回复拆条
+
+# 拆条 + 逐段发送只有这一个出口：被动回答（@ / 戳一戳 / 链接）和主动搭话都调它。
+# 2026-11-06 的线上问题是主动搭话自己写了 `safe_send_group(Message(reply))`，
+# 于是 `llm.reply_split` 对它完全无效——群友看到的就是「一整条长回复」。
+
+
+def split_reply_parts(reply: str, llm_cfg) -> list[str]:
+    """把回复拆成要依次发出的若干段，并保证每段不超过单条消息长度上限。
+
+    ``llm.reply_split`` 关掉时原样一条返回（不清理、不切分），输出与改造前一致；
+    打开时按模型给的换行分条，模型没给换行且正文很长才用标点兜底。
+
+    拆完每段还要过一遍 :func:`split_text`——那是**传输层**的长度上限，
+    与「想拆几条」是两件事：缺了它，超长单段会被服务端拒发。
+    """
+    out: list[str] = []
+    for part in replysplit.split_reply(
+        reply,
+        enabled=bool(llm_cfg.reply_split),
+        max_parts=int(llm_cfg.reply_split_max),
+    ):
+        out.extend(split_text(part))
+    return out or [reply]
+
+
+async def send_reply_parts(
+    bot: Bot,
+    group_id: int,
+    reply: str,
+    llm_cfg,
+    *,
+    at_qqs: Sequence[int] = (),
+    pad_first: bool = True,
+) -> tuple[int, int]:
+    """按 ``llm.reply_split`` 拆条后依次发出，返回 ``(送达段数, 总段数)``。
+
+    调用方拿这两个数判断「要不要记账」：只要有一段没发出去，这一轮就不该落库
+    （模型会记得自己没说过的话）。段与段之间按 ``llm.reply_split_interval``
+    停顿，真人连发几条不会同时弹出来。
+
+    ``at_qqs`` 里的号只 @ 在第一段前面；``pad_first`` 是正文前那个空格——
+    被动回答一直带着它（历史行为），主动搭话不需要，所以那边传 ``False``。
+    """
+    parts = split_reply_parts(reply, llm_cfg)
+    first = Message()
+    for qq in at_qqs:
+        first += MessageSegment.at(int(qq))
+        first += MessageSegment.text(" ")
+    first += MessageSegment.text((" " if pad_first else "") + parts[0])
+
+    delivered = 0
+    # 每段都要拿到回执才计数：只要有一段没发出去，这一轮就不写进记忆
+    if await safe_send_group(bot, group_id, first) is not None:
+        delivered += 1
+    for extra in parts[1:]:
+        # 段间停顿：真人连发几条不会同时弹出来。解析不出区间就是 0，不会卡住
+        delay = replysplit.between_delay(llm_cfg.reply_split_interval)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        if await safe_send_group(
+            bot, group_id, Message(MessageSegment.text(extra))
+        ) is not None:
+            delivered += 1
+    return delivered, len(parts)
 
 
 # ---------------------------------------------------------------- 音乐卡片

@@ -50,8 +50,12 @@ def section(title: str) -> None:
 class FakeBot:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
+        #: >0 时「第 N 条开始发失败」，用来模拟多段回复半路掉线
+        self.fail_at: int = 0
 
     async def send_group_msg(self, *, group_id: int, message) -> dict:
+        if self.fail_at and len(self.sent) + 1 >= self.fail_at:
+            raise RuntimeError("boom")
         self.sent.append((int(group_id), str(message)))
         return {"message_id": len(self.sent)}
 
@@ -411,6 +415,72 @@ def test_store_recent(tmp: Path) -> None:
     check("limit 生效", len(asyncio.run(store.recent_chat(GID, limit=1))) == 1)
 
 
+def test_split_send(tmp: Path) -> None:
+    section("14. 主动搭话也走拆条（2026-11-06 修：banter 曾绕过 replysplit）")
+    with _Env(tmp / "split") as env:
+        cfg = config_manager.config.llm
+        bot = env.fake
+        saved = (cfg.reply_split, cfg.reply_split_max, cfg.reply_split_interval, cfg.time_guard)
+        try:
+            cfg.reply_split = True
+            cfg.reply_split_max = 10
+            cfg.reply_split_interval = "0"  # 别在测试里真睡
+            env.reply = "第一句话在这\n第二句话在那"
+
+            res = asyncio.run(bt.tick(bot, GID, 51, "小明", "周末有人去看海吗，求搭伴"))
+            check("拆成两条发出去", res["status"] == "ok" and len(bot.sent) == 2, str(bot.sent))
+            check("第一条 = 模型第一行",
+                  len(bot.sent) > 0 and bot.sent[0][1] == "第一句话在这", str(bot.sent))
+            check("第二条 = 模型第二行",
+                  len(bot.sent) > 1 and bot.sent[1][1] == "第二句话在那", str(bot.sent))
+            check("主动搭话不留前导空格",
+                  len(bot.sent) > 0 and not bot.sent[0][1].startswith(" "), repr(bot.sent[:1]))
+            check("不 @ 任何人", all("[at:" not in t for _, t in bot.sent), str(bot.sent))
+
+            # 关掉开关 → 与改造前逐字一致：一条、换行原样保留
+            bt.reset_schedule()
+            bot.sent.clear()
+            cfg.reply_split = False
+            res = asyncio.run(bt.tick(bot, GID, 52, "小红", "周末有人去看海吗，求搭伴"))
+            check("reply_split 关 → 原样一条",
+                  len(bot.sent) == 1 and bot.sent[0][1] == env.reply, str(bot.sent))
+
+            # 半路发失败：第二段没送到 → 本轮不记账、不推进游标
+            bt.reset_schedule()
+            bot.sent.clear()
+            cfg.reply_split = True
+            day = bt._today(datetime.now(service.resolver.tz))
+            before = bt._DAILY.get((GID, day), 0)
+            bot.fail_at = 2
+            res = asyncio.run(bt.tick(bot, GID, 53, "小刚", "周末有人去看海吗，求搭伴"))
+            check("第二段失败 → empty", res["status"] == "empty", str(res))
+            check("没全送到就不记账", bt._DAILY.get((GID, day), 0) == before, str(bt._DAILY))
+            bot.fail_at = 0
+
+            # 时间感兜底：白天冒出一句「今晚」同样要改写（与被动回复同一层）
+            bt.reset_schedule()
+            bot.sent.clear()
+            cfg.reply_split = False
+            seen: list[dict] = []
+            real_fix = bt.timeguard_mod.fix
+
+            async def fake_fix(text, now, *, complete=None, enabled=True):
+                seen.append({"text": text, "enabled": enabled})
+                return "改写过的一句话"
+
+            bt.timeguard_mod.fix = fake_fix  # type: ignore[assignment]
+            try:
+                asyncio.run(bt.tick(bot, GID, 54, "小美", "周末有人去看海吗，求搭伴"))
+            finally:
+                bt.timeguard_mod.fix = real_fix  # type: ignore[assignment]
+            check("主动搭话也过时间感兜底", len(seen) == 1, str(seen))
+            check("发出去的是改写后的正文",
+                  len(bot.sent) == 1 and bot.sent[0][1] == "改写过的一句话", str(bot.sent))
+        finally:
+            (cfg.reply_split, cfg.reply_split_max,
+             cfg.reply_split_interval, cfg.time_guard) = saved
+
+
 def main() -> None:
     tmp = Path(tempfile.mkdtemp(prefix="banter_"))
     test_span_parse()
@@ -422,6 +492,7 @@ def main() -> None:
     test_cooldown()
     test_tick_gates(tmp)
     test_tick_send(tmp)
+    test_split_send(tmp)
     test_probe(tmp)
     test_defaults()
     test_reload_trigger()
