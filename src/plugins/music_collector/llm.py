@@ -1131,6 +1131,7 @@ class LLMBot:
         mention_targets: Optional[list] = None,
         mention_out: Optional[list] = None,
         body_out: Optional[dict] = None,
+        note: Optional[object] = None,
     ) -> tuple[Optional[str], str]:
         """生成一条回复。
 
@@ -1307,6 +1308,9 @@ class LLMBot:
                     # 图片地址要一起传：模型看不到 URL（正文只有 [图片]），
                     # 以图搜番这类工具只能从 ToolContext.images 拿图
                     images=pics,
+                    # 「立刻往群里说一句」的回调由触发层注入（工具层没有 bot）；
+                    # 不传时 say 工具不注册（网页测试/离线脚本就属于这种）
+                    note=note,
                 )
                 tool_schemas = tools_mod.schemas(tool_list)
 

@@ -1,4 +1,4 @@
-"""``web_search`` 后端：解析、格式化、失败处理、限流、开关接线。
+﻿"""``web_search`` 后端：解析、格式化、失败处理、限流、开关接线。
 
 **不联网**：Bing 的 HTML 全部是这里手写的固定片段，请求一律打桩。真联网的验证
 在 ``tests/manual_search.py``（要手动跑，别放进回归——会被反爬、也不该每次 CI 都去打人家）。
@@ -264,7 +264,7 @@ def test_build() -> None:
 
     check("web_search 在白名单里", "web_search" in tl.ALLOWED_TOOL_NAMES,
           str(sorted(tl.ALLOWED_TOOL_NAMES)))
-    check("白名单共 12 个（新增必须显式加）", len(tl.ALLOWED_TOOL_NAMES) == 12,
+    check("白名单共 13 个（新增必须显式加）", len(tl.ALLOWED_TOOL_NAMES) == 13,
           str(len(tl.ALLOWED_TOOL_NAMES)))
 
 

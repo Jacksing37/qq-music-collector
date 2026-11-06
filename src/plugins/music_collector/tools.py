@@ -52,8 +52,9 @@ DEFAULT_TOOL_CHARS = 2000
 #: **新增工具必须同时加进这里**，否则 ``build()`` 会把它丢掉——这是为了「少一个
 #: 安装类工具不小心上线」而不是为了省事。
 ALLOWED_TOOL_NAMES = frozenset(
-    {"fetch_url", "browse", "web_search", "lookup_anime_image", "list_skills", "use_skill",
-     "read_skill_file", "run_skill_script", "mention", "remember", "recall", "forget"}
+    {"fetch_url", "browse", "web_search", "say", "lookup_anime_image", "list_skills",
+     "use_skill", "read_skill_file", "run_skill_script", "mention", "remember", "recall",
+     "forget"}
 )
 
 #: 模型臆造出来的「装/写/删」类工具名。命中就回 :data:`INSTALL_DENIED`。
@@ -134,6 +135,14 @@ class ToolContext:
     #: 这次提问（含引用、含转发）里出现的图片地址。模型**看不到**这些 URL
     #: （正文里只有 ``[图片]`` 标记），所以以图搜番这类工具只能从这儿拿图
     images: list[str] = field(default_factory=list)
+    #: 「现在就跟群里说一句」的能力，由触发层（:func:`_llm_answer`）注入。
+    #: **None = 这个上下文发不出去**（网页聊天测试、离线脚本），此时 ``say`` 工具
+    #: 压根不注册——工具层拿不到 bot 实例，只能靠这条回调出去
+    note: Optional[Callable[[str], Awaitable[bool]]] = None
+    #: 这一轮最多允许插几句话（``llm.say_max``）。0 = 不给用
+    note_max: int = 0
+    #: 已经插了几句（由 ``say`` 工具自己累加）
+    note_used: int = 0
 
 
 Handler = Callable[[dict, ToolContext], Awaitable[str]]
@@ -356,6 +365,58 @@ WEB_SEARCH = Tool(
         "required": ["query"],
     },
     handler=_handle_web_search,
+)
+
+
+# ---------------------------------------------------------------- 主动插话
+
+#: ``say`` 一句话最多多少字。超了截断——防模型把半篇正文当成"插话"发出去
+SAY_MAX_CHARS = 60
+
+
+async def _handle_say(args: dict, ctx: ToolContext) -> str:
+    """把一句话立刻发到群里（工具层没有 bot，走 :attr:`ToolContext.note` 这条回调）。"""
+    text = " ".join(str(args.get("text") or "").split())
+    if not text:
+        return "错误：text 不能为空，写一句要跟群里说的话。"
+    if ctx.note is None:
+        return "这个上下文没法主动发消息（网页测试/离线脚本里没有群），直接继续干活，别重试。"
+    if ctx.note_max <= 0 or ctx.note_used >= ctx.note_max:
+        return (
+            f"这一轮已经插过 {ctx.note_used} 句话了（上限 {ctx.note_max}），"
+            "再发就是刷屏，继续把活干完。"
+        )
+    if len(text) > SAY_MAX_CHARS:
+        text = text[:SAY_MAX_CHARS].rstrip() + "…"
+    ok = await ctx.note(text)
+    if not ok:
+        return "没发出去（网络或权限问题），别再重试，直接继续干活。"
+    ctx.note_used += 1
+    return "已经发出去了，群里看到了。继续把活干完，最后照常给完整回复。"
+
+
+SAY = Tool(
+    name="say",
+    description=(
+        "在群里**先说一句**，让提问的人知道你在处理——这句话会**立刻**发出去，"
+        "之后的正式回复照常发。"
+        "**只在要跑好几步工具、估计得十几秒以上时才用**：要连搜几轮、要开好几个网页、"
+        "要开浏览器翻动态页面这类——先说「我去翻一下资料，稍等～」，别让人干等。"
+        "**一两步就能答的别用**；这一轮只给一次机会，说过就别重复。"
+        "只说你在做什么，**别说结论、别复述对方的问题、别客套**，一句口语就够。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "text": {
+                "type": "string",
+                "maxLength": 60,
+                "description": "要发到群里的一句短话（例如「我去翻一下资料，稍等～」）",
+            },
+        },
+        "required": ["text"],
+    },
+    handler=_handle_say,
 )
 
 
@@ -893,6 +954,7 @@ def build(
     mem: Optional[MemoryConfig] = None,
     mention_targets: Optional[list] = None,
     images: Optional[list] = None,
+    note: Optional[Handler] = None,
 ) -> tuple[list[Tool], ToolContext]:
     """按配置组装这次请求可用的工具，以及共享上下文。
 
@@ -911,6 +973,10 @@ def build(
 
     返回前还会按 :data:`ALLOWED_TOOL_NAMES` 再过滤一遍——就算以后有人往这里塞了
     一个「安装技能」的工具，它也发不到 QQ 会话里。
+
+    ``note`` 是「立刻往群里说一句」的回调，**由触发层注入**（工具层拿不到 bot）。
+    不传 = 这个上下文发不出消息（网页聊天测试、离线脚本），那种情况下 ``say``
+    工具不注册——省得模型调了才发现发不出去。
     """
     memory_cfg = mem if mem is not None else MemoryConfig()
     ctx = ToolContext(
@@ -921,10 +987,16 @@ def build(
         nick=str(nick or ""),
         mention_targets=list(mention_targets or []),
         images=[str(url) for url in (images or []) if url],
+        note=note,
+        note_max=int(getattr(cfg, "say_max", 0) or 0) if note is not None else 0,
     )
     tools: list[Tool] = []
     if not cfg.tools:
         return tools, ctx
+    if getattr(cfg, "say_tool", False) and ctx.note is not None and ctx.note_max > 0:
+        # 主动插话：只在"能真发出去"且"允许发几条"时才给。默认排在前面，
+        # 模型第一眼就看见它（压轴的描述比末尾的更容易被采纳）
+        tools.append(SAY)
     if cfg.web_tool:
         tools.append(FETCH_URL)
     if cfg.web_tool and cfg.web_search:

@@ -48,6 +48,7 @@ from .detector import (  # noqa: E402
 )
 from .llm import disabled_reason as llm_disabled_reason  # noqa: E402
 from .llm import clip_tail, item_limit_of, llm_bot  # noqa: E402
+from .tools import SAY_MAX_CHARS  # noqa: E402
 from . import banter as banter_mod  # noqa: E402  被动回复后要重排搭话计时
 from . import budget as budget_mod  # noqa: E402  当日预算闸门（默认不限）
 from . import memory as memory_mod  # noqa: E402
@@ -831,6 +832,28 @@ async def _llm_answer(
     box: dict = {}
     # 慢的时候先安抚一句（拿到回复就 cancel，正常问答一条都不会多发）
     hint_task = asyncio.create_task(_slow_hint(bot, group_id, llm_cfg))
+
+    async def _note(message: str) -> bool:
+        """模型自己要求「先说一句」时走这里：立刻发到群里。
+
+        两条规矩：
+        - 它既然自己说了，就把慢提示的计时器**取消掉**，免得过两秒又冒一句「查着呢」；
+        - 发出去的这句也要记进「它自己说过的话」（``kind='say'``），否则下一轮
+          它会不认账，旁听背景里也看不到自己刚插过话。
+        """
+        text = " ".join(str(message or "").split())
+        if len(text) > SAY_MAX_CHARS:
+            text = text[:SAY_MAX_CHARS].rstrip() + "…"
+        if not text or int(group_id) <= 0:
+            return False
+        hint_task.cancel()
+        if not await safe_send_group(bot, group_id, text):
+            return False
+        logger.info(f"[llm] 群{group_id} 模型主动插话：{text[:40]}")
+        with contextlib.suppress(Exception):
+            await llm_bot.record_said(group_id, [text])
+        return True
+
     try:
         reply, reason = await llm_bot.chat(
             group_id,
@@ -848,6 +871,7 @@ async def _llm_answer(
             mention_targets=mention_targets,
             mention_out=mentions,
             body_out=box,
+            note=_note,
         )
     finally:
         hint_task.cancel()
