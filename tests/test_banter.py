@@ -481,6 +481,15 @@ def test_split_send(tmp: Path) -> None:
              cfg.reply_split_interval, cfg.time_guard) = saved
 
 
+def test_banter_hint_matches_splitter() -> None:
+    section("15. 主动搭话的提示词与拆条对齐")
+    check("要求「想停顿就断句」", "断句" in bt.BANTER_HINT, bt.BANTER_HINT)
+    check("不再写「不要连发好几条」（会跟拆条打架）",
+          "连发好几条" not in bt.BANTER_HINT, bt.BANTER_HINT)
+    check("仍然限定 20~60 字", "20~60" in bt.BANTER_HINT, bt.BANTER_HINT)
+    check("仍然禁止 @ 与引用", "@" in bt.BANTER_HINT and "引用" in bt.BANTER_HINT, bt.BANTER_HINT)
+
+
 def main() -> None:
     tmp = Path(tempfile.mkdtemp(prefix="banter_"))
     test_span_parse()
@@ -497,6 +506,7 @@ def main() -> None:
     test_defaults()
     test_reload_trigger()
     test_store_recent(tmp)
+    test_banter_hint_matches_splitter()
     print(f"\n通过 {PASSED} 项，失败 {FAILED} 项")
     sys.exit(1 if FAILED else 0)
 
