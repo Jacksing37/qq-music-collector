@@ -925,6 +925,20 @@ llm:
 
 #### 故障排查
 
+**先跑一遍验收脚本，它会逐项告诉你哪个环节坏了**（1~2 分钟，真联网、需要浏览器服务在跑）：
+
+```bash
+cd /opt/qq-music-collector
+./.venv/bin/python tests/manual_browser.py --quick   # 只查服务和两个站
+./.venv/bin/python tests/manual_browser.py           # 完整一轮（含 SSRF、会话持久化、并发）
+./.venv/bin/python tests/manual_browser.py --soak 6  # 再压 6 次连续调用，看内存/tab 有没有泄漏
+```
+
+它检查的是：三个 systemd 服务 → CDP → JS 渲染页有没有正文 → 静态文章走没走 `trafilatura`
+→ 登录墙有没有判成 `needs_human` → 内网地址有没有被拒 → **上一次调用的 cookie 下一次还在不在**
+（人工过完验证「再读一次」就靠这一条）→ 并发 → 收尾的 tab/内存审计。
+不进自动回归（要真联网、也怕天天去打人家），重启机器人后或怀疑服务坏了时手动跑。
+
 **① `curl 127.0.0.1:9222/json/version` 不通**
 
 ```bash
