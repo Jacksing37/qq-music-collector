@@ -862,13 +862,19 @@ def skills_root(cfg: LLMConfig) -> Path:
 def _group_allowed(groups, group_id: int) -> bool:
     """群白名单判定：空列表 = 不按群限制（仍受各自的总闸约束）。
 
-    ⚠️ 群消息**任何人都能触发工具调用**，所以这种名单是「防群友拿服务器去爬东西」的
-    第一道闸，只做白名单、不做黑名单。
+    ⚠️ 群号 ``<= 0`` 只出现在**管理员上下文**——网页端「聊天测试」用 ``-1``
+    （见 ``webui.CHAT_TEST_GID``），离线脚本也可能不传。真实 QQ 群消息一定带正数群号，
+    所以这种上下文**不套群白名单**：否则管理员没法在测试页试「只在某些群开放」的工具
+    （实测就是这么发现「测试页里说没有 browse」的）。
+
+    白名单本身仍然是「防群友拿服务器爬东西」的第一道闸，只做白名单、不做黑名单。
     """
+    if int(group_id or 0) <= 0:
+        return True
     allowed = [int(g) for g in (groups or []) if str(g).strip()]
     if not allowed:
         return True
-    return int(group_id or 0) in allowed
+    return int(group_id) in allowed
 
 
 def build(

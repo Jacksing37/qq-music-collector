@@ -481,6 +481,14 @@ def test_tools_registration() -> None:
     check("browser_groups=[] → 不按群限制，有 browse",
           "browse" in names(LLMConfig(tools=True, browser=True, browser_groups=[]), group_id=999),
           str(names(LLMConfig(tools=True, browser=True, browser_groups=[]), group_id=999)))
+    # 网页端「聊天测试」用 group_id=-1（管理员上下文）：不套群白名单，
+    # 否则管理员没法在测试页试「只对某个群开放」的工具（线上踩过：测试页说没有 browse）
+    admin_ctx = names(LLMConfig(tools=True, browser=True, browser_groups=[123]), group_id=-1)
+    check("group_id=-1（网页聊天测试，管理员上下文）→ 有 browse", "browse" in admin_ctx,
+          str(admin_ctx))
+    check("group_id=-1 但总闸关着 → 仍然没有 browse",
+          "browse" not in names(LLMConfig(tools=True, browser=False, browser_groups=[123]),
+                                group_id=-1))
 
     all_off = names(LLMConfig(tools=False, browser=True, browser_groups=[]))
     check("总闸 tools=False → 一个工具都没有（browser 也救不回来）",
