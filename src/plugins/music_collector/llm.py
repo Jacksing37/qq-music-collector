@@ -1317,6 +1317,8 @@ class LLMBot:
             allow_drop_images = bool(pics)
             allow_drop_history = bool(hist)
             allow_drop_tools = bool(tool_schemas)
+            #: 思考把额度吃光、只剩思考没有正文时，关掉思考重试一次（只试一次）
+            allow_disable_thinking = str(getattr(cfg, "thinking", "auto")) != "off"
             reply: Optional[str] = None
             reasoning = ""
             used_tools = 0
@@ -1384,6 +1386,19 @@ class LLMBot:
                             f"↩️ 超窗，丢弃 {dropped} 条 / {dropped_chars} 字历史后重试",
                         )
                         current = [*base, {"role": "user", "content": current[-1]["content"]}]
+                        continue
+                    # ④ 思考把额度吃光、只剩思考没有正文：**关掉思考重试一次**。
+                    #    实测 deepseek-v4.1-flash + thinking=max/budget=12000：长工具链
+                    #    （6 次工具、历史 1.8 万字）偶尔返回 content 为空、只有
+                    #    reasoning_content。同样的请求重试没用，但关掉思考就能拿到正文——
+                    #    与其让群里看到「生成失败」，不如降级答一句（2026-11-07 03:09 实测）。
+                    if allow_disable_thinking and "只产出了思考内容" in err:
+                        allow_disable_thinking = False
+                        cfg = cfg.model_copy(update={"thinking": "off", "thinking_budget": 0})
+                        logger.warning(f"[llm] 群{group_id} 只有思考没有正文（{err[:60]}）→ 关掉思考重试")
+                        llmtrace_mod.step(
+                            trace, f"↩️ 只剩思考没有正文，关掉思考重试一次：{err[:90]}"
+                        )
                         continue
                     self.last_error = err
                     logger.warning(f"[llm] 群{group_id} 生成失败: {err}")
