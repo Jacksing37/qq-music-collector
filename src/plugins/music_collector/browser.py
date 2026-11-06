@@ -71,6 +71,11 @@ _STABLE_ROUNDS = 2
 #: 没有上限时 `_wait_rendered` 会把整个 timeout 吃光（实测 B 站 10 秒 → 44 秒）
 _RENDER_WAIT_MAX = 12.0
 
+#: ``Page.navigate`` 单独封顶。有些站从机房根本连不通（duckduckgo、bangumi），
+#: 一直等就只能等到 timeout 用完——实测一轮 87 秒里有 60 秒是这么白等的，
+#: 模型还以为"页面在加载"。导航阶段等不到就是等不到，早点失败让它换来源
+_NAV_TIMEOUT_MAX = 12.0
+
 #: 渲染后的 HTML 用 trafilatura 抽正文，抽出来至少这么多字才信它（否则退回 innerText）。
 #: 门槛给低一点：论坛/列表页抽不出"文章"，但那正是 innerText 表现更好的场景
 _MIN_EXTRACT_CHARS = 200
@@ -814,7 +819,9 @@ async def browse(
         await cdp.call("Fetch.enable", {"patterns": [{"urlPattern": "*"}]})
 
         try:
-            nav = await cdp.call("Page.navigate", {"url": target}, timeout=timeout)
+            nav = await cdp.call(
+                "Page.navigate", {"url": target}, timeout=min(_NAV_TIMEOUT_MAX, max(5.0, timeout))
+            )
             if nav.get("errorText"):
                 out["error"] = (
                     "页面里的请求被拦了（内网地址或不在允许的域名里）"
@@ -825,6 +832,15 @@ async def browse(
         except CdpError as exc:
             if guard.blocked:
                 out["error"] = "页面里的请求被拦了（内网地址或不在白名单），没能加载"
+                return out
+            if "Page.navigate 超时" in str(exc):
+                # 这台机器连不上的站（Google / DuckDuckGo / Bangumi …）就是连不上，
+                # 别让模型以为"再多等会就好"——直接告诉它换来源
+                out["error"] = (
+                    f"这个站从这台机器打不开（导航 {_NAV_TIMEOUT_MAX:g} 秒没响应）。"
+                    "**别重试同一个域名**，换别的来源：萌娘百科（zh.moegirl.org.cn）、"
+                    "B站搜索页（search.bilibili.com）、cn.bing.com"
+                )
                 return out
             raise exc
 
