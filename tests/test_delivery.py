@@ -278,18 +278,18 @@ async def test_multi_part_all_delivered_writes_whole_reply() -> None:
     """拆成多段全部送达 → 落库；assistant 行存的是**整条**回复，不是最后一段。"""
     cfg = base_cfg(reply_split=True, reply_split_max=5)
     store, bot, ok, why = await answer_once(
-        gid=7722, reply="第一句\n第二句\n第三句", cfg=cfg
+        gid=7722, reply="第一句\n\n第二句\n\n第三句", cfg=cfg
     )
     assert len(bot.sent) == 3, bot.sent
     assert len(store.rows) == 2, store.rows
-    assert store.rows[1]["content"] == "第一句\n第二句\n第三句", store.rows[1]["content"]
+    assert store.rows[1]["content"] == "第一句\n\n第二句\n\n第三句", store.rows[1]["content"]
 
 
 async def test_multi_part_partial_failure_discards() -> None:
     """多段里只要有一段失败 → 整轮不落库（哪怕另外两段已经发出去了）。"""
     cfg = base_cfg(reply_split=True, reply_split_max=5)
     store, bot, ok, why = await answer_once(
-        gid=7723, reply="第一句\n第二句\n第三句", fail_at={2}, cfg=cfg
+        gid=7723, reply="第一句\n\n第二句\n\n第三句", fail_at={2}, cfg=cfg
     )
     assert len(bot.sent) == 2, bot.sent   # 第 2 段失败，第 3 段仍会尝试（沿用原行为）
     assert store.rows == [], store.rows
@@ -326,8 +326,7 @@ async def test_timeguard_keeps_line_structure_so_split_still_works() -> None:
     sent = [s.strip() for s in bot.sent]
     assert ok and why == "", (ok, why)
     assert sent == [
-        "哈？",
-        "火山罐挨着人质",
+        "哈？火山罐挨着人质",
         "那今天下午开个自定义试试不就知道了",
         "人质别放得太挤~🐳",
     ], sent

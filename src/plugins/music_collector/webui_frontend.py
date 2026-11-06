@@ -2844,6 +2844,7 @@ function renderTraces(items, st){
   TRACES_LAST=items;
   const view=$("#logView");
   $("#logMeta").textContent=[`共 ${st.size||0} 条调用记录（上限 ${st.capacity||0}）`,
+    ...(st.restored?[`含上次运行 ${st.restored} 条`]:[]),
     `成功 ${st.succeeded||0}`, `失败 ${st.failed||0}`, `进程累计 ${st.total||0}`].join(" · ");
   if(!items.length){
     view.innerHTML='<div class="empty">（还没有调用记录。@ 机器人说一句话，或者等它自己搭话，这里就会有一条。）</div>';

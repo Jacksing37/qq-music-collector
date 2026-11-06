@@ -27,6 +27,7 @@ from .config import (
     group_overrides,
 )
 from . import detector
+from . import llmtrace as llmtrace_mod
 from . import logbuffer
 from .detector import detect_from_segments
 from .models import MusicLink, Song
@@ -125,6 +126,11 @@ class CollectorService:
             logbuffer.configure_from(self.config.logs)
         except Exception as exc:  # noqa: BLE001 - 日志页坏掉不该拖垮启动
             logger.warning(f"[music] 日志缓冲初始化失败（网页端日志页将不可用）: {exc}")
+        # LLM 调用记录同样要跨重启：把 data/llm_trace.jsonl 的尾部读回缓冲
+        try:
+            llmtrace_mod.install()
+        except Exception as exc:  # noqa: BLE001 - 同上，纯观测功能
+            logger.warning(f"[music] LLM 调用记录初始化失败（调用页将看不到历史）: {exc}")
         detector.set_debug(self.config.debug_detect)
         await self.store.init()
         if self.config.cache.enabled and self.config.cache.clean_on_start:

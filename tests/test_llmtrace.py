@@ -18,6 +18,7 @@ import nonebot  # noqa: E402
 nonebot.init(driver="~fastapi")
 
 from music_collector.config import LLMConfig  # noqa: E402
+from music_collector import llmtrace as llmtrace_mod  # noqa: E402
 from music_collector.llmtrace import MAX_FIELD, MAX_STEPS, TraceBuffer  # noqa: E402
 
 PASSED = 0
@@ -162,11 +163,78 @@ def test_query() -> None:
     check("clear 后为空", buf.snapshot() == [] and buf.stats()["size"] == 0)
 
 
+def test_persist_and_restore() -> None:
+    """跨重启留存：install() 后归档会落盘，重启（重新 install）能把历史读回来。"""
+    section("4. 落盘与回灌")
+    import json
+    import tempfile
+
+    old_file = llmtrace_mod.trace_path()
+    td = Path(tempfile.mkdtemp(prefix="music-trace-"))
+    path = td / "llm_trace.jsonl"
+    cfg = LLMConfig(model="m")
+    try:
+        llmtrace_mod.reset()
+        llmtrace_mod.buffer.clear()
+        llmtrace_mod.install(path=str(path), keep=50)
+        check("落盘路径已生效", llmtrace_mod.trace_path() == path, str(llmtrace_mod.trace_path()))
+
+        e = llmtrace_mod.start(7, 11, "甲", cfg, question="重启前的提问")
+        llmtrace_mod.step(e, "🔧 调 fetch_url")
+        llmtrace_mod.finish(e, reply="重启前的回复")
+        check("归档后文件写出来了", path.is_file() and path.stat().st_size > 0)
+
+        # 模拟重启：清空内存，重新 install 同一路径
+        llmtrace_mod.buffer.clear()
+        llmtrace_mod.reset()
+        st = llmtrace_mod.install(path=str(path), keep=50)
+        check("回灌条数 = 1", st.get("restored") == 1, str(st))
+        rows = llmtrace_mod.snapshot(limit=5)
+        check("历史条目读回来了", len(rows) == 1, str(len(rows)))
+        check("提问内容没丢", rows[0]["question"] == "重启前的提问", str(rows[0])[:80])
+        check("回复内容没丢", rows[0]["reply"] == "重启前的回复", str(rows[0])[:80])
+        check("步骤没丢", rows[0]["steps"] == ["🔧 调 fetch_url"], str(rows[0]["steps"]))
+        check("stats 里带 restored", llmtrace_mod.stats()["restored"] == 1, str(llmtrace_mod.stats()))
+
+        # 重复 install 不重复回灌
+        llmtrace_mod.install(path=str(path), keep=50)
+        check("重复 install 不重复读", llmtrace_mod.stats()["size"] == 1, str(llmtrace_mod.stats()))
+
+        # 新记录的 id 要接在历史之后（前端拿 id 当 key）
+        e2 = llmtrace_mod.start(7, 12, "乙", cfg, question="重启后的提问")
+        llmtrace_mod.finish(e2, reply="重启后的回复")
+        ids = [i["id"] for i in llmtrace_mod.snapshot(limit=5)]
+        check("id 不撞车且递增", len(set(ids)) == 2 and max(ids) > rows[0]["id"], str(ids))
+
+        # 坏行 / 空行不能把整个回灌搞崩；跨天条目要带上日期
+        import time as _time
+        two_days_ago = _time.time() - 2 * 86400
+        path.write_text(
+            path.read_text(encoding="utf-8")
+            + "\n{坏行不是 json}\n\n"
+            + json.dumps({"id": 99, "ts": two_days_ago, "question": "跨天的"}, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        llmtrace_mod.buffer.clear()
+        llmtrace_mod.reset()
+        st = llmtrace_mod.install(path=str(path), keep=50)
+        check("坏行被跳过，好行照读", st.get("restored") == 3, str(st))
+        old = [r for r in llmtrace_mod.snapshot() if r.get("question") == "跨天的"]
+        check("跨天条目带上日期", bool(old) and "-" in old[0]["time"], str(old[:1]))
+    finally:
+        # 收尾一律回「不落盘」：后面的用例绝不能往真实 data/ 里写东西
+        llmtrace_mod.reset()
+        llmtrace_mod.buffer.clear()
+        import shutil
+        shutil.rmtree(td, ignore_errors=True)
+
+
 def main() -> None:
     test_basic()
     test_background()
     test_limits()
     test_query()
+    test_persist_and_restore()
     print(f"\n通过 {PASSED} 项，失败 {FAILED} 项")
     sys.exit(1 if FAILED else 0)
 

@@ -425,7 +425,7 @@ def test_split_send(tmp: Path) -> None:
             cfg.reply_split = True
             cfg.reply_split_max = 10
             cfg.reply_split_interval = "0"  # 别在测试里真睡
-            env.reply = "第一句话在这\n第二句话在那"
+            env.reply = "第一句话在这\n\n第二句话在那"
 
             res = asyncio.run(bt.tick(bot, GID, 51, "小明", "周末有人去看海吗，求搭伴"))
             check("拆成两条发出去", res["status"] == "ok" and len(bot.sent) == 2, str(bot.sent))
