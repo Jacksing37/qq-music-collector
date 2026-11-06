@@ -45,7 +45,7 @@ from .detector import (  # noqa: E402
     extract_urls,
 )
 from .llm import disabled_reason as llm_disabled_reason  # noqa: E402
-from .llm import clip_tail, llm_bot  # noqa: E402
+from .llm import clip_tail, item_limit_of, llm_bot  # noqa: E402
 from . import banter as banter_mod  # noqa: E402  被动回复后要重排搭话计时
 from . import budget as budget_mod  # noqa: E402  当日预算闸门（默认不限）
 from . import memory as memory_mod  # noqa: E402
@@ -587,6 +587,9 @@ async def _llm_background(event: object, llm_cfg, text: str = "") -> str:
     ``kind='chat'``，两条通道分开。所以单纯 @ 它一句「刚才在聊啥」，它其实
     一无所知——问出这种「答不上来」的根源在这里，不是模型不行。
 
+    2026-11-06 起还会把**它自己刚发的气泡**（``kind='say'``）按时间混进来、
+    标成「你：」——不然它看背景时只看到别人在说话，完全不知道上一句是自己说的。
+
     ``text`` 是当前这条提问的正文，用来把它自己从背景里剔掉（见
     :func:`_drop_pending_question`）；更早那些「其实是在问它的」也一并剔掉
     （见 :func:`_drop_already_asked`），否则同一句会一边说「不是跟你说话」
@@ -607,6 +610,9 @@ async def _llm_background(event: object, llm_cfg, text: str = "") -> str:
             after_id=int((last or {}).get("id") or 0),
             limit=max_rows,
             max_chars=int(llm_cfg.bg_chat_chars),
+            # 连它自己发的气泡一起取：否则背景里只有别人说话，
+            # 模型完全看不到自己刚说了什么（2026-11-06 用户反馈）
+            include_self=True,
         )
         rows = _drop_pending_question(rows, event, text)
         # 界限之后不够看就往前补。刚回完一句又被 @ 时，界限之后只剩这句提问
@@ -617,6 +623,7 @@ async def _llm_background(event: object, llm_cfg, text: str = "") -> str:
             tail = await service.store.recent_chat(
                 gid, after_id=0, limit=max_rows,
                 max_chars=int(llm_cfg.bg_chat_chars),
+                include_self=True,
             )
             tail = _drop_pending_question(tail, event, text)
             # 只补「紧挨着界限」的那一截（见 _BG_BACKFILL_MINUTES）：界限之前要是
@@ -660,9 +667,14 @@ async def _llm_background(event: object, llm_cfg, text: str = "") -> str:
         ago = max(0, int((now - stamp) // 60)) if stamp > 0 else -1
         when = "刚刚" if ago == 0 else (f"{ago} 分钟前" if ago > 0 else "时间未知")
         body = str(row.get("content") or "").strip().replace("\n", " ")
-        lines.append(
-            f'[{hm} / {when}] {row.get("nick") or "群友"}({row.get("user_id") or 0})：{body}'
-        )
+        # 自己发的气泡（kind='say'）单独标「你」：不标的话模型会以为
+        # 这些话是别人说的，然后拿「我刚才自己说的」当群友的话题来接
+        if str(row.get("kind") or "") == "say":
+            lines.append(f'[{hm} / {when}] 你：{body}')
+        else:
+            lines.append(
+                f'[{hm} / {when}] {row.get("nick") or "群友"}({row.get("user_id") or 0})：{body}'
+            )
 
     # 尊重用户的 bg_chat_chars，但不超过硬上限（超了会把真正的提问挤出 context）
     budget = max(200, min(int(llm_cfg.bg_chat_chars), _BG_CHAR_LIMIT))
@@ -672,7 +684,8 @@ async def _llm_background(event: object, llm_cfg, text: str = "") -> str:
     # 或者以为自己该接话。括号里那句同样不能省——它挡住「把旧话当刚刚」。
     return (
         "【群里刚才在聊的（每行「X 分钟前」是真实时间差，可能不是刚刚；"
-        "这些是别人说的话），不是在跟你说话，判断语境用】\n" + text
+        "标着「你：」的是**你自己**之前发的，其余是别人说的话），"
+        "这不是在跟你说话，判断语境用】\n" + text
     )
 
 
@@ -824,9 +837,13 @@ async def _llm_answer(
             logger.info(f"[mention] 群{group_id} 正文开头的「@{dropped}」已去掉（已经真 @ 过他）")
 
     # 拆条与发送统一走 bot_utils.send_reply_parts：主动搭话也调它，别再各写一份
-    delivered, total = await send_reply_parts(
+    delivered, total, parts = await send_reply_parts(
         bot, group_id, reply, llm_cfg, at_qqs=at_qqs
     )
+    # **记忆里存「实际发出去的样子」**：拆条还原成换行、timeguard 改写后的文本，
+    # 而不是模型原始输出。否则它下次会以为自己说过改写/拆条之前那一版
+    # （2026-11-06：chat_log 里是「今晚…」，群里看到的是「今天下午…」）。
+    sent_text = "\n".join(parts)[: item_limit_of(llm_cfg)]
     # 全部段落都送达 → 才把这一轮写进 chat_log（内容就是 box 里那两行）
     if delivered >= total:
         await llm_bot.persist_turn(
@@ -834,12 +851,14 @@ async def _llm_answer(
             user_id=int(box.get("user_id") or user_id),
             speaker=str(box.get("speaker") or ""),
             body=str(box.get("user_content") or ""),
-            reply=str(box.get("assistant_content") or ""),
+            reply=sent_text,
             reasoning=str(box.get("reasoning") or ""),
         )
+        # 自己发的每个气泡也记一行（kind='say'）：旁听背景要能看见它刚说了什么
+        await llm_bot.record_said(group_id, parts)
         # 记下「它刚才说了什么」：后面群里要是有人嫌弃「AI 味」，判官得知道是哪句话
         # 惹的。放在送达分支里——没发出去的话，群友根本看不到，无从抱怨
-        persona_mod.note_bot_spoke(group_id, reply)
+        persona_mod.note_bot_spoke(group_id, sent_text)
         # 说话时机也要知道「它刚说过话」：抬 heat_fast（只抬快窗口）、把 engage 打折、
         # 重开「紧跟」窗口。同样放在送达分支里——没送到的话它其实没开口，
         # 这时候压自己的概率、等别人接话，全是错的

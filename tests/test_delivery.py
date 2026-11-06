@@ -262,27 +262,45 @@ async def test_no_delivery_no_memory() -> None:
     assert ok is True, f"{ok} {why}"
 
 
+def chat_rows(store):
+    """只要 ``kind='chat'`` 的问答行；``kind='say'`` 是「自己发的气泡」旁听记录。"""
+    return [r for r in store.rows if r["kind"] == "chat"]
+
+
+def said_rows(store):
+    return [r for r in store.rows if r["kind"] == "say"]
+
+
 async def test_delivered_writes_two_rows() -> None:
-    """送达 → 落两行，内容与旧实现一致（提问正文 / 回复正文）。"""
+    """送达 → 落两行问答，外加一行「自己发的气泡」（背景要用）。"""
     store, bot, ok, why = await answer_once(gid=7721, reply="在的，你说")
     assert ok and len(bot.sent) == 1, f"{ok} {bot.sent}"
-    assert [r["role"] for r in store.rows] == ["user", "assistant"], store.rows
-    user, asst = store.rows
+    assert [r["role"] for r in chat_rows(store)] == ["user", "assistant"], store.rows
+    user, asst = chat_rows(store)
     assert user["content"] == "张三(42)：在吗", user["content"]
     assert user["user_id"] == 42 and user["nick"] == "张三"
     assert asst["content"] == "在的，你说", asst["content"]
     assert asst["user_id"] == 0 and asst["nick"] == ""
+    # 自己发的气泡也记一行（kind='say'，role=assistant，user_id=0）
+    said = said_rows(store)
+    assert len(said) == 1, store.rows
+    assert said[0]["role"] == "assistant" and said[0]["user_id"] == 0, said[0]
+    assert said[0]["content"] == "在的，你说", said[0]
 
 
 async def test_multi_part_all_delivered_writes_whole_reply() -> None:
-    """拆成多段全部送达 → 落库；assistant 行存的是**整条**回复，不是最后一段。"""
+    """拆成多段全部送达 → 落库；assistant 行存的是**实际发出去的样子**（各段用换行拼回）。"""
     cfg = base_cfg(reply_split=True, reply_split_max=5)
     store, bot, ok, why = await answer_once(
         gid=7722, reply="第一句\n\n第二句\n\n第三句", cfg=cfg
     )
     assert len(bot.sent) == 3, bot.sent
-    assert len(store.rows) == 2, store.rows
-    assert store.rows[1]["content"] == "第一句\n\n第二句\n\n第三句", store.rows[1]["content"]
+    assert len(chat_rows(store)) == 2, store.rows
+    # 原来是原样存「第一句\n\n第二句\n\n第三句」；2026-11-06 起存拼回去的实际气泡，
+    # 空行在发送时已被吃掉，记忆里也就不该还留着空行
+    assert chat_rows(store)[1]["content"] == "第一句\n第二句\n第三句", chat_rows(store)[1]["content"]
+    # 每个气泡各记一行 kind='say'，背景里就能看到它连发了三条
+    assert [r["content"] for r in said_rows(store)] == ["第一句", "第二句", "第三句"], store.rows
 
 
 async def test_multi_part_partial_failure_discards() -> None:
@@ -331,7 +349,13 @@ async def test_timeguard_keeps_line_structure_so_split_still_works() -> None:
         "人质别放得太挤~🐳",
     ], sent
     assert not any("今晚" in s for s in sent), sent
-    assert len(store.rows) == 2, store.rows            # 全段送达 → 落库
+    assert len(chat_rows(store)) == 2, store.rows      # 全段送达 → 落库
+    # 记忆里存的是**实际发出去的样子**：timeguard 已经改写过的那一版，
+    # 而不是模型原文里的「今晚」——否则下一轮它会以为自己说的是「今晚」
+    kept = chat_rows(store)[1]["content"]
+    assert "今晚" not in kept, kept
+    assert kept == "哈？火山罐挨着人质\n那今天下午开个自定义试试不就知道了\n人质别放得太挤~🐳", kept
+    assert [r["content"] for r in said_rows(store)] == sent, store.rows
 
 
 # ---------------------------------------------------------------- 4. 网页聊天测试路径

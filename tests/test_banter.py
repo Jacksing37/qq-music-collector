@@ -490,6 +490,26 @@ def test_banter_hint_matches_splitter() -> None:
     check("仍然禁止 @ 与引用", "@" in bt.BANTER_HINT and "引用" in bt.BANTER_HINT, bt.BANTER_HINT)
 
 
+def test_background_includes_own_bubbles(tmp: Path) -> None:
+    section("16. 旁听背景包含自己发的气泡（kind='say'）")
+    store = _setup_store(tmp / "selfsay")
+    asyncio.run(store.append_chat(GID, 1, "甲", "user", "第一句", kind="listen"))
+    asyncio.run(store.append_chat(GID, 0, "", "assistant", "我发的气泡", kind="say"))
+
+    rows = asyncio.run(store.recent_chat(GID, limit=10))
+    check("默认只给群友的话（记忆/风格卡要用干净的素材）",
+          [r["content"] for r in rows] == ["第一句"], str(rows))
+
+    rows = asyncio.run(store.recent_chat(GID, limit=10, include_self=True))
+    check("include_self 连自己的气泡一起给",
+          [r["content"] for r in rows] == ["第一句", "我发的气泡"], str(rows))
+    check("按时间正序（自己那句在后面）", rows[-1].get("kind") == "say", str(rows[-1]))
+
+    text = bt.format_batch(rows, service.resolver.tz)
+    check("自己的气泡标成「你：」", "你：我发的气泡" in text, text)
+    check("别人的照旧带昵称与号", "甲(1)：第一句" in text, text)
+
+
 def main() -> None:
     tmp = Path(tempfile.mkdtemp(prefix="banter_"))
     test_span_parse()
@@ -506,6 +526,7 @@ def main() -> None:
     test_defaults()
     test_reload_trigger()
     test_store_recent(tmp)
+    test_background_includes_own_bubbles(tmp)
     test_banter_hint_matches_splitter()
     print(f"\n通过 {PASSED} 项，失败 {FAILED} 项")
     sys.exit(1 if FAILED else 0)

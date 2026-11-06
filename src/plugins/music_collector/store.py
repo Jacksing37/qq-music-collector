@@ -129,10 +129,13 @@ CREATE TABLE IF NOT EXISTS song_notices (
 );
 CREATE INDEX IF NOT EXISTS idx_song_notices_group ON song_notices(group_id, message_id);
 
--- 群聊记录。一张表两个用途，靠 kind 区分：
+-- 群聊记录。一张表三个用途，靠 kind 区分：
 --   kind='chat'   与机器人的一问一答 —— 就是「对话上下文」，重启后从这里恢复；
 --   kind='listen' 旁听到的群消息 —— 只喂给记忆整理任务，绝不进请求上下文
 --                （否则群友的闲聊会被当成「机器人和你的对话」，几小时就把窗口撑爆）。
+--   kind='say'    机器人**实际发出去的气泡**（role='assistant'）—— 只用来拼「群聊背景」，
+--                让模型看得到自己刚才说了什么（2026-11-06）。分析类任务（记忆/风格卡/
+--                心事）一律不读它，否则机器人的话会被当成群友说的写进档案。
 -- digested 是整理游标：整理任务处理过的行标 1，下次只取 0 的。
 CREATE TABLE IF NOT EXISTS chat_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1177,6 +1180,7 @@ class Store:
         limit: int = 0,
         max_chars: int = 0,
         max_age: float = 0.0,
+        include_self: bool = False,
     ) -> list[dict]:
         """取「游标之后」的群友消息（旁听记录），按时间**正序**。
 
@@ -1192,11 +1196,21 @@ class Store:
           半小时前的开场白没什么用。
 
         ``max_age``（秒）非零时只认这段时间内产生的消息，防止接很久以前的话。
+
+        ``include_self=True`` 时把**机器人自己发出的气泡**（``kind='say'``）也按时间
+        混进来，返回行里多带 ``kind`` / ``role`` 两个字段供上层标记「你：」。
+        只有「拼给模型看的背景」该开它；记忆整理、风格卡、心事这些分析类调用
+        必须保持默认（只认旁听到的群友原话），否则机器人的话会被当成群友说的。
         """
-        sql = (
-            "SELECT id, user_id, nick, content, created_at FROM chat_log "
-            "WHERE group_id=? AND kind='listen' AND role='user'"
-        )
+        select = "SELECT id, user_id, nick, content, created_at, kind, role FROM chat_log "
+        if include_self:
+            where = (
+                "WHERE group_id=? "
+                "AND ((kind='listen' AND role='user') OR kind='say')"
+            )
+        else:
+            where = "WHERE group_id=? AND kind='listen' AND role='user'"
+        sql = select + where
         params: list[object] = [int(group_id)]
         if after_id > 0:
             sql += " AND id>?"

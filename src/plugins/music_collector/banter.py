@@ -62,7 +62,7 @@ _CONTEXT_BUDGET = 3900
 #: 所以这里必须明确要模型用空行隔开，否则它写一段逗号长句、我们一条发出去。
 #: 以前这里写的是「不要连发好几条」，和发送层打架（那句是拆条还不存在时定的）。
 BANTER_HINT = (
-    "（下面是群里刚才的一段对话，没有人在跟你说话。"
+    "（下面是群里刚才的一段对话，没有人在跟你说话。标着「你：」的是你自己之前说的话。"
     "你顺着最后那句话主动接一句：20~60 字，像群友随口搭话。"
     "想停顿就断句——用空行分成几条（一条一句），别写成一大段小作文；"
     "不要 @ 任何人、不要引用、不要解释你在做什么、也别追问一堆问题。"
@@ -169,6 +169,10 @@ def format_batch(rows: list[dict], tz) -> str:
         uid = row.get("user_id") or 0
         # 换行压成空格：一条消息占一行，模型才容易数清「有几个人在说话」
         body = str(row.get("content") or "").strip().replace("\n", " ")
+        if str(row.get("kind") or "") == "say":
+            # 自己发的气泡：标成「你」，不然模型会把它当成别人说的话去接
+            lines.append(f"[{ts}] 你：{body}")
+            continue
         lines.append(f"[{ts}] {nick}({uid})：{body}")
     return "\n".join(lines)
 
@@ -395,6 +399,8 @@ async def _generate(
             after_id=_LAST_ID.get(gid, 0),
             limit=int(cfg.speak_batch_max),
             max_chars=int(cfg.speak_batch_chars),
+            # 自己之前发的气泡也算「这段对话」的一部分，否则它接话时看不见自己说过什么
+            include_self=True,
         )
     except Exception as exc:  # noqa: BLE001 — 没有背景也能接，别因此不发
         logger.warning(f"[banter] 群{gid} 取背景失败（照常接）: {exc}")
@@ -445,7 +451,7 @@ async def _generate(
     # 拆条与发送和被动回复共用一个出口：``llm.reply_split`` 关掉时原样一条，
     # 打开时按换行分条、段间按 ``reply_split_interval`` 停顿。主动搭话不 @ 人，
     # 也不要正文前那个空格（那是被动回答的历史行为）
-    delivered, total = await send_reply_parts(
+    delivered, total, parts = await send_reply_parts(
         bot, gid, reply, cfg, pad_first=False
     )
     if delivered < total:
@@ -453,6 +459,9 @@ async def _generate(
             f"[banter] 群{gid} 回复未送达（{delivered}/{total} 段成功），本轮不记账"
         )
         return {"status": "empty", "why": "send_failed"}
+
+    # 自己发的气泡也记一行（kind='say'）：下一轮接话/被 @ 时，背景里能看到它说过什么
+    await llm_bot.record_said(gid, parts)
 
     _bump(gid, day)
     if rows:

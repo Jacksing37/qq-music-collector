@@ -39,6 +39,18 @@ logger = logging.getLogger("music_collector.llm")
 #: 以前写死 600 会把人家长回复腰斩，模型下一轮就看不懂自己在说什么了。
 _HISTORY_CHAR_LIMIT = 600
 
+
+def item_limit_of(cfg: LLMConfig) -> int:
+    """单条历史消息的字符上限：``llm.history_item_chars``，0/缺省时用兜底值。
+
+    抽成函数是因为「落库存什么」和「读历史时长什么样」必须同一个口径——
+    2026-11-06 改成存「实际发出去的气泡」之后，两处各写一份很容易走偏。
+    """
+    try:
+        return max(200, int(getattr(cfg, "history_item_chars", 0) or _HISTORY_CHAR_LIMIT))
+    except (TypeError, ValueError):
+        return _HISTORY_CHAR_LIMIT
+
 #: 系统提示词字符上限。人设写得再长也不该吃掉半个上下文窗口。
 #: 公开常量（不带下划线）是有意的：网页端「机器人」页要按同一个数字显示
 #: 「已用 x / 4000 字」，两边各写一个魔法数字迟早会对不上。
@@ -1165,7 +1177,7 @@ class LLMBot:
             question = question[: cfg.max_input_chars].rstrip() + "…"
 
         # 昵称进 prompt 有助于模型称呼提问者；顺带做一次长度保护
-        item_limit = max(200, int(cfg.history_item_chars or _HISTORY_CHAR_LIMIT))
+        item_limit = item_limit_of(cfg)
         speaker = (nick or str(user_id)).strip()[:item_limit]
 
         # 纯文本版本：写历史、以及「上游不认图」降级时都用它，绝不带 URL。
@@ -1445,6 +1457,41 @@ class LLMBot:
             f" → 回复 {len(reply)} 字{tool_note}（model={cfg.model}）"
         )
         return _done(reply, "", reasoning)
+
+    async def record_said(
+        self, group_id: int, parts: list[str], speaker: str = ""
+    ) -> None:
+        """把**实际发出去的气泡**记进 ``chat_log``（``kind='say'``，``role='assistant'``）。
+
+        为什么要单独记一份：``kind='chat'`` 存的是模型原文（拆条、timeguard 改写、
+        剥 @ 之前的），而旁听背景 ``kind='listen'`` 只收别人的消息——于是模型
+        「看背景」时看不到自己刚发的那几条气泡。有了 ``say`` 行，
+        :meth:`Store.recent_chat`（``include_self=True``）就能把「别人说的 + 我说的」
+        按时间拼成一条完整对话。
+
+        失败只记一条日志：观测/记忆层面的东西不能影响「回复已经发出去了」这个事实。
+        """
+        target = int(group_id or 0)
+        if not target or not parts:
+            return
+        store = self._store
+        if store is None:
+            return
+        for part in parts:
+            text = str(part or "").strip()
+            if not text:
+                continue
+            try:
+                await store.append_chat(
+                    target,
+                    user_id=0,
+                    nick=str(speaker or ""),
+                    role="assistant",
+                    content=text,
+                    kind="say",
+                )
+            except Exception as exc:  # noqa: BLE001 — 记不下自己的话也不能影响回话
+                logger.debug(f"[llm] 群{target} 记录自己发的气泡失败: {exc}")
 
     async def persist_turn(
         self,

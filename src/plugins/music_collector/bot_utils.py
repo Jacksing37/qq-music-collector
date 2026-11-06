@@ -573,12 +573,13 @@ async def send_reply_parts(
     *,
     at_qqs: Sequence[int] = (),
     pad_first: bool = True,
-) -> tuple[int, int]:
-    """按 ``llm.reply_split`` 拆条后依次发出，返回 ``(送达段数, 总段数)``。
+) -> tuple[int, int, list[str]]:
+    """按 ``llm.reply_split`` 拆条后依次发出，返回 ``(送达段数, 总段数, 各段正文)``。
 
-    调用方拿这两个数判断「要不要记账」：只要有一段没发出去，这一轮就不该落库
-    （模型会记得自己没说过的话）。段与段之间按 ``llm.reply_split_interval``
-    停顿，真人连发几条不会同时弹出来。
+    调用方拿前两个数判断「要不要记账」：只要有一段没发出去，这一轮就不该落库
+    （模型会记得自己没说过的话）。第三个返回值是**真正发出去的气泡正文**：
+    落库、写 ``kind='say'`` 的旁听记录都要用它，否则记忆里存的是拆条/改写之前的
+    原文，和群里看到的对不上（2026-11-06 修的就是这个）。
 
     ``at_qqs`` 里的号只 @ 在第一段前面；``pad_first`` 是正文前那个空格——
     被动回答一直带着它（历史行为），主动搭话不需要，所以那边传 ``False``。
@@ -603,7 +604,7 @@ async def send_reply_parts(
             bot, group_id, Message(MessageSegment.text(extra))
         ) is not None:
             delivered += 1
-    return delivered, len(parts)
+    return delivered, len(parts), parts
 
 
 # ---------------------------------------------------------------- 音乐卡片
