@@ -765,7 +765,11 @@ async def browse(
         return out
     if not await host_is_public(host):
         logger.warning(f"[browse] 拒绝打开内网/非法地址: {target[:100]}")
-        out["error"] = "拒绝访问内网 / 环回 / 云元数据之类的地址（SSRF 防护）"
+        # 说清楚是"域名解析到保留地址（DNS 污染/访问不到）"还是"内网地址"，
+        # 否则模型会以为网址写错、反复重试（实测维基百科就这样白试一轮）
+        out["error"] = webtool.url_block_reason(target) or (
+            "拒绝访问内网 / 环回 / 云元数据之类的地址（SSRF 防护）"
+        )
         return out
 
     ok, why = await health(base, timeout=min(5.0, timeout))

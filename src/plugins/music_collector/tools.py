@@ -212,6 +212,15 @@ async def _handle_fetch_url(args: dict, ctx: "ToolContext") -> str:
         cache_minutes=ctx.cfg.fetch_cache_minutes,
     )
     if not page:
+        # 先问一句「是不是这个域名根本不让抓」：DNS 污染/内网地址要说清楚，
+        # 否则模型会以为是自己网址写错了，反复换写法重试（实测维基百科就这样白试一轮）
+        why = webtool.url_block_reason(url)
+        if why:
+            return (
+                f"没能取到 {url}：{why}。\n"
+                "这**不是地址写错**，重试同一条链接没用。可以换个来源（别处也讲过同一件事），"
+                "或者告诉用户你打不开这个站、请他把关键内容贴成文字。不要编造里面的内容。"
+            )
         return (
             f"没能取到 {url} 的内容：可能打不开、需要登录，或者是 JS 渲染出来的页面。"
             "不要编造里面的内容；可以告诉用户你打不开这个链接。"

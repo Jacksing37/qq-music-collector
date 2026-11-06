@@ -392,6 +392,79 @@ async def host_is_public(host: str) -> bool:
     return await loop.run_in_executor(None, is_public_host, host)
 
 
+def _addr_is_public(addr: str) -> bool:
+    """单个 IP 是不是公网地址（和 :func:`is_public_host` 同一套判据）。"""
+    try:
+        ip = ipaddress.ip_address(str(addr).split("%")[0])
+    except ValueError:
+        return False
+    return not (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+def resolved_addresses(host: str) -> list[str]:
+    """这个主机名解析出来的地址（去重、保序）。解析失败返回空列表。"""
+    name = (host or "").strip().strip("[]")
+    if not name:
+        return []
+    out: list[str] = []
+    try:
+        infos = socket.getaddrinfo(name, None)
+    except OSError:
+        return []
+    for info in infos:
+        addr = str(info[4][0]).split("%")[0]
+        if addr not in out:
+            out.append(addr)
+    return out
+
+
+def url_block_reason(url: str) -> str:
+    """为什么这个网址不让抓/不让开浏览器。``''`` = 没问题（可以继续）。
+
+    存在的意义：**别把"DNS 被污染"说成"你网址写错了"**。实测这台机器上
+    ``en.wikipedia.org`` 解析出 ``199.59.148.20`` + ``2001::1``、``zh.wikipedia.org``
+    解析出 ``2001::1`` + ``31.13.73.169``（Facebook 的地址）——典型的投毒。
+    遇到这种，模型和用户都以为是我们的策略拦错了，于是反复换写法重试，白折腾一轮。
+
+    注意这里的判定是**从严**的：解析结果里只要有一个不是公网地址就拒（防 DNS Rebinding）。
+    """
+    try:
+        host = (urlsplit((url or "").strip()).hostname or "")
+    except ValueError:
+        return ""
+    if not host:
+        return ""
+    if is_public_host(host):
+        return ""
+    # 网址里直接写的就是 IP（``127.0.0.1`` / ``169.254.169.254``）：这不是 DNS 的问题，
+    # 别用"多半是污染"去误导——它就是内网/保留地址，本来就不许访问
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        return f"{host} 是内网 / 环回 / 保留地址，不允许访问（SSRF 防护），换公网地址再来"
+    except ValueError:
+        pass
+    addrs = resolved_addresses(host)
+    if not addrs:
+        return (
+            f"这个域名（{host}）在本机解析不出地址（DNS 查不到）——"
+            "这台机器出网受限，不是你网址写错"
+        )
+    bad = [ip for ip in addrs if not _addr_is_public(ip)]
+    if bad:
+        return (
+            f"这个域名（{host}）在本机解析到 {', '.join(bad[:3])}——"
+            "是保留/内网地址，多半是 DNS 污染或这个站在这里访问不了（**不是你网址写错**）"
+        )
+    return f"这个地址（{host}）不允许抓取（内网/环回/云元数据防护）"
+
+
 def url_is_fetchable(url: str) -> bool:
     """粗筛：只放行 http/https 且带主机名的地址（不做 DNS）。"""
     try:
