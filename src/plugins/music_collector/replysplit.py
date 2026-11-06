@@ -1,15 +1,24 @@
 """把一条模型回复拆成多条短消息，按真人节奏发出。
 
-为什么单独成一个模块：拆条的顺序**错一次就全错**——必须先逐段清理、再合并超限段。
+为什么要单独成一个模块：拆条的顺序**错一次就全错**——必须先逐段清理、再合并超限段。
 反过来的话，被合并的那些段接到「……」后面，它们的开头就不再是行首，
 前缀清理会失效（残留的前缀会原样发给群友）。顺序约束只有在纯函数里才测得动。
 
-规则来源（均为"借鉴规则、自行实现"）：
+分条规则（2026-11-06 起「细到逗号」）：
 
-- 「模型用换行自控分条」「超过上限用「……」合并到最后一条」「≤6 字碎片并回前一条」
-  移植自 qq-companion-bot（MIT, ruoqian-0205）。
-- 「无换行时按句末标点兜底切分、再按逗号二次拆」的思路来自 Warm-Isle 的
-  ``ReplyComposer``（AGPL-3.0，**仅借鉴规则，未复制代码**）。
+1. **换行必定分条**（连续多个换行算一个分隔）；
+2. 每行之内按**句末标点**（``。！？!?…~～``）切，切点留在前一段末尾；
+3. 还长的话按**句中标点**（``，,；;``）切——中文聊天里一个逗号就是换一口气，
+   真人发 QQ 是「一句一条」，不是整段一条；
+4. 切出来的**碎块**（单字 / 纯符号表情，如 ``🐳``）并回上一条，别单独刷屏；
+5. 条数超 ``max_parts`` 的，多出来的用「……」并到最后一条（只合并、不丢内容）。
+
+第 3 条是 2026-11-06 的实测反馈改出来的：原来只在「模型给了换行」或「正文 >60 字」
+时才切，结果模型用空格断句的 45 字回复整条发出去，群里看着就是一段小作文。
+
+规则来源（均为"借鉴规则、自行实现"）：「模型用换行自控分条」「超过上限用「……」合并」
+移植自 qq-companion-bot（MIT, ruoqian-0205）；「按句末标点兜底切分」的思路来自
+Warm-Isle 的 ``ReplyComposer``（AGPL-3.0，**仅借鉴规则，未复制代码**）。
 
 本模块不依赖 nonebot / httpx，纯字符串处理，可直接单测。
 """
@@ -21,21 +30,26 @@ import re
 
 __all__ = ["split_reply", "between_delay", "clean_part"]
 
-#: 句末标点：切分点保留在前一段末尾
-_SENT_SPLIT = re.compile(r"(?<=[。！？!?~～…])")
 #: 换行分条（连续多个换行算一个分隔）
 _LINE_SPLIT = re.compile(r"\n+")
+#: 句末标点：切分点保留在前一段末尾
+_SENT_SPLIT = re.compile(r"(?<=[。！？!?…~～])")
+#: 句中标点：切分点**丢给** :func:`_tidy` 收尾时去掉（留着就是多余）。
+#: 半角逗号后面紧跟数字时不切——``1,000`` 这种千分位不该断成两条消息。
+_CLAUSE_SPLIT = re.compile(r"(?<=[，；;])|(?<=,)(?![0-9])")
+#: 段末该被丢掉的切点标点（逗号 / 分号是切点本身，不该留在句尾）
+_TRAILING_SEP = "，,；;"
 #: 区间字符串，如 "0.5-1.5" / "0.5~1.5"
 _RANGE_RE = re.compile(r"\A\s*(\d+(?:\.\d+)?)\s*[-~～]\s*(\d+(?:\.\d+)?)\s*\Z")
 #: 行首时间戳：[2026-11-05 12:30 周三] / [2026-11-05]
 _TIME_PREFIX = re.compile(r"\A\s*\[[0-9]{4}-[0-9]{2}-[0-9]{2}[^\]]{0,24}\]\s*")
 #: 行首纯时刻：[12:30] / [12:30:05]
 _TIME_ONLY = re.compile(r"\A\s*\[[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?\]\s*")
+#: 这段文字里有没有"内容"（汉字 / 字母 / 数字 / 假名 / 谚文）
+_HAS_WORD = re.compile(r"[0-9A-Za-z\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
 
-#: ≤ 这个长度的片段并回前一条，避免「嗯。」「啊。」连发
-FRAGMENT_MAX = 6
-#: 没有换行、且超过这个长度才做标点兜底切分（短回复不该被切）
-SOFT_SPLIT_AT = 60
+#: 短于这个长度的碎块并回前一条（「哈？」2 字要能单独发，「嗯」1 字不行）
+MIN_PART_CHARS = 2
 #: 超限合并时用的连接符
 MERGE_JOINER = "……"
 
@@ -69,15 +83,11 @@ def split_reply(text: str, *, enabled: bool = True, max_parts: int = 10) -> list
     if not enabled:
         return [raw]
 
-    parts = [p for p in (clean_part(line) for line in _LINE_SPLIT.split(raw)) if p]
+    parts: list[str] = []
+    for line in _LINE_SPLIT.split(raw):
+        parts.extend(_split_line(clean_part(line)))
     if not parts:
         return []
-
-    # 只有一段（模型没给换行）时才退而用标点切；模型给了换行就以它为准。
-    # 碎片回并**只作用于算法切分的结果**：中文里「第一句」才 3 个字，若对模型
-    # 主动给的换行也做回并，整条回复会被吞成一句——模型断的句是它想好的停顿。
-    if len(parts) == 1:
-        parts = _merge_fragments(_split_by_punct(parts[0]))
 
     return _cap(parts, max_parts)
 
@@ -95,48 +105,35 @@ def between_delay(interval: str) -> float:
     return random.uniform(low, high)
 
 
-def _split_by_punct(text: str) -> list[str]:
-    """无换行时的兜底：先按句末标点切，仍只有一段再尝试在第一个逗号处断开。"""
-    if len(text) <= SOFT_SPLIT_AT:
-        return [text]
-    pieces = [p for p in (seg.strip() for seg in _SENT_SPLIT.split(text)) if p]
-    if len(pieces) > 1:
-        return pieces
-    return _split_at_comma(text)
+def _split_line(line: str) -> list[str]:
+    """一行之内：先按句末标点切，再按句中标点切，碎块并回前一条。"""
+    out: list[str] = []
+    for sentence in _SENT_SPLIT.split(line):
+        for clause in _CLAUSE_SPLIT.split(sentence):
+            piece = _tidy(clause)
+            if not piece:
+                continue
+            if out and _is_fragment(piece):
+                # 碎块直接贴回上一条（「……了~」+「🐳」），不额外补空格
+                out[-1] += piece
+            else:
+                out.append(piece)
+    return out
 
 
-def _split_at_comma(text: str) -> list[str]:
-    """在第一个逗号处断成两条（真人说话听到一半会停一下）。
+def _tidy(text: str) -> str:
+    """去掉首尾空白，以及句尾那个**切点标点**（逗号 / 分号）。"""
+    return str(text or "").strip().rstrip(_TRAILING_SEP).strip()
 
-    左右各要够长（≥5 / ≥4 字）才切——否则会把「行吧，那就这样」切得很碎。
+
+def _is_fragment(text: str) -> bool:
+    """太短或纯符号的碎块不该单独成一条消息。
+
+    「哈？」「还问？」这种 2~3 字带标点的短句**是**正常一句，要单独发；
+    只有 1 个字（「嗯」）或者整段没有一个文字符号（``🐳``、``——``、``…``）才算碎块。
     """
-    idx = -1
-    for i, ch in enumerate(text):
-        if ch in "，,":
-            idx = i
-            break
-    if idx < 0:
-        return [text]
-    left = text[:idx].strip()
-    right = text[idx + 1 :].strip()
-    if len(left) < 5 or len(right) < 4:
-        return [text]
-    return [left, right]
-
-
-def _merge_fragments(parts: list[str]) -> list[str]:
-    """把过短的片段并回前一条（「嗯。」结尾这类不该单独发一条）。
-
-    只用于 :func:`_split_by_punct` 的结果——算法切分可能在末尾留一个碎块，
-    而模型自己用换行断的句是它有意为之，必须原样保留。
-    """
-    merged: list[str] = []
-    for part in parts:
-        if merged and len(part) <= FRAGMENT_MAX:
-            merged[-1] += part
-        else:
-            merged.append(part)
-    return merged or parts
+    s = str(text or "")
+    return len(s) < MIN_PART_CHARS or not _HAS_WORD.search(s)
 
 
 def _cap(parts: list[str], max_parts: int) -> list[str]:

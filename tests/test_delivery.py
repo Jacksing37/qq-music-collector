@@ -32,6 +32,7 @@ from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message  # noqa: E402
 from nonebot.adapters.onebot.v11.event import Sender  # noqa: E402
 
 import music_collector as mc  # noqa: E402
+from music_collector import timeguard as tg  # noqa: E402
 from music_collector.bot_utils import safe_send_group  # noqa: E402
 from music_collector.config import LLMConfig  # noqa: E402
 from music_collector.llm import LLMBot, llm_bot  # noqa: E402
@@ -294,6 +295,46 @@ async def test_multi_part_partial_failure_discards() -> None:
     assert store.rows == [], store.rows
 
 
+# ---------------------------------------------------------------- 3.5 时间感改写不能拆散分段
+
+
+async def test_timeguard_keeps_line_structure_so_split_still_works() -> None:
+    """2026-11-06 线上事故的回归：timeguard 改写把整条压成一行 → 拆条看到单行 → 整条发出去。
+
+    修好以后：只改含「今晚」的那一行，其余行原样保留，拆条照旧把这条回复分成多条。
+    时刻用「全天都算白天」的补丁钉死，免得用例随运行时间飘（夜里根本不改写）。
+    """
+    cfg = base_cfg(reply_split=True, reply_split_max=8, time_guard=True)
+    old_complete = llm_bot.complete
+    old_span = (tg.DAY_START, tg.DAY_END)
+
+    async def fake_complete(prompt, cf, **kw):
+        return "那今天下午开个自定义试试不就知道了", ""
+
+    llm_bot.complete = fake_complete  # type: ignore[assignment]
+    tg.DAY_START, tg.DAY_END = 0, 24
+    try:
+        store, bot, ok, why = await answer_once(
+            gid=7724,
+            reply="哈？火山罐挨着人质\n\n那今晚开个自定义试试不就知道了\n\n人质别放得太挤~🐳",
+            cfg=cfg,
+        )
+    finally:
+        llm_bot.complete = old_complete  # type: ignore[assignment]
+        tg.DAY_START, tg.DAY_END = old_span
+
+    sent = [s.strip() for s in bot.sent]
+    assert ok and why == "", (ok, why)
+    assert sent == [
+        "哈？",
+        "火山罐挨着人质",
+        "那今天下午开个自定义试试不就知道了",
+        "人质别放得太挤~🐳",
+    ], sent
+    assert not any("今晚" in s for s in sent), sent
+    assert len(store.rows) == 2, store.rows            # 全段送达 → 落库
+
+
 # ---------------------------------------------------------------- 4. 网页聊天测试路径
 
 
@@ -372,6 +413,7 @@ if __name__ == "__main__":
     asyncio.run(test_delivered_writes_two_rows())
     asyncio.run(test_multi_part_all_delivered_writes_whole_reply())
     asyncio.run(test_multi_part_partial_failure_discards())
+    asyncio.run(test_timeguard_keeps_line_structure_so_split_still_works())
     asyncio.run(test_persist_false_writes_nothing())
     asyncio.run(test_body_out_untouched_on_failure())
     asyncio.run(test_body_out_replaced_not_merged())

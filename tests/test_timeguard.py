@@ -146,6 +146,51 @@ def test_complete_exception_falls_back_instead_of_raising() -> None:
     assert "该睡了" not in out
 
 
+# ---------------------------------------------------------------- 3.5 换行结构必须保住
+
+
+def test_multiline_keeps_line_breaks_and_splits_still_work() -> None:
+    """2026-11-06 线上翻的车：整条丢给模型改写 → 换行被压成空格 → 拆条看到单行。
+
+    现在只改**含夜间用语的那一行**，其余行一字不动，段数与段内容都不变。
+    """
+    raw = "哈？火山罐挨着人质\n\n那今晚开个自定义试试不就知道了\n\n人质别放得太挤~🐳"
+    stub = Stub(reply="那今天下午开个自定义试试不就知道了")
+    out = run(raw, at(9), stub)
+    assert out == "哈？火山罐挨着人质\n\n那今天下午开个自定义试试不就知道了\n\n人质别放得太挤~🐳", out
+    assert out.count("\n") == raw.count("\n"), "换行结构必须原样保留"
+    assert stub.calls == 1, stub.calls            # 只改一行就只调一次
+    # 送进改写的是**那一行**，不是整条回复
+    assert "哈？" not in stub.prompts[0], stub.prompts[0][-200:]
+
+
+def test_multiline_fallback_also_keeps_line_breaks() -> None:
+    """改写失败退词表时也只换那句的词，别把整段的换行吃掉。"""
+    stub = Stub(boom=RuntimeError("中转挂了"))
+    raw = "先看阵容\n今晚再说"
+    out = run(raw, at(9), stub)
+    assert out == "先看阵容\n今天再说", out
+
+
+def test_multiline_only_dirty_lines_cost_calls() -> None:
+    """几行都没问题就一次也不调；夜间词在第三行就只调一次。"""
+    stub = Stub(reply="（不该被用到）")
+    assert run("第一行\n第二行\n第三行", at(9), stub) == "第一行\n第二行\n第三行"
+    assert stub.calls == 0, stub.calls
+
+    stub2 = Stub(reply="今天再说")
+    out = run("第一行\n第二行\n今晚再说", at(9), stub2)
+    assert out == "第一行\n第二行\n今天再说", out
+    assert stub2.calls == 1, stub2.calls
+
+
+def test_rewritten_line_is_single_line_even_if_model_returns_many() -> None:
+    """模型不听话吐了多行 → 只留第一行，结构不能由它决定。"""
+    stub = Stub(reply="第一行新说法\n第二行不该出现在输出里")
+    out = run("今晚早点睡", at(9), stub)
+    assert out == "第一行新说法", out
+
+
 # ---------------------------------------------------------------- 4. 词表
 
 
@@ -185,6 +230,10 @@ if __name__ == "__main__":
     test_rewrite_still_dirty_falls_back_to_word_table()
     test_empty_rewrite_falls_back_to_word_table()
     test_complete_exception_falls_back_instead_of_raising()
+    test_multiline_keeps_line_breaks_and_splits_still_work()
+    test_multiline_fallback_also_keeps_line_breaks()
+    test_multiline_only_dirty_lines_cost_calls()
+    test_rewritten_line_is_single_line_even_if_model_returns_many()
     test_hard_replace_covers_four_words()
     test_hard_replace_leaves_other_text_alone()
     test_slot_of_boundaries()

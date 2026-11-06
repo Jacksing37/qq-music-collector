@@ -71,6 +71,9 @@ _FORBIDDEN = "、".join(
 #: 模型爱给改写结果加引号（「今天的汤真好喝。」）。这层壳不能发给群友。
 _QUOTES = "「」『』“”\"'‘’"
 
+#: 一次回复里最多改几行。正常就一行带「今晚」；上限只防「整段都在说晚上」时连打十几次补全。
+_MAX_LINES = 3
+
 
 def _cfg() -> LLMConfig:
     """当前生效的 ``llm`` 配置。
@@ -149,30 +152,52 @@ async def fix(
 
     第 3 条的判断里**必须**再查一遍夜间词：模型完全可能把「今晚」换成「今夜」
     或者干脆把原句抄回来，那不是修好了，是白花一次钱。
+
+    ⚠️ **按行改，换行结构原样保留**（2026-11-06 线上翻的车）：这个函数曾经把
+    整条回复丢给模型改写、再整条替换，于是「哈？\\n\\n那句话」被压成一行空格——
+    后面的拆条（``llm.reply_split``）看到单行，整条回复就又变成一大段发出去了。
+    现在只改**含夜间用语的那一行**，其余行一字不动。
     """
     raw = str(text or "")
     if not enabled or not needs_fix(raw, now):
         return raw
 
+    lines = raw.split("\n")
+    # 只挑「说错了」的那几行；上限是为了万一整段都在说晚上，不至于连打十几次补全
+    targets = [i for i, ln in enumerate(lines) if needs_fix(ln, now)][:_MAX_LINES]
+    if not targets:
+        # 夜间词被换行劈成两半这种边角（实际不会出现）：整条按词表换，
+        # 至少能保证换行不丢，不会把拆条一起搞坏
+        return hard_replace(raw)
+
     comp = complete if complete is not None else llm_bot.complete
+    for i in targets:
+        lines[i] = await _rewrite_line(lines[i], now, comp)
+    return "\n".join(lines)
+
+
+async def _rewrite_line(line: str, now: datetime, comp) -> str:
+    """改**一行**：模型改写优先，改不好退回词表。永不抛异常、永不返回多行。"""
     try:
         out, err = await comp(
-            _rewrite_prompt(raw, now),
+            _rewrite_prompt(line, now),
             _cfg(),
             # 低温暖 + 短上限：这活儿只是「换几个词」，不需要创意也不需要长思考
             max_tokens=200,
             temperature=0.5,
         )
         cleaned = _unwrap(str(out or ""))
+        # 模型偶尔会把整段几行一起吐回来：只留第一行，别把结构还给它自己决定
+        cleaned = cleaned.split("\n")[0].strip() if cleaned else ""
         if cleaned and not NIGHT_WORDS.search(cleaned):
-            logger.info(f"[timeguard] 白天夜间用语已改写：{raw[:40]} → {cleaned[:40]}")
+            logger.info(f"[timeguard] 白天夜间用语已改写：{line[:40]} → {cleaned[:40]}")
             return cleaned
         logger.info(
             f"[timeguard] 改写结果不能用（空或仍含夜间词，err={err or '无'}）→ 退回词表"
         )
     except Exception as exc:  # noqa: BLE001 — 兜底函数绝不能把异常抛给回话链路
         logger.warning(f"[timeguard] 改写调用失败，退回词表兜底: {exc}")
-    return hard_replace(raw)
+    return hard_replace(line)
 
 
 def _rewrite_prompt(text: str, now: datetime) -> str:
