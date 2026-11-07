@@ -2833,6 +2833,20 @@ async def _api_chat_test(request: Request):
         logger.debug(f"[music] 聊天测试候选名单构建失败: {exc}")
 
     mentions: list[int] = []
+
+    #: 测试页里模型「想插话」的内容。测试上下文没有真正的群，所以**不真发**——
+    #: 但必须让它能调 say，否则管理员没法验证「长任务会不会先说一句」
+    #: （2026-11-07 14:00 那次就是栽在这儿：测试页里 say 压根没注册）
+    said: list[str] = []
+
+    async def _test_note(message: str) -> bool:
+        text = str(message or "").strip()[:60]
+        if not text:
+            return False
+        said.append(text)
+        logger.info(f"[music] 聊天测试：模型想先说一句「{text}」（测试页不真发）")
+        return True
+
     started = time.monotonic()
     try:
         reply, reason = await llm_bot.chat(
@@ -2847,6 +2861,7 @@ async def _api_chat_test(request: Request):
             memory_group=mem_gid if mem_gid > 0 else None,
             mention_targets=mention_targets,
             mention_out=mentions,
+            note=_test_note,
         )
     except Exception as exc:  # noqa: BLE001 — 测试页不该 500，错误也是结果
         logger.warning(f"[music] 聊天测试调用失败: {exc}")
@@ -2870,6 +2885,8 @@ async def _api_chat_test(request: Request):
         "ok": True,
         "reply": reply or "",
         "reason": reason or "",
+        # 测试页里模型「想先说一句」的内容（不真发，只给它调用的机会）
+        "said": said,
         "elapsed_ms": elapsed,
         "model": cfg.model,
         "tools": bool(cfg.tools),

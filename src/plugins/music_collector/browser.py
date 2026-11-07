@@ -68,8 +68,10 @@ _POLL_INTERVAL = 0.5
 _STABLE_ROUNDS = 2
 
 #: 等渲染最多花多少秒。**必须封顶**：iframe 里的轮播广告/推荐位会一直变长度，
-#: 没有上限时 `_wait_rendered` 会把整个 timeout 吃光（实测 B 站 10 秒 → 44 秒）
-_RENDER_WAIT_MAX = 12.0
+#: 没有上限时 `_wait_rendered` 会把整个 timeout 吃光（实测 B 站 10 秒 → 44 秒）。
+#: 但也不能太短：萌娘百科那种重页面实测要 **15~16 秒**才把正文画出来，
+#: 12 秒就收手会读到空壳（线上 14:00 那次就是这么拿到 138 字的）。
+_RENDER_WAIT_MAX = 20.0
 
 #: ``Page.navigate`` 单独封顶。有些站从机房根本连不通（duckduckgo、bangumi），
 #: 一直等就只能等到 timeout 用完——实测一轮 87 秒里有 60 秒是这么白等的，
@@ -583,8 +585,12 @@ async def _history_url(cdp: Cdp) -> str:
 
 
 async def _read_state(cdp: Cdp, timeout: float) -> dict:
-    """标题 + 最终 URL + 可见文本（含同源 iframe）。取不到就返回空串（不抛）。"""
-    data = await _try_eval(cdp, _STATE_JS, timeout=timeout, default=None)
+    """标题 + 最终 URL + 可见文本（含同源 iframe）。取不到就返回空串（不抛）。
+
+    **只尝试一次**：这里再叠加一次重试，最坏情况会变成 timeout×2，
+    实测把一轮拖到了 103 秒（2026-11-07 14:00）。取不到就交给上层的 history_url 兜底。
+    """
+    data = await _try_eval(cdp, _STATE_JS, timeout=timeout, default=None, attempts=1)
     if not isinstance(data, dict):
         return {"title": "", "url": "", "text": "", "frames": 0}
     return {
@@ -786,8 +792,17 @@ async def browse(
     guard = _Guard(patterns)
     cdp: Optional[Cdp] = None
     target_id = ""
+
+    # ⚠️ 总时限：下面每一步都有自己的超时，**不设总闸就会叠加**——线上实测一次
+    # browse 花了 103 秒（导航 12 + 渲染 12 + 取值 2×25 + HTML 20 + 截图 12），
+    # 模型还在等，群里就只看到「跑很久」。所有步骤一律用 leftover() 封顶。
+    deadline = time.monotonic() + max(8.0, float(timeout))
+
+    def leftover() -> float:
+        return deadline - time.monotonic()
+
     try:
-        info = await _open_target(base, timeout=min(10.0, timeout))
+        info = await _open_target(base, timeout=min(10.0, max(2.0, leftover())))
         target_id = str(info.get("id") or "")
         ws_url = str(info.get("webSocketDebuggerUrl") or "")
         if not ws_url:
@@ -796,7 +811,9 @@ async def browse(
 
         from websockets.asyncio.client import connect as ws_connect
 
-        ws = await asyncio.wait_for(ws_connect(ws_url, max_size=None), timeout=timeout)
+        ws = await asyncio.wait_for(
+            ws_connect(ws_url, max_size=None), timeout=min(15.0, max(2.0, leftover()))
+        )
         cdp = Cdp(ws)
 
         async def _on_event(msg: dict) -> None:
@@ -820,7 +837,7 @@ async def browse(
 
         try:
             nav = await cdp.call(
-                "Page.navigate", {"url": target}, timeout=min(_NAV_TIMEOUT_MAX, max(5.0, timeout))
+                "Page.navigate", {"url": target}, timeout=min(_NAV_TIMEOUT_MAX, max(5.0, leftover()))
             )
             if nav.get("errorText"):
                 out["error"] = (
@@ -847,7 +864,7 @@ async def browse(
         # ⚠️ 渲染等待单独封顶：iframe 里常有轮播广告/推荐位一直变，长度永远"不稳定"，
         # 不加这个上限就会把整个 timeout 预算耗光（实测 B 站从 10 秒变 44 秒）。
         # 反正后面还有校验，抓到半页也好过让群里等半分钟
-        render_budget = min(_RENDER_WAIT_MAX, max(4.0, timeout * 0.4))
+        render_budget = min(_RENDER_WAIT_MAX, max(4.0, leftover()))
         await _wait_rendered(cdp, render_budget)
 
         wanted = [s for s in (steps or []) if isinstance(s, dict)][: max(0, int(max_steps))]
@@ -858,14 +875,27 @@ async def browse(
                 break
             out["steps_done"] += 1
         if wanted:
-            await _wait_rendered(cdp, min(10.0, timeout))
+            await _wait_rendered(cdp, min(10.0, max(2.0, leftover())))
 
         # 一次取值同时拿标题 / 最终地址 / 可见文本；主线程卡住时返回空值而不是抛错，
         # 让"能不能读懂正文"和"这是不是验证页"解耦（后者只看 URL 也常常够）
-        state = await _read_state(cdp, min(25.0, max(8.0, timeout)))
+        state = await _read_state(cdp, min(25.0, max(4.0, leftover())))
         final_url = state["url"] or (await _history_url(cdp)) or target
         title = state["title"].strip()
         visible = normalize_text(state["text"])
+
+        # 空壳补救：萌娘百科这类重页面实测要 15~16 秒才画完正文，抢早了就只有导航。
+        # 这时**再等一会儿重读一次**（只一次，且总时限还够才做）——线上 14:00 那次
+        # 就是抢早读到 138 字，然后模型以为「页面没内容」放弃了。
+        if not visible and leftover() > 8.0:
+            await asyncio.sleep(2.5)
+            retry = await _read_state(cdp, min(20.0, max(3.0, leftover())))
+            if retry["text"]:
+                state = retry
+                final_url = retry["url"] or final_url
+                title = retry["title"].strip() or title
+                visible = normalize_text(retry["text"])
+                logger.info(f"[browse] 第一次读到空壳，重读后拿到 {len(visible)} 字")
 
         # ① 只看 URL 就能判定的墙（/signin、wappass、/captcha …）：**不等正文**
         #    实测知乎 /signin 会把渲染主线程占住，等正文就等于把整次读取等废
@@ -884,7 +914,7 @@ async def browse(
         text = visible
         source = "innerText"
         html = await _try_eval(
-            cdp, "document.documentElement.outerHTML", timeout=20.0, default="", attempts=1
+            cdp, "document.documentElement.outerHTML", timeout=min(20.0, max(3.0, leftover())), default="", attempts=1
         )
         if html:
             meta_title, clean = webtool.extract_content(str(html), final_url)
