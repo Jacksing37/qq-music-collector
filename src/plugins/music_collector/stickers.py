@@ -109,8 +109,13 @@ def _load(base: Path) -> dict:
 
 
 def _save(base: Path, data: dict) -> None:
-    """原子写：先写 .tmp 再 replace，断电也不会留下半个 JSON。"""
+    """原子写：先写 .tmp 再 replace，断电也不会留下半个 JSON。
+
+    写盘时**总是盖上当前版本号**：v1 的老索引被读过一次、再写一次就升成 v2，
+    免得「字段已经用上了、version 还写着 1」这种自相矛盾的文件留在磁盘上。
+    """
     base.mkdir(parents=True, exist_ok=True)
+    data["version"] = INDEX_VERSION
     path = _index_path(base)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(

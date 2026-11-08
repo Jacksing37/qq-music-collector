@@ -267,10 +267,15 @@ button:disabled{opacity:.5;cursor:not-allowed}
   border-radius:12px;padding:10px 12px;max-height:300px;overflow:auto}
 /* ---- 群记忆 ---- */
 /* ---- 表情包库 ---- */
+/* 布局和「群记忆」相反：**网格占宽的那边**、编辑区固定窄边。
+   记忆页是「名单 + 大段文字」，名单窄才合适；这里是看图，格子小了根本认不出是什么。 */
+.stk-layout{display:grid;grid-template-columns:1fr 360px;gap:14px;align-items:start}
+.stk-side{min-height:340px}
+@media(max-width:980px){.stk-layout{grid-template-columns:1fr}}
 /* 缩略图网格：一条一格。图用 contain 而不是 cover——表情包多是白底方图，
    cover 会把脑袋裁掉；「文件不在了」用同样尺寸的方块占位，网格才不会跳。 */
-.stk-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:10px;
-  max-height:min(56vh,560px);overflow-y:auto;overscroll-behavior:contain;
+.stk-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:10px;
+  max-height:min(60vh,620px);overflow-y:auto;overscroll-behavior:contain;
   padding-right:4px;scrollbar-width:thin}
 .stk-tile{position:relative;border:1px solid var(--card-bd);border-radius:12px;background:var(--input);
   padding:6px;cursor:pointer;transition:.15s}
@@ -750,11 +755,11 @@ button:disabled{opacity:.5;cursor:not-allowed}
         <div class="row" style="margin-top:8px"><span class="msg" id="stkMsg"></span></div>
       </div>
 
-      <div class="mem-layout">
-        <div class="card mem-side">
+      <div class="stk-layout">
+        <div class="card stk-side">
           <div id="stkGrid" class="stk-grid"><div class="empty">加载中…</div></div>
         </div>
-        <div class="card mem-side">
+        <div class="card stk-side">
           <div class="row" style="margin-bottom:8px">
             <span class="badge" id="stkSelId">未选中</span>
             <span class="muted" id="stkSelMeta"></span>
