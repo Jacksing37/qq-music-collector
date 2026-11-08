@@ -30,6 +30,7 @@ from nonebot.rule import Rule
 require("nonebot_plugin_apscheduler")
 
 from .bot_utils import (  # noqa: E402
+    collect_stickers,
     describe_forward_full,
     message_preview,
     quote_prefix_and_images,
@@ -812,6 +813,7 @@ async def _llm_answer(
     images: list[str] | None = None,
     quote: str = "",
     context: str = "",
+    stickers: list[dict] | None = None,
 ) -> tuple[bool, str]:
     """让模型答一句并发到群里，返回 ``(是否已发出, 失败原因)``。
 
@@ -854,6 +856,26 @@ async def _llm_answer(
             await llm_bot.record_said(group_id, [text])
         return True
 
+    async def _send_image(data: bytes) -> bool:
+        """模型要发图 / 表情包时走这里：立刻以**图片消息**发到群里。
+
+        和 ``_note`` 同一套规矩：发之前把慢提示的计时器取消掉（已经有输出了，
+        再冒一句「查着呢」很奇怪）；图片气泡不写文本，所以不记 ``kind='say'``，
+        只在日志里留痕——模型下一轮不需要知道「我发过一张图」的细节，
+        ``sticker_send`` 的返回值里已经告诉它发过了。
+
+        **协议端可能会懒加载**：这里一律传 bytes（不是 file:// 或 QQ 图片链接），
+        理由和 :func:`bot_utils.image_segment` 一样——协议端与机器人不同机也能发。
+        """
+        if not data or int(group_id) <= 0:
+            return False
+        hint_task.cancel()
+        message = Message(MessageSegment.image(bytes(data)))
+        if await safe_send_group(bot, group_id, message) is None:
+            return False
+        logger.info(f"[llm] 群{group_id} 模型发了一张图（{len(data) // 1024} KB）")
+        return True
+
     try:
         reply, reason = await llm_bot.chat(
             group_id,
@@ -872,6 +894,10 @@ async def _llm_answer(
             mention_out=mentions,
             body_out=box,
             note=_note,
+            # 发图能力（send_image / sticker_send 工具）——不传就发不了图
+            send_image=_send_image,
+            # 这条消息里可收藏的表情包（sticker_add 取图用）
+            stickers=list(stickers or []),
         )
     finally:
         hint_task.cancel()
@@ -1006,7 +1032,17 @@ async def _try_llm_reply(bot: Bot, event: GroupMessageEvent) -> bool:
         if url not in pics:
             pics.append(url)
 
-    ok, reason = await _llm_answer(bot, event, llm_cfg, text, pics, quote, context)
+    # 可以收进表情包库的图：QQ 商城表情（mface）和「当表情包发」的图。
+    # 和 pics 分开传：这些地址是给 sticker_add 用的，**不发给视觉模型**
+    # （表情包多是 webp/gif，塞进视觉请求容易整条 400，还会挤掉真正的图）。
+    stickers = collect_stickers(event.message)
+    quoted_message = getattr(getattr(event, "reply", None), "message", None)
+    if llm_cfg.read_reply and quoted_message is not None:
+        for row in collect_stickers(quoted_message):
+            if not any(item.get("url") == row.get("url") for item in stickers):
+                stickers.append(row)
+
+    ok, reason = await _llm_answer(bot, event, llm_cfg, text, pics, quote, context, stickers)
     if ok:
         return True
     if reason == "cooldown":

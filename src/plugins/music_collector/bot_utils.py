@@ -247,6 +247,65 @@ def read_message(
     return " ".join("".join(parts).split()), images
 
 
+# ------------------------------------------------------------ 可收藏的表情包
+#
+# 「群友发了个好玩的图，收进库里」这件事，模型自己做不到：它看到的正文只有
+# ``[表情包: 偷笑]`` 这种标记，**拿不到图片地址**。所以和 ``images`` 一样，
+# 这里把「这条消息里能被收的表情包」单独理出来交给工具层（见 ``ToolContext.stickers``）。
+#
+# QQ 的商城表情是独立消息段 ``mface``（带 ``url`` / ``summary`` / ``key``）；
+# 而客户端把图当表情包发时仍然是 ``image`` 段，靠 ``sub_type=1`` 区分。
+
+#: 一条消息最多带几件「可收藏的图」出去。再多模型也读不完
+STICKER_PICK_LIMIT = 6
+
+
+def collect_stickers(message: Message | str) -> list[dict]:
+    """捡出这条消息里可以收进表情包库的图，返回 ``[{"kind","url","summary"}]``。
+
+    ``mface``（QQ 商城表情）优先；``image`` 里 ``sub_type=1`` 的那种也算（客户端把
+    图当表情包发就是这个形状）。**普通照片不算**——它仍然走 ``images`` 那条路，
+    模型要收的话用 ``sticker_add(url=…)`` 也能收。
+    """
+    if isinstance(message, str):
+        return []
+    out: list[dict] = []
+    for seg in message:
+        kind = seg.type
+        data = seg.data or {}
+        if kind == "mface":
+            url = _image_url(data)
+            if not url:
+                continue
+            out.append(
+                {
+                    "kind": "mface",
+                    "url": url,
+                    "summary": str(data.get("summary") or "").strip()[:40],
+                    "key": str(data.get("key") or "")[:40],
+                }
+            )
+        elif kind == "image" and str(data.get("sub_type") or "") == "1":
+            url = _image_url(data)
+            if url:
+                out.append({"kind": "image", "url": url, "summary": "", "key": ""})
+        if len(out) >= STICKER_PICK_LIMIT:
+            break
+    return out
+
+
+def describe_stickers(rows: list[dict]) -> str:
+    """把可收藏清单压成一行提示（给模型看，告诉它能收哪几张）。"""
+    if not rows:
+        return ""
+    parts = []
+    for index, row in enumerate(rows, 1):
+        summary = str(row.get("summary") or "").strip()
+        label = f"表情包「{summary}」" if summary else "图片"
+        parts.append(f"{index}.{label}")
+    return "这条消息里可收藏的图：" + "、".join(parts)
+
+
 # ------------------------------------------------------------ 合并转发（聊天记录）
 #
 # 群友「转发聊天记录」时，OneBot 给的只是一个 ``forward`` 段（带一个 id），

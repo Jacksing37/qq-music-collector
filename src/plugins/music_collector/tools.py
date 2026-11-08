@@ -37,10 +37,12 @@ from typing import Awaitable, Callable, Optional
 from nonebot.log import logger
 
 from . import browser as browser_mod
+from . import imagesearch as imagesearch_mod
 from . import imagelookup as imagelookup_mod
 from . import memory as memory_mod
 from . import mention as mention_mod
 from . import skills as skill_mod
+from . import stickers as sticker_mod
 from . import webtool
 from . import websearch as websearch_mod
 from .config import DATA_DIR, LLMConfig, MemoryConfig
@@ -54,7 +56,7 @@ DEFAULT_TOOL_CHARS = 2000
 ALLOWED_TOOL_NAMES = frozenset(
     {"fetch_url", "browse", "web_search", "say", "lookup_anime_image", "list_skills",
      "use_skill", "read_skill_file", "run_skill_script", "mention", "remember", "recall",
-     "forget"}
+     "forget", "search_images", "send_image", "sticker_add", "sticker_find", "sticker_send"}
 )
 
 #: 模型臆造出来的「装/写/删」类工具名。命中就回 :data:`INSTALL_DENIED`。
@@ -77,7 +79,7 @@ TOOL_RULES = (
     "（lookup_anime_image：认出动画截图出自哪部）、读已安装的技能、"
     "在管理员允许时运行技能自带脚本；也可以把群友的特征记进长期记忆"
     "（remember）、翻档案（recall）、删掉记错的内容（forget）——"
-    "记忆目录是你**唯一**能写的地方，别处一律不行。"
+    "记忆目录和表情包库（sticker_add）是你**仅有的**两个能写的地方，别处一律不行。"
     "碰到会过时效、或你拿不准的事实（新闻、价格、比分、谁的现任职位、软件版本、"
     "某个事件的前因后果），**先用 web_search 搜一下再答**，别凭记忆硬编；"
     "搜不到就说搜不到，不要编造搜索结果的细节。"
@@ -94,6 +96,20 @@ TOOL_RULES = (
     "拿不准就别 @；引用谁的话问看法就**先调 mention 点他**（不 @ 他不知道你在说他），只是拿它当背景就别 @。"
     "技能正文里让你「读取 references/xxx.md」这类附属文件时，用 read_skill_file 按路径读，"
     "不要凭想象编它的内容。"
+
+    # ---- 表情包与发图：这几条决定它到底「会不会用图说话」----
+    "\n\n【表情包与发图】你有一整套用图说话的能力，该用的时候别只会打字：\n"
+    "· 想接一句玩笑、表示无语 / 赞同 / 敷衍 / 开心时，先 sticker_find 按情绪找库里的"
+    "（**先看候选再发**，别凭印象瞎发），再 sticker_send 发出去；\n"
+    "· 看到好玩的表情包（群友发的、或你搜到的图）就用 sticker_add 收进库，"
+    "**标签必须写具体**（情绪 + 内容，例如「无语」「猫 笑到打滚」「狗头 嘲讽」），"
+    "tags 写清楚了以后才找得回来；\n"
+    "· 库里没有合适的就 search_images 搜（拿回图片直链），挑一条用 send_image 发；"
+    "打开图片站 / 梗图页时 browse 也会附上页面里的图片直链，可以直接拿来发；\n"
+    "· **发图有硬上限**（一轮最多几张由管理员设），一张表情包顶一句玩笑就够了："
+    "别连着发、别在别人说正经事或你正在查资料时发；同一张图别重复发；\n"
+    "· 不要发色情、血腥、真人隐私、政治敏感，以及带他人 QQ 号 / 手机号 / 住址的图；"
+    "搜索直链下不下来、发不出去时，换一张或者干脆用文字，别反复重试同一条链接。\n"
 
     # ---- 信源策略：这几条是这台机器实测出来的，不写进去它每轮都要白试一遍 ----
     "\n\n【先说一句（硬性，别省）】只要这一轮你**打算调用两次以上工具**"
@@ -160,9 +176,23 @@ class ToolContext:
     note_max: int = 0
     #: 已经插了几句（由 ``say`` 工具自己累加）
     note_used: int = 0
+    #: 「往群里发一张图」的能力，同样由触发层注入（工具层没有 bot）。
+    #: **None = 发不了图**（网页聊天测试/离线脚本），这时 ``send_image`` /
+    #: ``sticker_send`` 不注册，``sticker_add``（只入库、不发）仍然可用
+    image_out: Optional[Callable[[bytes], Awaitable[bool]]] = None
+    #: 一轮最多发几张图（``llm.image_send_max``）。0 = 不给发图工具
+    image_max: int = 0
+    #: 这一轮已经发了几张（``send_image`` / ``sticker_send`` 自己累加）
+    image_used: int = 0
+    #: 这条消息里**可收藏的表情包**（mface / 客户端当表情包发的图），
+    #: 结构见 :func:`bot_utils.collect_stickers`。和 ``images`` 一样：
+    #: 模型看不到 URL（正文里只有 ``[表情包: 偷笑]``），收藏只能从这儿拿图
+    stickers: list = field(default_factory=list)
 
 
 Handler = Callable[[dict, ToolContext], Awaitable[str]]
+#: 「往群里发一张图」的回调形状（触发层注入，返回是否真的发出去了）
+ImageSender = Callable[[bytes], Awaitable[bool]]
 
 
 @dataclass(frozen=True)
@@ -934,6 +964,307 @@ FORGET = Tool(
 )
 
 
+# ---------------------------------------------------------------- 表情包与发图
+#
+# 这一组是「用图说话」的全部能力，四个工具职责不重叠：
+#
+# - ``sticker_add``：收（下载 + 打标签 + 去重入库），**不需要能发图**；
+# - ``sticker_find`` / ``sticker_send``：从库里找、发（模型自己挑，不让后端猜）；
+# - ``search_images``：找新图（只给直链，不下载）；
+# - ``send_image``：把任意直链发出去（不入库）。
+#
+# 发送统一走 :attr:`ToolContext.image_out`（触发层注入的回调）——工具层没有 bot。
+
+def _sticker_dir(ctx: "ToolContext") -> str:
+    return str(getattr(ctx.cfg, "sticker_dir", "") or "")
+
+
+def _image_candidates(ctx: ToolContext) -> list[dict]:
+    """这次能收的图：**先表情包，再普通图片**（模型看不到 URL，只能从这儿拿）。"""
+    rows = [row for row in (getattr(ctx, "stickers", None) or []) if isinstance(row, dict)]
+    for url in ctx.images or []:
+        if url and not any(row.get("url") == url for row in rows):
+            rows.append({"kind": "image", "url": url, "summary": "", "key": ""})
+    return rows
+
+
+def _no_image_out() -> str:
+    return "这个上下文发不出图片（网页聊天测试 / 离线脚本里没有群），直接继续干活，别重试。"
+
+
+def _quota_spent(ctx: ToolContext) -> str:
+    """额度用完时的那句话；还有额度返回空串。"""
+    if ctx.image_max <= 0:
+        return "管理员没开「让机器人发图」，你发不了图片，用文字回。"
+    if ctx.image_used >= ctx.image_max:
+        return (
+            f"这一轮已经发过 {ctx.image_used} 张图了（上限 {ctx.image_max}），"
+            "再发就是刷屏——继续把话说完，别再发图。"
+        )
+    return ""
+
+
+async def _handle_sticker_add(args: dict, ctx: ToolContext) -> str:
+    """把一张图收进表情包库（下载 + 去重 + 打标签）。"""
+    tags = sticker_mod.parse_tags(args.get("tags"))
+    if not tags:
+        return (
+            "错误：tags 不能为空（空标签的表情包以后谁也搜不到）。"
+            "写 1~4 个具体标签：情绪 + 内容，例如「无语」「猫 笑到打滚」「狗头 嘲讽」。"
+        )
+    rows = _image_candidates(ctx)
+    url = str(args.get("url") or "").strip()
+    kind = ""
+    if not url:
+        try:
+            index = int(args.get("index") or 1)
+        except (TypeError, ValueError):
+            index = 1
+        if not rows:
+            return (
+                "这次消息里没有可收藏的图。要收网络上的图就把 url 填上"
+                "（search_images 给的直链、或者 browse 带出来的图片地址）。"
+            )
+        if index < 1 or index > len(rows):
+            return f"这次只有 {len(rows)} 张图，index 从 1 开始。"
+        picked = rows[index - 1]
+        url = str(picked.get("url") or "")
+        kind = str(picked.get("kind") or "")
+        if not str(args.get("note") or "").strip() and picked.get("summary"):
+            args = dict(args, note=str(picked.get("summary") or ""))
+
+    try:
+        data = await sticker_mod.download(url, timeout=float(ctx.cfg.fetch_timeout))
+    except ValueError as exc:
+        return f"这张图没能收下：{exc}。别反复重试同一个地址。"
+    entry, created = await sticker_mod.add(
+        data,
+        tags=tags,
+        note=str(args.get("note") or ""),
+        source=url,
+        group=ctx.group_id,
+        kind=kind or "url",
+        sticker_dir=_sticker_dir(ctx),
+    )
+    if entry is None:
+        return "这张图没能收下（不是 png/jpg/gif/webp/bmp，或者超过 8MB，或者标签为空）。"
+    return sticker_mod.format_saved(entry, created)
+
+
+STICKER_ADD = Tool(
+    name="sticker_add",
+    description=(
+        "把一张图**收进表情包库**，以后可以反复拿出来发。用于：群友发了个好玩的表情包、"
+        "或者你 search_images 搜到 / browse 页面上看到一张好图。"
+        "**tags 必须写**：1~4 个具体标签（情绪 + 内容，例如「无语」「猫 笑到打滚」「狗头 嘲讽」），"
+        "写得越准以后越好找；note 可以补一句画面描述。"
+        "不填 url 就收「这次消息里的图」（多人发了好几张时用 index 指定第几张）；"
+        "填 url 就收那张网络图片。同一张图收两次不会存两份，只会把新标签并进去。"
+        "只收 png/jpg/gif/webp/bmp，单张上限 8MB。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "tags": {
+                "type": "string",
+                "description": "标签，空格或逗号分隔（例如「无语 猫」），最多 8 个、每个不超过 16 字",
+            },
+            "note": {"type": "string", "description": "一句画面描述（可选，例如「歪头看镜头」）"},
+            "url": {"type": "string", "description": "要收的网络图片直链（可选）"},
+            "index": {
+                "type": "integer",
+                "description": "收这条消息里的第几张图（从 1 开始）；默认第一张",
+            },
+        },
+        "required": ["tags"],
+    },
+    handler=_handle_sticker_add,
+)
+
+
+async def _handle_sticker_find(args: dict, ctx: ToolContext) -> str:
+    """按情绪 / 内容在库里找候选，**只列出来不发送**（发不发由模型再决定）。"""
+    query = str(args.get("query") or "").strip()
+    try:
+        limit = int(args.get("limit") or 5)
+    except (TypeError, ValueError):
+        limit = 5
+    rows = sticker_mod.find(query, min(max(limit, 1), 10), sticker_dir=_sticker_dir(ctx))
+    if not rows:
+        tags = sticker_mod.tag_summary(sticker_dir=_sticker_dir(ctx))
+        head = f"库里没有匹配「{query}」的表情包。" if query else "表情包库现在还是空的。"
+        tail = f"现有标签：{tags}。" if tags else "看到合适的图先用 sticker_add 收几张。"
+        return head + tail + "别硬发——换成文字，或者换一组标签再找。"
+    return sticker_mod.format_entries(rows)
+
+
+STICKER_FIND = Tool(
+    name="sticker_find",
+    description=(
+        "在**表情包库**里按情绪 / 内容找几条候选（只列出来，不发出去）。"
+        "想说点什么又不想只用文字时先用它，看看库里有什么能用的。"
+        "query 写情绪或画面词（「无语」「笑」「猫」「摸鱼」），留空 = 列出最常用的几张。"
+        "返回每条的 id 和标签——对得上就用 sticker_send(id=…) 发出去；"
+        "**一条都对不上就别硬发**，宁可换成文字。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "情绪 / 内容关键词；留空 = 最常用的几张"},
+            "limit": {"type": "integer", "description": "最多给几条（1~10，默认 5）"},
+        },
+        "required": [],
+    },
+    handler=_handle_sticker_find,
+)
+
+
+async def _handle_sticker_send(args: dict, ctx: ToolContext) -> str:
+    """把库里某一条立刻发到群里（一次一张）。"""
+    sid = str(args.get("id") or "").strip()
+    if not sid:
+        return "要发哪一条？先用 sticker_find 拿到 id。"
+    if ctx.image_out is None:
+        return _no_image_out()
+    spent = _quota_spent(ctx)
+    if spent:
+        return spent
+    entry = sticker_mod.get(sid, sticker_dir=_sticker_dir(ctx))
+    if entry is None:
+        return f"库里没有 id={sid} 的表情包。先用 sticker_find 查一下现有的 id。"
+    path = sticker_mod.path_of(entry, sticker_dir=_sticker_dir(ctx))
+    if path is None:
+        return "这条记录对应的图片文件不在了（可能被手工删过）。跟群友说一声就行，别反复重试。"
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        return f"读图片失败：{exc}。别再试这张，继续用文字回。"
+    if not await ctx.image_out(data):
+        return "没发出去（网络或权限问题），别再重试同一张。"
+    ctx.image_used += 1
+    await sticker_mod.bump_use(str(entry.get("id") or ""), sticker_dir=_sticker_dir(ctx))
+    tags = "、".join(entry.get("tags") or [])
+    logger.info(f"[sticker] 群{ctx.group_id} 发出表情包 {sid}（标签 {tags}）")
+    return (
+        f"已经发出去了（id={sid}，标签：{tags}）。图发出去就完了，**别再重复发同一张**；"
+        "正文该说什么照常说。"
+    )
+
+
+STICKER_SEND = Tool(
+    name="sticker_send",
+    description=(
+        "把表情包库里的**一条**立刻发到群里（一次一张，独立气泡）。"
+        "id 必须来自 sticker_find 的结果；发完照常给文字回复，不用再描述这张图。"
+        "一轮能发几张有硬上限，到上限就别再发。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "description": "sticker_find 给出的 id"},
+        },
+        "required": ["id"],
+    },
+    handler=_handle_sticker_send,
+)
+
+
+async def _handle_send_image(args: dict, ctx: ToolContext) -> str:
+    """把一张网络图片（或页面里读到的直链）立刻发到群里。"""
+    url = str(args.get("url") or "").strip()
+    if not url:
+        return "错误：url 不能为空（要给图片直链，不是网页地址）。"
+    if ctx.image_out is None:
+        return _no_image_out()
+    spent = _quota_spent(ctx)
+    if spent:
+        return spent
+    try:
+        data = await sticker_mod.download(url, timeout=float(ctx.cfg.fetch_timeout))
+    except ValueError as exc:
+        return (
+            f"这张图没发出去：{exc}。\n"
+            "换一条直链（别反复试同一个地址），或者干脆用文字；"
+            "确实想留着这张的话再 sticker_add 收一次看是不是能下。"
+        )
+    if not await ctx.image_out(data):
+        return "图片下载下来了但发送失败（协议端问题），别再重试；用文字继续。"
+    ctx.image_used += 1
+    logger.info(
+        f"[image] 群{ctx.group_id} 发出网络图片 {url[:80]}（{len(data) // 1024} KB）"
+    )
+    return (
+        "已经发出去了。图发完就完了，正文照常回；"
+        "想以后还能用这张，就再调 sticker_add(url=…, tags=…) 收进库里。"
+    )
+
+
+SEND_IMAGE = Tool(
+    name="send_image",
+    description=(
+        "把一张**网络图片**（完整直链）立刻发到群里，独立气泡。"
+        "图片来源：search_images 返回的直链、browse 结果里附带的页面图片地址。"
+        "只接受 http/https 图片直链（png/jpg/gif/webp/bmp，单张 8MB 以内），"
+        "网页地址不行（要先用 browse 打开，再拿它给的图片直链）。"
+        "**一次只发一张**，一轮能发几张有硬上限；发不出去就换一张，别反复重试同一条链接。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "图片直链（http/https，结尾通常是 .jpg/.png/.gif）"},
+        },
+        "required": ["url"],
+    },
+    handler=_handle_send_image,
+)
+
+
+async def _handle_search_images(args: dict, ctx: ToolContext) -> str:
+    """按关键词搜图，只给直链（下载与发送交给 send_image）。"""
+    query = str(args.get("query") or "").strip()
+    if not query:
+        return "错误：query 不能为空。写具体的实体词（「柴犬 表情包」「猫猫 无语」「某作品 海报」）。"
+    if not await imagesearch_mod.throttle(float(ctx.cfg.image_search_interval)):
+        return "刚搜过一次，等几秒再搜——搜太密会被搜索引擎要求验证码。"
+    try:
+        count = int(args.get("count") or 6)
+    except (TypeError, ValueError):
+        count = 6
+    want = min(max(count, 1), int(ctx.cfg.image_search_max))
+    rows, error = await imagesearch_mod.search(
+        query, want, float(ctx.cfg.image_search_timeout)
+    )
+    if not rows:
+        return (
+            f"图片搜索没结果：{error}。\n"
+            "换个更具体的词再试一次（角色名 / 作品名 / 具体的梗）；还不行就用 web_search "
+            "找到图片所在的页面，再用 browse 打开它——browse 会附上页面里的图片直链。"
+            "真找不到就直接告诉群友你找不到，别编一个链接。"
+        )
+    return imagesearch_mod.format_results(query, rows)
+
+
+SEARCH_IMAGES = Tool(
+    name="search_images",
+    description=(
+        "搜**图片**（不是网页）：按关键词拿回若干图片直链 + 来源页，用来回答「发张 XX 的图」"
+        "「找个表情包」这类要求。用完再用 send_image 把挑中的那张发出去"
+        "（想留着以后用就 sticker_add 收进库）。"
+        "关键词要用**实体词**，「柴犬 表情包」「猫 无语」这种；堆形容词会被拆词、搜出无关图。"
+        "它只给直链、不保证都能下载（图床防盗链/链接过期），发不出去就换下一条。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "搜索词（实体词 + 用途，例如「柴犬 表情包」）"},
+            "count": {"type": "integer", "description": "要几条（1~12，默认 6）"},
+        },
+        "required": ["query"],
+    },
+    handler=_handle_search_images,
+)
+
+
 # ---------------------------------------------------------------- 组装
 
 def skills_root(cfg: LLMConfig) -> Path:
@@ -971,7 +1302,10 @@ def build(
     mem: Optional[MemoryConfig] = None,
     mention_targets: Optional[list] = None,
     images: Optional[list] = None,
+    stickers: Optional[list] = None,
     note: Optional[Handler] = None,
+    image_out: Optional[ImageSender] = None,
+    image_max: int = 0,
 ) -> tuple[list[Tool], ToolContext]:
     """按配置组装这次请求可用的工具，以及共享上下文。
 
@@ -1004,8 +1338,11 @@ def build(
         nick=str(nick or ""),
         mention_targets=list(mention_targets or []),
         images=[str(url) for url in (images or []) if url],
+        stickers=[row for row in (stickers or []) if isinstance(row, dict) and row.get("url")],
         note=note,
         note_max=int(getattr(cfg, "say_max", 0) or 0) if note is not None else 0,
+        image_out=image_out,
+        image_max=int(image_max or 0) if image_out is not None else 0,
     )
     tools: list[Tool] = []
     if not cfg.tools:
@@ -1027,6 +1364,21 @@ def build(
     if cfg.image_lookup and ctx.images:
         # 有图才给这个工具：没图时它只会回「这次没有图片」，白占 schema 额度
         tools.append(LOOKUP_ANIME_IMAGE)
+    # ---- 表情包与发图 ----
+    # 收藏（sticker_add）只写库、不发图，所以不依赖 image_out：网页测试页也能收图。
+    # 找 / 发必须有图可发、且**库里有东西**——空库摆个 sticker_send 出去，
+    # 模型只会挑一个不存在的 id 然后被打回，白费一轮。
+    if getattr(cfg, "stickers", True):
+        tools.append(STICKER_ADD)
+        if sticker_mod.count(_sticker_dir(ctx)) > 0:
+            tools.append(STICKER_FIND)
+            if ctx.image_out is not None and ctx.image_max > 0:
+                tools.append(STICKER_SEND)
+    if getattr(cfg, "image_search", True):
+        # 只给直链、不下载，所以不受 image_out 限制（测试页也能搜）
+        tools.append(SEARCH_IMAGES)
+    if ctx.image_out is not None and ctx.image_max > 0:
+        tools.append(SEND_IMAGE)
     if cfg.mention_enabled and ctx.mention_targets:
         tools.append(MENTION)
     if memory_cfg.enabled:

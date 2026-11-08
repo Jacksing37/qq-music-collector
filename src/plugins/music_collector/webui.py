@@ -744,6 +744,53 @@ FIELD_META["llm.image_lookup_interval"] = (
     "0 = 不限，不推荐",
     False,
 )
+FIELD_META["llm.stickers"] = (
+    "允许收发表情包",
+    "给它一整库表情包：看到好玩的表情包（群友发的、或它自己搜到的）"
+    "可以用 <code>sticker_add</code> 收进库并打标签，想接话时先用 <code>sticker_find</code> "
+    "按情绪找、再 <code>sticker_send</code> 发出去。"
+    "<br>库在服务器的 <code>data/stickers/</code>（图片 + <code>index.json</code>），"
+    "<b>只有模型主动收的才会进库</b>——不会把群里所有图都囤成垃圾堆。"
+    "<br>嫌它乱发表情包，就把下面「一轮最多发几张图」调成 <code>0</code>（那是硬上限）",
+    False,
+)
+FIELD_META["llm.sticker_dir"] = (
+    "表情包库目录",
+    "留空 = <code>data/stickers</code>。相对路径按 <code>data/</code> 解析。"
+    "目录里是图片本体 + 一份 <code>index.json</code>（标签 / 来源 / 用过几次），"
+    "想手工删某张直接删文件也行，索引下次会自愈",
+    False,
+)
+FIELD_META["llm.image_send_max"] = (
+    "一轮最多发几张图",
+    "表情包和搜来的图**共用一个额度**（默认 2）。这是硬上限：到数了它就发不出去，"
+    "免得一句话刷五张图。<b>0 = 干脆不给发图工具</b>（能收进库，但发不出来）",
+    False,
+)
+FIELD_META["llm.image_search"] = (
+    "允许模型搜图片",
+    "给它一个 <code>search_images</code> 工具：群友说「发张 XX 的图」「找个表情包」时，"
+    "它按关键词搜回<b>图片直链</b>，挑一张用 <code>send_image</code> 发出去。"
+    "<br>搜的是 Bing / 百度的公开结果页，不用 API Key；和「搜网页」一样，"
+    "<b>搜太密会被要求验证码</b>，日志里频繁出现「图片搜索没结果」就先关掉。"
+    "<br>直链不保证都能下载（图床防盗链、链接过期），失败时它会自己换一张",
+    False,
+)
+FIELD_META["llm.image_search_max"] = (
+    "一次搜几张图",
+    "给模型挑的候选数量（1~12，默认 6）。太多读不完还占 token",
+    False,
+)
+FIELD_META["llm.image_search_timeout"] = (
+    "图片搜索超时（秒）",
+    "单次搜索的请求超时。慢就调大，但一轮回复会跟着变长",
+    False,
+)
+FIELD_META["llm.image_search_interval"] = (
+    "两次图片搜索的最小间隔（秒）",
+    "防搜索引擎反爬。0 = 不限（不推荐，容易被要求验证码）",
+    False,
+)
 FIELD_META["llm.skills"] = (
     "启用技能包",
     "扫描技能目录下的 SKILL.md：模型先看「名字 + 简介」，需要时才读全文照着做。"

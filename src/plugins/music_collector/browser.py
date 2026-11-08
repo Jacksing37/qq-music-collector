@@ -566,6 +566,69 @@ _STATE_JS = """(() => {
 })()"""
 
 
+#: 一次最多带回几张图片直链。给多了模型读不完，还会把正文挤到后面去
+_MAX_IMAGES = 30
+#: 小于这个尺寸的图不算「内容图」：图标、按钮、分隔线、占位符都在 100px 以下
+_MIN_IMAGE_SIDE = 120
+
+#: 顺手把页面里的图片直链收出来。**只收惰性加载之后的真实地址**：
+#: 很多站（小红书、知乎、B 站）在 ``src`` 里放占位符，真地址在 ``data-src`` 里，
+#: 只读 ``img.src`` 会拿到一屏 1px 的 gif。
+_IMAGES_JS = """(() => {
+  const out = [];
+  const seen = new Set();
+  // ⚠️ 空串必须先挡掉：``new URL('', location.href)`` 会把**当前页面地址**当成图片，
+  // 于是「没有 src 的占位 img」会变成一条指向页面本身的假直链（实测踩到过）
+  const abs = (s) => {
+    if (!s) return '';
+    try { return new URL(s, location.href).href; } catch (e) { return ''; }
+  };
+  const pick = (img) => {
+    for (const key of [img.currentSrc, img.src, img.getAttribute('data-src'),
+                       img.getAttribute('data-original'), img.getAttribute('data-lazy-src')]) {
+      const url = abs(key || '');
+      if (url && /^https?:/i.test(url)) return url;
+    }
+    return '';
+  };
+  for (const img of document.images) {
+    const url = pick(img);
+    if (!url || seen.has(url)) continue;
+    const w = img.naturalWidth || 0;
+    const h = img.naturalHeight || 0;
+    if (w && h && (w < %d || h < %d)) continue;
+    seen.add(url);
+    out.push({ url: url, w: w, h: h, alt: String(img.alt || '').slice(0, 60) });
+    if (out.length >= %d) break;
+  }
+  return out;
+})()""" % (_MIN_IMAGE_SIDE, _MIN_IMAGE_SIDE, _MAX_IMAGES)
+
+
+def _normalize_images(raw) -> list[dict]:
+    """把 evaluate 回来的图片列表洗成 ``[{"url","w","h","alt"}]``（脏数据一律丢）。"""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url.lower().startswith(("http://", "https://")) or url in seen:
+            continue
+        seen.add(url)
+        out.append(
+            {
+                "url": url,
+                "w": int(item.get("w") or 0),
+                "h": int(item.get("h") or 0),
+                "alt": str(item.get("alt") or "")[:60],
+            }
+        )
+        if len(out) >= _MAX_IMAGES:
+            break
+    return out
+
+
 async def _history_url(cdp: Cdp) -> str:
     """从导航历史取当前 URL。**不经过渲染主线程**——页面 JS 卡死时它照样能回。
 
@@ -758,6 +821,7 @@ async def browse(
         "steps_done": 0,
         "error": "",
         "source": "",
+        "images": [],
     }
     target = str(url or "").strip()
     if not _usable_url(target):
@@ -945,6 +1009,21 @@ async def browse(
             logger.info(f"[browse] 需要人工处理（{reason}）: {final_url[:80]}")
             return out
 
+        # 顺手把页面里的图片直链带出去：打开图片站 / 梗图页时，模型要的就是这个。
+        # 单独一次 evaluate（不去改 _STATE_JS）——图片收集失败不该影响正文读取。
+        # 放在**验证页判定之后**：验证码页面上的图对模型没用，白花一次往返。
+        out["images"] = _normalize_images(
+            await _try_eval(
+                cdp,
+                _IMAGES_JS,
+                timeout=min(10.0, max(2.0, leftover())),
+                default=[],
+                attempts=1,
+            )
+        )
+        if out["images"]:
+            logger.info(f"[browse] 顺带读到 {len(out['images'])} 张图片直链")
+
         if not text:
             out["reason"] = (
                 "页面打开了但读不到文字（纯图片页、还在加载，或者页面脚本把主线程占住了）"
@@ -976,6 +1055,27 @@ async def browse(
 
 
 # ---------------------------------------------------------------- 给模型看的话
+
+
+def _images_block(res: dict, limit: int = 12) -> str:
+    """把页面里读到的图片直链拼成一小段（给模型挑一张发出去）。"""
+    rows = [row for row in (res.get("images") or []) if isinstance(row, dict) and row.get("url")]
+    if not rows:
+        return ""
+    lines = ["", f"页面里的图片直链（{len(rows)} 张，可以直接用 send_image 发出去）："]
+    for index, row in enumerate(rows[:limit], 1):
+        tail = ""
+        w, h = int(row.get("w") or 0), int(row.get("h") or 0)
+        if w and h:
+            tail += f"｜{w}×{h}"
+        alt = str(row.get("alt") or "").strip()
+        if alt:
+            tail += f"｜{alt}"
+        lines.append(f"{index}. {row['url']}{tail}")
+    if len(rows) > limit:
+        lines.append(f"…还有 {len(rows) - limit} 张没列（够用就别再翻）")
+    lines.append("挑一张最贴题的发给群里就行，别一次发好几张。")
+    return "\n".join(lines)
 
 
 def format_report(res: dict, *, max_chars: int = 3000) -> str:
@@ -1018,5 +1118,6 @@ def format_report(res: dict, *, max_chars: int = 3000) -> str:
         return (
             f"{head}\n{reason or '没读到正文'}\n"
             "不要编造里面的内容；可以告诉用户这个页面没读到东西。"
+            + _images_block(res)
         )
-    return f"{head}\n正文：\n{body}"
+    return f"{head}\n正文：\n{body}" + _images_block(res)

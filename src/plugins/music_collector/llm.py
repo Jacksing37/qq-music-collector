@@ -1132,6 +1132,8 @@ class LLMBot:
         mention_out: Optional[list] = None,
         body_out: Optional[dict] = None,
         note: Optional[object] = None,
+        send_image: Optional[object] = None,
+        stickers: Optional[list] = None,
     ) -> tuple[Optional[str], str]:
         """生成一条回复。
 
@@ -1145,6 +1147,12 @@ class LLMBot:
 
         ``mention_targets`` 是本次「可以 @ 的人」（:mod:`mention`），只有名单里的人点得动；
         模型通过 ``mention`` 工具记下的 QQ 会写回 ``mention_out``（调用方据此拼 at 段）。
+
+        ``send_image`` 是「往群里发一张图」的回调（同样由触发层注入）：模型通过
+        ``send_image`` / ``sticker_send`` 工具发图时走它。不传 = 这个上下文发不了图，
+        那两个工具就不注册。``stickers`` 是这条消息里**可收藏的表情包**
+        （:func:`bot_utils.collect_stickers`），放进 :class:`tools.ToolContext` 供
+        ``sticker_add`` 取图——模型自己看不到图片地址。
 
         ``persist`` / ``memory_group`` 只给网页「聊天测试」用：``persist=False`` 时不把
         这轮对话写进 ``chat_log``（否则测试内容会变成记忆整理的素材）；``memory_group``
@@ -1220,6 +1228,17 @@ class LLMBot:
                 f"🎯 可 @ 名单 {len(mention_targets or [])} 人"
                 f"（mention 工具{'已' if (mention_targets and cfg.mention_enabled) else '未'}注册）",
             )
+
+        # 「这次有几张图可以收藏」也要说一声：模型在正文里只看到 [表情包: 偷笑]
+        # 这样的标记，不给它这句话，它根本不知道自己手上有一张能收进库的图
+        if stickers:
+            labels = []
+            for index, row in enumerate(list(stickers)[:6], 1):
+                summary = str((row or {}).get("summary") or "").strip()
+                labels.append(f"{index}.表情包「{summary}」" if summary else f"{index}.图片")
+            hint = "这次消息里可收藏的图：" + "、".join(labels) + "（要收就用 sticker_add）"
+            extra = f"{hint}\n\n{extra}" if extra else hint
+            llmtrace_mod.step(trace, f"🧩 可收藏表情 {len(stickers)} 个")
 
         def _done(reply_text, why: str = "", think: str = ""):
             """收口：归档这条调用记录，再原样返回给调用方。
@@ -1308,9 +1327,14 @@ class LLMBot:
                     # 图片地址要一起传：模型看不到 URL（正文只有 [图片]），
                     # 以图搜番这类工具只能从 ToolContext.images 拿图
                     images=pics,
+                    # 可收藏的表情包（mface / 表情图）：同样只有 URL，模型看不见
+                    stickers=stickers,
                     # 「立刻往群里说一句」的回调由触发层注入（工具层没有 bot）；
                     # 不传时 say 工具不注册（网页测试/离线脚本就属于这种）
                     note=note,
+                    # 「立刻往群里发一张图」：不传时 send_image / sticker_send 不注册
+                    image_out=send_image,
+                    image_max=int(getattr(cfg, "image_send_max", 0) or 0),
                 )
                 tool_schemas = tools_mod.schemas(tool_list)
 

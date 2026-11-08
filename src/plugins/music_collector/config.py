@@ -637,6 +637,22 @@ class LLMConfig(BaseModel):
     image_lookup_timeout: float = Field(30.0, ge=5, le=90)
     #: 两次以图搜番的最小间隔（秒）。免费额度 100 次/天，别连着打
     image_lookup_interval: float = Field(3.0, ge=0, le=120)
+    #: 是否给模型**表情包库**（sticker_add 收下 / sticker_find 查找 / sticker_send 发出去）。
+    #: 它和「聊天记录里的图」不是一回事：库是跨群长期攒下来的，由模型自己决定收哪些
+    stickers: bool = True
+    #: 表情包库目录；留空 = data/stickers（相对路径按 data/ 解析）
+    sticker_dir: str = ""
+    #: 一轮最多发几张图（表情包也算）。0 = 不给发图工具（模型只能收、不能发）
+    image_send_max: int = Field(2, ge=0, le=6)
+    #: 是否给模型 ``search_images``（按关键词搜图片直链）。搜的是 Bing / 百度的公开
+    #: 结果页，机房 IP 搜密了会被要求验证码——和 ``web_search`` 同一个风险
+    image_search: bool = True
+    #: 一次搜几张图给模型挑（1~12）。多了读不完还占 token
+    image_search_max: int = Field(6, ge=1, le=12)
+    #: 图片搜索超时秒数
+    image_search_timeout: float = Field(20.0, ge=5, le=60)
+    #: 两次图片搜索的最小间隔（秒），防反爬；0 = 不限
+    image_search_interval: float = Field(2.0, ge=0, le=60)
     #: 是否启用技能包（扫描技能目录下的 SKILL.md）
     skills: bool = True
     #: 技能目录；留空 = data/skills；相对路径按 data/ 解析

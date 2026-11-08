@@ -370,6 +370,14 @@ llm:
   image_lookup: true          # 提供 lookup_anime_image（以图搜番，认动画截图出自哪部）；免 key，100 次/天
   image_lookup_timeout: 30.0  # 以图搜番超时秒数（下载图 + 查询）
   image_lookup_interval: 3.0  # 两次以图搜番最小间隔（秒）；0=不限
+  # ---- 表情包与发图（模型自己收、自己挑、自己发）----
+  stickers: true              # 表情包库：sticker_add 收下 / sticker_find 查找 / sticker_send 发出去
+  sticker_dir: ''             # 表情包库目录，留空=data/stickers；相对路径按 data/ 解析
+  image_send_max: 2           # 一轮最多发几张图（表情包也算），0=不给发图工具，0~6
+  image_search: true          # 提供 search_images（按关键词搜图片直链，Bing + 百度兜底）
+  image_search_max: 6         # 一次搜几张图给模型挑，1~12
+  image_search_timeout: 20.0  # 图片搜索超时（秒）
+  image_search_interval: 2.0  # 两次图片搜索最小间隔（秒）；0=不限
   skills: true                # 启用技能包（扫 data/skills/*/SKILL.md）
   skills_dir: ''              # 技能目录，留空=data/skills；相对路径按 data/ 解析
   skill_body_chars: 3000      # use_skill 返回的技能正文上限
