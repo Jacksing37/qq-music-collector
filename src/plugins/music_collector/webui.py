@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 _ENV_PATH = Path(__file__).resolve().parents[3] / ".env"
 
 from fastapi import HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from nonebot import get_app
 from nonebot.log import logger
 from pydantic import BaseModel
@@ -50,6 +50,7 @@ from . import mention as mention_mod
 from . import persona as persona_mod
 from . import skills as skills_mod
 from . import style as style_mod
+from . import stickers as sticker_mod
 from . import tools as tools_mod
 from . import webtool
 from .llm import (
@@ -2488,6 +2489,100 @@ async def _api_memory(request: Request):
     return JSONResponse({"ok": False, "message": f"未知操作: {action}"}, status_code=400)
 
 
+# -------------------------------------------------------------------- 表情包库
+
+
+def _sticker_payload(item: dict, sticker_dir: str) -> dict:
+    """一条表情包给前端的形状。``has_file`` 是给「文件被手工删了」那种情况留的。"""
+    sid = str(item.get("id") or "")
+    return {
+        "id": sid,
+        "tags": list(item.get("tags") or []),
+        "note": str(item.get("note") or ""),
+        "source": str(item.get("source") or ""),
+        "group": int(item.get("group") or 0),
+        "kind": str(item.get("kind") or ""),
+        "bytes": int(item.get("bytes") or 0),
+        "created": str(item.get("created") or ""),
+        "used": int(item.get("used") or 0),
+        "last_used": str(item.get("last_used") or ""),
+        "has_file": sticker_mod.path_of(item, sticker_dir=sticker_dir) is not None,
+    }
+
+
+async def _api_stickers(request: Request):
+    """表情包库：GET 列表 / 单张图片；POST 改标签备注 / 删除。
+
+    和 ``_api_memory`` 一样「一个路由担几件事」，前端只记一个地址、鉴权只一处。
+
+    GET 的 ``media=1&id=…`` 是**图片本体**：面板用 ``fetch`` 带 Authorization 取回来再
+    转成 blob 给 ``<img>``。**故意不做成静态文件直链**——那要么把管理令牌塞进 URL
+    （会被访问日志记下来），要么把整个库对公网放开。
+    """
+    if not _token_ok(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    llm = service.config.llm
+    sdir = str(getattr(llm, "sticker_dir", "") or "")
+
+    if request.method == "GET":
+        if (request.query_params.get("media") or "") in ("1", "true", "yes"):
+            sid = (request.query_params.get("id") or "").strip()
+            entry = sticker_mod.get(sid, sticker_dir=sdir)
+            path = sticker_mod.path_of(entry, sticker_dir=sdir) if entry else None
+            if path is None:
+                raise HTTPException(status_code=404, detail="没有这张图")
+            try:
+                data = path.read_bytes()
+            except OSError as exc:
+                raise HTTPException(status_code=404, detail=f"读图失败: {exc}") from exc
+            # 单张入库时就卡过 8MB，这里不必再防；缓存 5 分钟，翻页来回点不用重复下载
+            return Response(
+                content=data,
+                media_type=sticker_mod.mime_of(data),
+                headers={"Cache-Control": "private, max-age=300"},
+            )
+
+        items = sticker_mod.find("", limit=sticker_mod.MAX_ITEMS, sticker_dir=sdir)
+        return JSONResponse(
+            {
+                "ok": True,
+                "enabled": bool(getattr(llm, "stickers", True)),
+                "send_max": int(getattr(llm, "image_send_max", 0) or 0),
+                "search": bool(getattr(llm, "image_search", True)),
+                "stats": sticker_mod.stats(sticker_dir=sdir),
+                "items": [_sticker_payload(it, sdir) for it in items],
+                "recent": sticker_mod.recent(limit=30, sticker_dir=sdir),
+            }
+        )
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "message": "请求体不是合法 JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "message": "请求体格式不对"}, status_code=400)
+
+    action = str(body.get("action") or "update")
+    sid = str(body.get("id") or "").strip()
+    if not sid:
+        return JSONResponse({"ok": False, "message": "缺少 id"}, status_code=400)
+
+    if action == "update":
+        tags = body.get("tags") if "tags" in body else None
+        note = body.get("note") if "note" in body else None
+        ok, msg = await sticker_mod.update(
+            sid, tags=tags, note=note, sticker_dir=sdir
+        )
+        return JSONResponse({"ok": ok, "message": msg}, status_code=200 if ok else 400)
+
+    if action == "delete":
+        ok, msg = await sticker_mod.remove(sid, sticker_dir=sdir)
+        return JSONResponse({"ok": ok, "message": msg}, status_code=200 if ok else 404)
+
+    return JSONResponse({"ok": False, "message": f"未知操作: {action}"}, status_code=400)
+
+
 # -------------------------------------------------------------------- 人设修订
 
 
@@ -2991,6 +3086,7 @@ def register_webui() -> None:
     app.add_api_route("/api/music-admin/logs", _api_logs, methods=["GET", "POST"])
     app.add_api_route("/api/music-admin/llm-trace", _api_llm_trace, methods=["GET", "POST"])
     app.add_api_route("/api/music-admin/memory", _api_memory, methods=["GET", "POST"])
+    app.add_api_route("/api/music-admin/stickers", _api_stickers, methods=["GET", "POST"])
     app.add_api_route("/api/music-admin/persona", _api_persona, methods=["GET", "POST"])
     logger.info("[music] WebUI 已挂载: http://<本机IP>:8080/music-admin  (需 token 访问)")
 

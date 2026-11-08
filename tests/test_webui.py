@@ -354,6 +354,30 @@ def test_field_meta_declared_before_schema():
     ]
     assert not late, f"这些 FIELD_META 写在 schema 构建之后，页面不会生效：{late}"
 
+def test_stickers_page_and_nav():
+    """表情包页：侧边栏落在「群记忆」和「聊天测试」之间，页面与关键控件都在。
+
+    位置是被要求死的（人要能顺手点），所以这里连顺序一起断言——以后谁再插一个
+    页面到中间，这条会立刻红。
+    """
+    html = F.DASHBOARD_HTML
+    nav = re.findall(r'data-page="([a-z]+)"', html)
+    assert "stickers" in nav, f"侧边栏没有表情包页：{nav}"
+    assert nav.index("stickers") == nav.index("memory") + 1, f"应该紧跟群记忆：{nav}"
+    assert nav.index("stickers") == nav.index("chat") - 1, f"应该在聊天测试之前：{nav}"
+
+    assert re.search(r'<section id="page-stickers" class="page hidden">', html), "页面 section 不在"
+    for el in ("stkSearch", "stkGrid", "stkTags", "stkNote", "stkSave", "stkDelete",
+               "stkRecent", "stkStats", "stkRoot", "stkPreview", "stkPage",
+               "stkPrev", "stkNext"):
+        assert f'id="{el}"' in html, f"缺控件 #{el}"
+
+    # 切页要真的去拉数据，接口地址也要对上（拼错就只剩一个空页面）
+    assert 'if(name==="stickers") loadStickers();' in html, "switchPage 没挂 loadStickers"
+    assert "/api/music-admin/stickers" in html, "前端没接后端接口"
+    assert "async function loadStickers(" in html and "async function stkSelect(" in html
+
+
 if __name__ == "__main__":
     import tempfile
 
@@ -375,4 +399,5 @@ if __name__ == "__main__":
     test_bot_groups_reference_only_existing_keys()
     test_bot_card_fields_have_chinese_labels()
     test_field_meta_declared_before_schema()
+    test_stickers_page_and_nav()
     print("webui tests OK")

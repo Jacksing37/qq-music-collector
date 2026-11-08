@@ -30,8 +30,9 @@ from nonebot.log import logger
 from .config import DATA_DIR
 from . import webtool
 
-#: 索引文件格式版本。以后要加字段就升这个号，读到时按版本迁移
-INDEX_VERSION = 1
+#: 索引文件格式版本。以后要加字段就升这个号，读到时按版本迁移。
+#: v2 = 多了 ``recent``（最近发过哪些）。读老文件时按空列表兜底，不用迁移脚本
+INDEX_VERSION = 2
 #: 单张图上限。QQ 表情包一般几十到几百 KB，8MB 足够兜住动图
 MAX_BYTES = 8 * 1024 * 1024
 #: 库容量上限。到顶后淘汰「最久没用过」的，别让一个群把磁盘吃满
@@ -40,6 +41,8 @@ MAX_ITEMS = 2000
 MAX_TAGS = 8
 #: 单个标签最多几个字
 TAG_CHARS = 16
+#: 「最近发送」保留多少条。只给网页面板看，不进上下文
+RECENT_MAX = 60
 
 #: 抓图用的 UA。和 :mod:`imagelookup` 同一套：空 UA 容易被图床挡
 _HEADERS = {
@@ -80,7 +83,7 @@ def _index_path(base: Path) -> Path:
 
 
 def _empty_index() -> dict:
-    return {"version": INDEX_VERSION, "items": []}
+    return {"version": INDEX_VERSION, "items": [], "recent": []}
 
 
 def _load(base: Path) -> dict:
@@ -97,9 +100,10 @@ def _load(base: Path) -> dict:
         return _empty_index()
     if not isinstance(data, dict):
         return _empty_index()
-    items = data.get("items")
-    if not isinstance(items, list):
-        data["items"] = []
+    for key in ("items", "recent"):
+        if not isinstance(data.get(key), list):
+            # v1 的索引没有 recent，老仓库读进来就是空列表——不用迁移脚本
+            data[key] = []
     data.setdefault("version", INDEX_VERSION)
     return data
 
@@ -393,20 +397,146 @@ def tag_summary(limit: int = 24, sticker_dir: str = "") -> str:
     return " / ".join(f"{tag}×{n}" for tag, n in ordered)
 
 
-async def bump_use(sid: str, sticker_dir: str = "") -> None:
-    """记一次「发过了」。失败只写 debug 日志：记账不该影响发图。"""
+async def bump_use(sid: str, sticker_dir: str = "", group: int = 0) -> None:
+    """记一次「发过了」：次数 +1，并往「最近发送」里压一条（网页面板要显示）。
+
+    失败只写 debug 日志：记账不该影响发图。
+    """
+    base = root(sticker_dir)
+    key = str(sid or "").strip()
+    if not key:
+        return
+    async with _lock:
+        index = _load(base)
+        for item in index.get("items") or []:
+            if str(item.get("id") or "") != key:
+                continue
+            at = _now()
+            item["used"] = int(item.get("used") or 0) + 1
+            item["last_used"] = at
+            recent = index.setdefault("recent", [])
+            recent.append({"id": key, "at": at, "group": int(group or 0)})
+            # 只留最近 RECENT_MAX 条：这是给人看的历史，不是审计日志
+            if len(recent) > RECENT_MAX:
+                del recent[: len(recent) - RECENT_MAX]
+            try:
+                _save(base, index)
+            except OSError as exc:  # noqa: BLE001
+                logger.debug(f"[sticker] 记使用次数失败: {exc}")
+            return
+
+
+# ---------------------------------------------------------------- 网页面板用
+
+def recent(limit: int = 20, sticker_dir: str = "") -> list[dict]:
+    """最近发过的表情包，**新的在前**。每行带上那条表情包的当前信息。
+
+    为什么不只存 id + 时间：面板要显示缩略图和标签，前端不该为每条再请求一次索引。
+    """
+    index = _load(root(sticker_dir))
+    by_id = {str(it.get("id") or ""): it for it in index.get("items") or []}
+    out: list[dict] = []
+    for row in reversed(index.get("recent") or []):
+        if not isinstance(row, dict):
+            continue
+        sid = str(row.get("id") or "")
+        item = by_id.get(sid)
+        out.append(
+            {
+                "id": sid,
+                "at": str(row.get("at") or ""),
+                "group": int(row.get("group") or 0),
+                # 库里已经删掉的那条也要显示（「我明明发过」比「查无此项」少误会）
+                "exists": item is not None,
+                "tags": list((item or {}).get("tags") or []),
+                "note": str((item or {}).get("note") or ""),
+            }
+        )
+        if len(out) >= max(1, int(limit)):
+            break
+    return out
+
+
+async def update(
+    sid: str,
+    *,
+    tags=None,
+    note: Optional[str] = None,
+    sticker_dir: str = "",
+) -> tuple[bool, str]:
+    """改一条的标签 / 备注。返回 ``(是否成功, 说明)``。
+
+    ``tags`` 传 ``None`` = 不动标签；传空串 = 明确清空（会拒绝，空标签的表情包谁也搜不到）。
+    手工改标签是有意义的：模型写标签时只能看文字描述，人看一眼图就知道该叫什么。
+    """
+    key = str(sid or "").strip()
     base = root(sticker_dir)
     async with _lock:
         index = _load(base)
         for item in index.get("items") or []:
-            if str(item.get("id") or "") == str(sid or ""):
-                item["used"] = int(item.get("used") or 0) + 1
-                item["last_used"] = _now()
-                try:
-                    _save(base, index)
-                except OSError as exc:  # noqa: BLE001
-                    logger.debug(f"[sticker] 记使用次数失败: {exc}")
-                return
+            if str(item.get("id") or "") != key:
+                continue
+            if tags is not None:
+                parsed = parse_tags(tags)
+                if not parsed:
+                    return False, "标签不能为空（空了以后模型就搜不到了）"
+                item["tags"] = parsed
+            if note is not None:
+                item["note"] = str(note or "").strip()[:80]
+            try:
+                _save(base, index)
+            except OSError as exc:  # noqa: BLE001
+                return False, f"写索引失败: {exc}"
+            return True, "已保存"
+    return False, "库里没有这条表情包"
+
+
+async def remove(sid: str, sticker_dir: str = "") -> tuple[bool, str]:
+    """删一条：图片文件 + 索引里的记录。发送历史保留（它确实发过）。"""
+    key = str(sid or "").strip()
+    base = root(sticker_dir)
+    async with _lock:
+        index = _load(base)
+        items = index.get("items") or []
+        for pos, item in enumerate(items):
+            if str(item.get("id") or "") != key:
+                continue
+            path = base / str(item.get("file") or "")
+            try:
+                if path.is_file():
+                    path.unlink()
+            except OSError as exc:  # noqa: BLE001
+                logger.debug(f"[sticker] 删文件失败 {path}: {exc}")
+            del items[pos]
+            try:
+                _save(base, index)
+            except OSError as exc:  # noqa: BLE001
+                return False, f"写索引失败: {exc}"
+            logger.info(f"[sticker] 面板删除一条表情包 {key}")
+            return True, "已删除"
+    return False, "库里没有这条表情包"
+
+
+def stats(sticker_dir: str = "") -> dict:
+    """面板顶部那几个数字 + 标签分布。"""
+    index = _load(root(sticker_dir))
+    items = [it for it in index.get("items") or [] if isinstance(it, dict)]
+    counter: dict[str, int] = {}
+    total_bytes = 0
+    for item in items:
+        total_bytes += int(item.get("bytes") or 0)
+        for tag in item.get("tags") or []:
+            counter[str(tag)] = counter.get(str(tag), 0) + 1
+    tags = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
+    return {
+        "root": str(root(sticker_dir)),
+        "count": len(items),
+        "bytes": total_bytes,
+        "sent": sum(int(it.get("used") or 0) for it in items),
+        "recent_count": len(index.get("recent") or []),
+        "tags": [{"tag": tag, "n": n} for tag, n in tags],
+        "max_items": MAX_ITEMS,
+    }
 
 
 # ---------------------------------------------------------------- 给模型看的话

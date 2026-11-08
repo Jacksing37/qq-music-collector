@@ -266,6 +266,37 @@ button:disabled{opacity:.5;cursor:not-allowed}
   font-family:ui-monospace,monospace;background:var(--input);border:1px solid var(--card-bd);
   border-radius:12px;padding:10px 12px;max-height:300px;overflow:auto}
 /* ---- 群记忆 ---- */
+/* ---- 表情包库 ---- */
+/* 缩略图网格：一条一格。图用 contain 而不是 cover——表情包多是白底方图，
+   cover 会把脑袋裁掉；「文件不在了」用同样尺寸的方块占位，网格才不会跳。 */
+.stk-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:10px;
+  max-height:min(56vh,560px);overflow-y:auto;overscroll-behavior:contain;
+  padding-right:4px;scrollbar-width:thin}
+.stk-tile{position:relative;border:1px solid var(--card-bd);border-radius:12px;background:var(--input);
+  padding:6px;cursor:pointer;transition:.15s}
+.stk-tile:hover{border-color:var(--accent2)}
+.stk-tile.active{border-color:var(--accent);box-shadow:0 0 0 2px rgba(110,168,254,.25)}
+.stk-tile .stk-img{width:100%;aspect-ratio:1/1;object-fit:contain;border-radius:8px;display:block}
+.stk-tile .stk-ph{width:100%;aspect-ratio:1/1;display:flex;align-items:center;justify-content:center;
+  color:var(--muted);font-size:11px;border-radius:8px;background:rgba(127,127,127,.08);text-align:center}
+.stk-tile .stk-tg{font-size:11px;color:var(--muted);margin-top:4px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.stk-tile .stk-ct{position:absolute;top:8px;right:8px;font-size:10px;padding:0 5px;border-radius:999px;
+  background:rgba(0,0,0,.5);color:#fff;font-variant-numeric:tabular-nums}
+.stk-preview{display:flex;align-items:center;justify-content:center;min-height:160px;max-height:280px;
+  background:var(--input);border:1px solid var(--card-bd);border-radius:12px;padding:8px;overflow:hidden}
+.stk-preview img{max-width:100%;max-height:260px;object-fit:contain}
+.stk-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.stk-chip{font-size:12px;padding:3px 9px;border-radius:999px;border:1px solid var(--card-bd);
+  background:var(--input);color:var(--txt);cursor:pointer;font:inherit}
+.stk-chip:hover{border-color:var(--accent)}
+.stk-rrow{display:flex;align-items:center;gap:10px;padding:7px 8px;border-bottom:1px dashed var(--card-bd);
+  font-size:13px;flex-wrap:wrap}
+.stk-rrow:last-child{border-bottom:none}
+.stk-rrow .stk-rt{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums;min-width:112px}
+.stk-rrow .stk-rg{color:var(--muted);font-size:12px;min-width:100px}
+.stk-rrow .stk-rb{margin-left:auto;padding:3px 8px;font-size:12px}
+@media(max-width:860px){.stk-grid{grid-template-columns:repeat(auto-fill,minmax(84px,1fr))}}
 /* ---- 上下文用量（机器人页） ---- */
 .ctx-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:14px 0 0}
 .ctx-pct{font-size:32px;font-weight:700;letter-spacing:-.5px;line-height:1}
@@ -456,6 +487,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
     <button class="nav" data-page="config">⚙ 配置</button>
     <button class="nav" data-page="bot">🤖 机器人</button>
     <button class="nav" data-page="memory">🧠 群记忆</button>
+    <button class="nav" data-page="stickers">🧩 表情包</button>
     <button class="nav" data-page="chat">💬 聊天测试</button>
     <button class="nav" data-page="aliases">✏ 昵称映射</button>
     <button class="nav" data-page="admin">🛡 管理员</button>
@@ -692,6 +724,62 @@ button:disabled{opacity:.5;cursor:not-allowed}
           <summary class="muted" style="cursor:pointer">最近的抱怨 <span id="pnCount"></span></summary>
           <ul class="pv" id="pnFeedback" style="margin-top:8px"><li class="empty">（暂无）</li></ul>
         </details>
+      </div>
+    </section>
+
+    <!-- 表情包 -->
+    <section id="page-stickers" class="page hidden">
+      <div class="card">
+        <h2><span class="dot"></span>表情包库 · 它会拿来接话的图</h2>
+        <p class="muted">群友发了个好玩的表情包、或者它自己搜到一张图时，模型会调 <code>sticker_add</code> 把它收进这里并打标签；
+          想用图接话时，它先 <code>sticker_find</code> 按情绪找、再用 <code>sticker_send</code> 发出去。</p>
+        <p class="muted">这一页就是那个库：<b>能看、能改标签、能删</b>，改完立刻生效（不重启）。
+          <b>只会收模型主动收的图</b>——不会把群里每张图都囤下来；同一条图收几次也只存一份，标签合并。</p>
+        <p class="muted">库的位置：<code id="stkRoot">data/stickers</code>（图片本体 + <code>index.json</code>）。
+          「一轮最多发几张图」在「机器人 → 工具与技能」里改；这里只管理内容，不会替你发。</p>
+        <div class="row">
+          <input id="stkSearch" placeholder="搜索标签 / 备注" style="flex:1;min-width:170px">
+          <button id="stkReload" title="重新读磁盘上的库">↻ 刷新</button>
+          <button id="stkPrev" title="上一页">←</button>
+          <span class="muted" id="stkPage">—</span>
+          <button id="stkNext" title="下一页">→</button>
+          <div class="spacer"></div>
+          <span class="muted" id="stkStats">加载中…</span>
+        </div>
+        <div id="stkChips" class="stk-chips"></div>
+        <div class="row" style="margin-top:8px"><span class="msg" id="stkMsg"></span></div>
+      </div>
+
+      <div class="mem-layout">
+        <div class="card mem-side">
+          <div id="stkGrid" class="stk-grid"><div class="empty">加载中…</div></div>
+        </div>
+        <div class="card mem-side">
+          <div class="row" style="margin-bottom:8px">
+            <span class="badge" id="stkSelId">未选中</span>
+            <span class="muted" id="stkSelMeta"></span>
+          </div>
+          <div class="stk-preview" id="stkPreview">
+            <span class="muted">点左边一张图，这里看大图和改标签</span>
+          </div>
+          <label class="muted" for="stkTags" style="display:block;margin-top:12px">标签（空格或逗号分隔，最多 8 个）</label>
+          <input id="stkTags" placeholder="例如：无语 猫" style="width:100%;margin-top:4px">
+          <label class="muted" for="stkNote" style="display:block;margin-top:10px">备注（一句画面描述，可空）</label>
+          <input id="stkNote" placeholder="例如：歪头看镜头" style="width:100%;margin-top:4px">
+          <p class="muted" style="margin-top:10px">标签是模型搜到它的唯一依据：<b>情绪 + 内容</b>写具体一点
+            （「无语」「猫 笑到打滚」），别写「好看」「图1」。</p>
+          <div class="row end" style="margin-top:12px">
+            <button id="stkDelete" title="连图片文件一起删掉">🗑 删除</button>
+            <button id="stkSave" class="btn-primary">💾 保存标签</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2><span class="dot"></span>最近发送 · 它最近把哪几张发出去了</h2>
+        <p class="muted">只记时间、群号和标签，不记是谁让它发的；最多留最近 60 条。
+          点「定位」会在上面的网格里选中那条（方便顺着改成更准的标签）。</p>
+        <div id="stkRecent"><div class="empty">还没有发送记录</div></div>
       </div>
     </section>
 
@@ -951,6 +1039,7 @@ function switchPage(name){
   if(name==="config") loadConfig();
   if(name==="bot"){ loadBot(); syncBotNav(); loadContext(CTXU.gid||0); }
   if(name==="memory") loadMemory();
+  if(name==="stickers") loadStickers();
   if(name==="chat") loadChat();
   if(name==="aliases") loadAliases();
   if(name==="admin") loadAdmin();
@@ -2972,6 +3061,223 @@ $("#logClear").onclick=async()=>{
   }catch(e){ toast("清空失败："+e.message,"bad"); }
   finally{ btn.disabled=false; }
 };
+
+/* ---- 表情包库 ---- */
+/* 这一页只做「看和改」：收/发都由模型在群里完成（sticker_add / sticker_send），
+   面板不该有第二条写入路径去改变它的判断依据——除了人手写的标签，那恰恰是
+   比模型自己写的更准的东西。 */
+const STK = {items:[], recent:[], stats:{}, q:"", page:0, per:18, sel:"", t:null, urls:new Map()};
+
+function stkMsg(t, kind){
+  const el=$("#stkMsg"); if(!el) return;
+  el.textContent=t||""; el.className="msg"+(kind?(" "+kind):"");
+}
+function stkFmtBytes(n){
+  n=Number(n)||0;
+  if(n<1024) return n+" B";
+  if(n<1024*1024) return Math.round(n/1024)+" KB";
+  return (n/1048576).toFixed(1)+" MB";
+}
+/* 缩略图必须带 Authorization 取回来再转 blob：库里的图**不走**静态直链，
+   否则要么把管理令牌塞进 URL（会被访问日志记下来）、要么把整库对公网放开。
+   每张图缓存一个 objectURL，刷新/翻页前统一 release，既不会重复下载也不漏内存。 */
+function stkClearUrls(){
+  STK.urls.forEach(u=>{ try{ URL.revokeObjectURL(u); }catch(e){} });
+  STK.urls.clear();
+}
+async function stkBlobUrl(id){
+  if(!id) return "";
+  if(STK.urls.has(id)) return STK.urls.get(id);
+  try{
+    const r=await api(`/api/music-admin/stickers?media=1&id=${encodeURIComponent(id)}`);
+    if(!r.ok) return "";
+    const url=URL.createObjectURL(await r.blob());
+    STK.urls.set(id, url);
+    return url;
+  }catch(e){ return ""; }
+}
+
+function stkFiltered(){
+  const q=(STK.q||"").trim().toLowerCase();
+  if(!q) return STK.items;
+  return STK.items.filter(it=>
+    (it.tags||[]).some(t=>String(t).toLowerCase().includes(q))
+    || String(it.note||"").toLowerCase().includes(q)
+    || String(it.id||"").toLowerCase().includes(q));
+}
+
+async function renderStickers(){
+  const rows=stkFiltered();
+  const pages=Math.max(1, Math.ceil(rows.length/STK.per));
+  STK.page=Math.min(Math.max(0, STK.page), pages-1);
+  const pageRows=rows.slice(STK.page*STK.per, STK.page*STK.per+STK.per);
+  const box=$("#stkGrid");
+  box.innerHTML="";
+  if(!rows.length){
+    box.innerHTML='<div class="empty">'+(STK.items.length
+      ? "没有匹配的表情包（搜别的词试试，或者点标签清掉筛选）"
+      : "库还是空的：在群里发一张表情包让它「收下」，或者让它自己搜图收进来")+'</div>';
+  }else{
+    pageRows.forEach(it=>{
+      const d=document.createElement("div");
+      d.className="stk-tile"+(it.id===STK.sel?" active":"");
+      d.dataset.id=it.id;
+      d.title=`id ${it.id}｜${(it.tags||[]).join("、")||"无标签"}${it.note?("｜"+it.note):""}`;
+      d.innerHTML = it.has_file
+        ? '<img class="stk-img" alt="">'
+        : '<div class="stk-ph">文件<br>不在了</div>';
+      const tg=document.createElement("div");
+      tg.className="stk-tg"; tg.textContent=(it.tags||[]).join(" · ")||"（无标签）";
+      d.appendChild(tg);
+      if(it.used){
+        const ct=document.createElement("span");
+        ct.className="stk-ct"; ct.textContent="×"+it.used;
+        d.appendChild(ct);
+      }
+      d.onclick=()=>stkSelect(it.id);
+      box.appendChild(d);
+    });
+    // 图单独填：先摆骨架再异步灌 blob，几十张一起等会白屏
+    for(const d of box.querySelectorAll(".stk-tile")){
+      const img=d.querySelector("img.stk-img");
+      if(!img) continue;
+      const url=await stkBlobUrl(d.dataset.id);
+      if(url) img.src=url; else img.replaceWith(
+        Object.assign(document.createElement("div"), {className:"stk-ph", textContent:"读不到"}));
+    }
+  }
+  $("#stkPage").textContent=`${STK.page+1}/${pages} ｜ ${rows.length} 张`;
+  $("#stkPrev").disabled=STK.page<=0;
+  $("#stkNext").disabled=STK.page>=pages-1;
+}
+
+function renderStkStats(){
+  const s=STK.stats||{};
+  $("#stkRoot").textContent=s.root||"data/stickers";
+  $("#stkStats").textContent=
+    `共 ${s.count||0} 张 / ${stkFmtBytes(s.bytes)} ｜ 累计发送 ${s.sent||0} 次`
+    + ` ｜ 标签 ${(s.tags||[]).length} 个`;
+  const box=$("#stkChips"); box.innerHTML="";
+  const tags=(s.tags||[]).slice(0,14);
+  if(!tags.length) return;
+  const lab=document.createElement("span");
+  lab.className="muted"; lab.textContent="热门标签（点一下筛选）：";
+  box.appendChild(lab);
+  tags.forEach(t=>{
+    const b=document.createElement("button");
+    b.className="stk-chip"; b.textContent=`${t.tag} ×${t.n}`;
+    b.onclick=()=>{ STK.q=t.tag; $("#stkSearch").value=t.tag; STK.page=0; renderStickers(); };
+    box.appendChild(b);
+  });
+}
+
+function renderStkRecent(){
+  const box=$("#stkRecent"); box.innerHTML="";
+  if(!STK.recent.length){
+    box.innerHTML='<div class="empty">还没有发送记录：等它在群里发一次表情包就会出现</div>';
+    return;
+  }
+  STK.recent.forEach(r=>{
+    const row=document.createElement("div"); row.className="stk-rrow";
+    const tags=(r.tags||[]).join("、")||"（这条已从库里删掉）";
+    row.innerHTML=`<span class="stk-rt">${esc(r.at||"")}</span>`
+      +`<span class="stk-rg">${r.group?("群 "+r.group):"未知群"}</span>`
+      +`<span>${esc(tags)}</span>`
+      +(r.note?`<span class="muted">${esc(r.note)}</span>`:"");
+    const b=document.createElement("button");
+    b.className="stk-rb"; b.textContent=r.exists?"定位":"已删除";
+    b.disabled=!r.exists;
+    b.onclick=()=>{ STK.q=""; $("#stkSearch").value=""; STK.page=0; stkSelect(r.id); };
+    row.appendChild(b);
+    box.appendChild(row);
+  });
+}
+
+function stkResetEditor(){
+  $("#stkSelId").textContent="未选中";
+  $("#stkSelMeta").textContent="";
+  $("#stkTags").value=""; $("#stkNote").value="";
+  $("#stkPreview").innerHTML='<span class="muted">点左边一张图，这里看大图和改标签</span>';
+}
+
+async function stkSelect(id){
+  STK.sel=id;
+  const rows=stkFiltered();
+  const idx=rows.findIndex(x=>x.id===id);
+  if(idx>=0){
+    const page=Math.floor(idx/STK.per);
+    if(page!==STK.page){ STK.page=page; await renderStickers(); }
+  }
+  document.querySelectorAll(".stk-tile").forEach(d=>d.classList.toggle("active", d.dataset.id===id));
+  const it=STK.items.find(x=>x.id===id);
+  if(!it) return;
+  $("#stkSelId").textContent="id "+it.id;
+  $("#stkSelMeta").textContent=
+    `${stkFmtBytes(it.bytes)} ｜ ${it.created||"?"} 收录 ｜ 发过 ${it.used||0} 次`
+    +(it.last_used?`（最后 ${it.last_used}）`:"")
+    +(it.group?` ｜ 来源群 ${it.group}`:"")
+    +(it.source?` ｜ ${it.source.slice(0,60)}`:"");
+  $("#stkTags").value=(it.tags||[]).join(" ");
+  $("#stkNote").value=it.note||"";
+  const pv=$("#stkPreview");
+  pv.innerHTML='<span class="muted">加载中…</span>';
+  const url=it.has_file?await stkBlobUrl(id):"";
+  if(url){ pv.innerHTML=""; const img=document.createElement("img"); img.src=url; img.alt=""; pv.appendChild(img); }
+  else pv.innerHTML='<span class="muted">图片文件不在了（可能被手工删过）</span>';
+  stkMsg("");
+}
+
+async function loadStickers(){
+  try{
+    const j=await (await api("/api/music-admin/stickers")).json();
+    if(!j.ok){ stkMsg(j.message||"读取失败","bad"); return; }
+    STK.items=j.items||[]; STK.recent=j.recent||[]; STK.stats=j.stats||{};
+    stkClearUrls();
+    if(STK.sel && !STK.items.some(x=>x.id===STK.sel)) STK.sel="";
+    renderStkStats(); renderStkRecent(); await renderStickers();
+    if(STK.sel) await stkSelect(STK.sel); else stkResetEditor();
+    if(!j.enabled) stkMsg("表情包功能当前是关着的（库还能看和改，但模型不会再收/发）","bad");
+    else if(j.send_max<=0) stkMsg("「一轮最多发几张图」设成了 0：模型能收进库，但发不出去","bad");
+  }catch(e){ if(e.message!=="unauthorized") stkMsg("加载失败: "+e.message,"bad"); }
+}
+
+async function stkPost(body){
+  const r=await api("/api/music-admin/stickers",{method:"POST",
+    headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  return await r.json();
+}
+
+$("#stkSave").onclick=async()=>{
+  if(!STK.sel){ stkMsg("先在左边选一张图","bad"); return; }
+  const btn=$("#stkSave"); btn.disabled=true;
+  try{
+    const j=await stkPost({action:"update", id:STK.sel, tags:$("#stkTags").value, note:$("#stkNote").value});
+    if(!j.ok){ stkMsg(j.message||"保存失败","bad"); return; }
+    stkMsg("已保存：模型下一轮就能按新标签找到它","ok");
+    await loadStickers();
+  }catch(e){ stkMsg("保存失败："+e.message,"bad"); }
+  finally{ btn.disabled=false; }
+};
+$("#stkDelete").onclick=async()=>{
+  if(!STK.sel){ stkMsg("先在左边选一张图","bad"); return; }
+  if(!confirm("把这张表情包从库里删掉？图片文件会一起删（发送记录保留）。")) return;
+  const btn=$("#stkDelete"); btn.disabled=true;
+  try{
+    const j=await stkPost({action:"delete", id:STK.sel});
+    if(!j.ok){ stkMsg(j.message||"删除失败","bad"); return; }
+    STK.sel=""; stkMsg("已删除","ok");
+    await loadStickers();
+  }catch(e){ stkMsg("删除失败："+e.message,"bad"); }
+  finally{ btn.disabled=false; }
+};
+$("#stkReload").onclick=()=>{ STK.q=$("#stkSearch").value; loadStickers(); };
+$("#stkSearch").addEventListener("input",()=>{
+  clearTimeout(STK.t);
+  STK.t=setTimeout(()=>{ STK.q=$("#stkSearch").value; STK.page=0; renderStickers(); }, 250);
+});
+$("#stkPrev").onclick=()=>{ STK.page=Math.max(0, STK.page-1); renderStickers(); };
+$("#stkNext").onclick=()=>{ STK.page+=1; renderStickers(); };
+window.addEventListener("beforeunload", stkClearUrls);
 
 /* ---- 启动 ---- */
 loadOverview(); loadCollect();

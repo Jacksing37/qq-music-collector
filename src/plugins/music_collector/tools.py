@@ -1142,7 +1142,9 @@ async def _handle_sticker_send(args: dict, ctx: ToolContext) -> str:
     if not await ctx.image_out(data):
         return "没发出去（网络或权限问题），别再重试同一张。"
     ctx.image_used += 1
-    await sticker_mod.bump_use(str(entry.get("id") or ""), sticker_dir=_sticker_dir(ctx))
+    await sticker_mod.bump_use(
+        str(entry.get("id") or ""), sticker_dir=_sticker_dir(ctx), group=ctx.group_id
+    )
     tags = "、".join(entry.get("tags") or [])
     logger.info(f"[sticker] 群{ctx.group_id} 发出表情包 {sid}（标签 {tags}）")
     return (

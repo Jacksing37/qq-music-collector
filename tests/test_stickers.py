@@ -367,6 +367,80 @@ async def main() -> int:
     out = await tl._handle_send_image({"url": "https://img.example.com/ok.png"}, ctx3)
     check("handler 自己兜底：发不了图就说清楚", "发不" in out and "图" in out, out[:60])
 
+    print("== 最近发送（面板要显示的那份历史）==")
+    a, _ = await st.add(GIF + b"recent-a", tags="排队A")
+    b, _ = await st.add(GIF + b"recent-b", tags="排队B")
+    await st.bump_use(a["id"], group=111)
+    await st.bump_use(b["id"], group=222)
+    rec = st.recent(limit=5)
+    check("最近发送有记录", len(rec) >= 2, str(len(rec)))
+    check("新的在最前面", rec and rec[0]["id"] == b["id"], str([r["id"] for r in rec[:3]]))
+    check("带时间与群号", bool(rec and rec[0]["at"] and rec[0]["group"] == 222), str(rec[:1]))
+    check("带上当前标签（面板不用二次请求）", "排队B" in (rec[0]["tags"] if rec else []),
+          str(rec[:1]))
+    check("条目被删后也留记录（exists=False）", "exists" in (rec[0] if rec else {}), str(rec[:1]))
+
+    print("== 网页面板：表情包 API ==")
+    from fastapi import HTTPException
+
+    from music_collector import webui as W
+
+    class _Req:
+        """够用就行的假 Request：这几个接口只碰 method / query_params / headers / json()。"""
+
+        def __init__(self, method="GET", query=None, body=None):
+            self.method = method
+            self.query_params = dict(query or {})
+            self.headers = {}
+            self._body = body
+
+        async def json(self):
+            return self._body
+
+    def _payload(resp):
+        return json.loads(bytes(resp.body).decode("utf-8"))
+
+    listed = _payload(await W._api_stickers(_Req()))
+    check("GET 列表 ok", listed.get("ok") is True, str(listed)[:80])
+    check("列出的条数和库一致", len(listed.get("items") or []) == st.count(),
+          f"{len(listed.get('items') or [])} vs {st.count()}")
+    check("stats 也一起给了", (listed.get("stats") or {}).get("count") == st.count(),
+          str((listed.get("stats") or {}).get("count")))
+    check("recent 一起给了", isinstance(listed.get("recent"), list), str(type(listed.get("recent"))))
+    check("带开关状态（面板要据此提示）",
+          "enabled" in listed and "send_max" in listed, str(sorted(listed))[:80])
+
+    target = (listed.get("items") or [])[0]
+    media = await W._api_stickers(_Req(query={"media": "1", "id": target["id"]}))
+    check("取图返回图片本体", str(media.media_type).startswith("image/") and len(media.body) > 16,
+          f"{media.media_type} / {len(media.body)}B")
+
+    try:
+        await W._api_stickers(_Req(query={"media": "1", "id": "nope"}))
+        check("取不存在的图回 404", False, "居然没抛")
+    except HTTPException as exc:
+        check("取不存在的图回 404", exc.status_code == 404, str(exc.status_code))
+
+    upd = _payload(await W._api_stickers(_Req("POST", body={
+        "action": "update", "id": target["id"], "tags": "无语 手改的", "note": "面板改的"})))
+    saved = st.get(target["id"]) or {}
+    check("改标签成功", upd.get("ok") is True, str(upd)[:80])
+    check("标签真的写进库了", "手改的" in (saved.get("tags") or []), str(saved.get("tags")))
+    check("备注也写进去了", saved.get("note") == "面板改的", str(saved.get("note")))
+
+    bad = _payload(await W._api_stickers(_Req("POST", body={
+        "action": "update", "id": target["id"], "tags": "  "})))
+    check("空标签被拒（否则模型再也搜不到它）",
+          bad.get("ok") is False and "标签" in str(bad.get("message")), str(bad)[:80])
+
+    victim, _ = await st.add(GIF + b"panel-del", tags="待删 面板")
+    victim_path = st.path_of(victim)
+    gone = _payload(await W._api_stickers(_Req("POST", body={
+        "action": "delete", "id": victim["id"]})))
+    check("删除成功", gone.get("ok") is True, str(gone)[:80])
+    check("索引里没了", st.get(victim["id"]) is None, "还在")
+    check("图片文件也删了", victim_path is not None and not victim_path.is_file(), str(victim_path))
+
     print()
     bad = [c for c in checks if not c[1]]
     if bad:
