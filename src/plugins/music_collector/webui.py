@@ -1664,11 +1664,17 @@ def _risk_url() -> str:
 # -------------------------------------------------------------------- 路由
 
 async def _dashboard() -> HTMLResponse:
-    return HTMLResponse(DASHBOARD_HTML)
+    """面板本体：**不给浏览器缓存**。
+
+    页面是一整块内联 JS + CSS，没有任何外部资源，缓存省不下什么；但升级之后
+    浏览器要是拿旧的那份，就会出现「明明改了页面、点上去还是老行为」——
+    2026-11-08 排查自己新加的一页时就被这个坑过一次（验证脚本读到的是旧 HTML）。
+    """
+    return HTMLResponse(DASHBOARD_HTML, headers={"Cache-Control": "no-store"})
 
 
 async def _aliases_page() -> HTMLResponse:
-    return HTMLResponse(ALIASES_HTML)
+    return HTMLResponse(ALIASES_HTML, headers={"Cache-Control": "no-store"})
 
 
 def _group_id_param(request: Request) -> typing.Optional[int]:
