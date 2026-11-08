@@ -3139,7 +3139,7 @@ async function renderStickers(){
         ct.className="stk-ct"; ct.textContent="×"+it.used;
         d.appendChild(ct);
       }
-      d.onclick=()=>stkSelect(it.id);
+      d.onclick=()=>{ stkMsg(""); stkSelect(it.id); };
       box.appendChild(d);
     });
     // 图单独填：先摆骨架再异步灌 blob，几十张一起等会白屏
@@ -3229,10 +3229,13 @@ async function stkSelect(id){
   const url=it.has_file?await stkBlobUrl(id):"";
   if(url){ pv.innerHTML=""; const img=document.createElement("img"); img.src=url; img.alt=""; pv.appendChild(img); }
   else pv.innerHTML='<span class="muted">图片文件不在了（可能被手工删过）</span>';
-  stkMsg("");
+  /* 注意：这里**不**清 #stkMsg —— 保存成功后的「已保存」要留着让人看见。
+     清空只在用户主动换一张图时做（见网格的 onclick）。 */
 }
 
-async function loadStickers(){
+async function loadStickers(keepMsg){
+  /* keepMsg：保存/删除后自己刚写过一句提示，重新拉一遍列表时别把它擦掉 */
+  if(!keepMsg) stkMsg("");
   try{
     const j=await (await api("/api/music-admin/stickers")).json();
     if(!j.ok){ stkMsg(j.message||"读取失败","bad"); return; }
@@ -3259,7 +3262,7 @@ $("#stkSave").onclick=async()=>{
     const j=await stkPost({action:"update", id:STK.sel, tags:$("#stkTags").value, note:$("#stkNote").value});
     if(!j.ok){ stkMsg(j.message||"保存失败","bad"); return; }
     stkMsg("已保存：模型下一轮就能按新标签找到它","ok");
-    await loadStickers();
+    await loadStickers(true);
   }catch(e){ stkMsg("保存失败："+e.message,"bad"); }
   finally{ btn.disabled=false; }
 };
@@ -3271,7 +3274,7 @@ $("#stkDelete").onclick=async()=>{
     const j=await stkPost({action:"delete", id:STK.sel});
     if(!j.ok){ stkMsg(j.message||"删除失败","bad"); return; }
     STK.sel=""; stkMsg("已删除","ok");
-    await loadStickers();
+    await loadStickers(true);
   }catch(e){ stkMsg("删除失败："+e.message,"bad"); }
   finally{ btn.disabled=false; }
 };
