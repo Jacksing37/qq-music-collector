@@ -362,6 +362,79 @@ async def main() -> int:
     st_mod.download = real_download
     isr.search = real_search
 
+    print("== 群友发的表情包：自动收（llm.sticker_auto_collect）==")
+    import music_collector as mc
+    from music_collector.config import config_manager
+
+    cfg_live = config_manager.config.llm
+    cfg_live.stickers = True
+    cfg_live.sticker_auto_collect = True
+    cfg_live.sticker_auto_daily = 30
+    cfg_live.sticker_dir = ""
+
+    def _mface_event(summary: str, url: str, *, uid: int = 42, gid: int = 677868394):
+        return type(
+            "Ev",
+            (),
+            {
+                "group_id": gid,
+                "user_id": uid,
+                "self_id": 1,
+                "message": Message(
+                    MessageSegment("mface", {"url": url, "summary": summary, "key": "k"})
+                ),
+            },
+        )()
+
+    st_mod.download = fake_download
+    before = st.count()
+    await mc._auto_collect_sticker(None, _mface_event("偷笑", "https://gchat.qpic.cn/auto1.gif"))
+    check("自动收下了一张", st.count() == before + 1, f"{before} → {st.count()}")
+    auto = [it for it in st.find("", st.MAX_ITEMS)
+            if str(it.get("source") or "").startswith("群677868394")]
+    check("标签用了 QQ 给的 summary", bool(auto) and "偷笑" in auto[0]["tags"], str(auto[:1]))
+    check("来源标成群 + 表情包", bool(auto) and "商城表情" in auto[0]["source"], str(auto[:1]))
+    check("kind 记成 mface", bool(auto) and auto[0]["kind"] == "mface", str(auto[:1]))
+
+    after_first = st.count()
+    await mc._auto_collect_sticker(None, _mface_event("偷笑", "https://gchat.qpic.cn/auto1.gif"))
+    check("同一张不会再存一份（sha1 去重）", st.count() == after_first, str(st.count()))
+
+    cfg_live.sticker_auto_collect = False
+    await mc._auto_collect_sticker(None, _mface_event("另一张", "https://gchat.qpic.cn/auto2.gif"))
+    check("开关关掉就不收了", st.count() == after_first, str(st.count()))
+    cfg_live.sticker_auto_collect = True
+
+    from datetime import datetime
+    day = datetime.now(mc.service.resolver.tz).strftime("%Y-%m-%d")
+    mc._sticker_auto_count[day] = 10 ** 6          # 假装今天已经收满了
+    await mc._auto_collect_sticker(None, _mface_event("第三张", "https://gchat.qpic.cn/auto3.gif"))
+    check("到当天上限就不再自动收", st.count() == after_first, str(st.count()))
+    mc._sticker_auto_count.pop(day, None)
+
+    plain = type("Ev", (), {"group_id": 1, "user_id": 42, "self_id": 1,
+                            "message": Message("只是说话")})()
+    await mc._auto_collect_sticker(None, plain)
+    check("普通文字消息不会动库", st.count() == after_first, str(st.count()))
+
+    print("== search_images 会先把库里的候选摆出来 ==")
+    isr.reset()
+    isr.search = fake_search
+    tools_s, ctx_s = tl.build(
+        LLMConfig(tools=True, web_tool=False, say_tool=False, image_send_max=2),
+        group_id=1, image_out=fake_image_out, image_max=2,
+    )
+    out = await tl.dispatch(tools_s, "search_images", {"query": "偷笑"}, ctx_s)
+    check("返回里有「先看库里」", "先看库里" in out, out[:80])
+    check("并给出 sticker_send 的用法", "sticker_send" in out, out[:120])
+    check("网上搜到的结果仍附在后面", "https://img.example.com/x.jpg" in out, out[-120:])
+
+    out = await tl.dispatch(tools_s, "search_images", {"query": "库里完全没这个词"}, ctx_s)
+    check("库里没命中就不硬塞提示", "先看库里" not in out, out[:80])
+
+    st_mod.download = real_download
+    isr.search = real_search
+
     print("== 没有发图回调时的防御 ==")
     tools3, ctx3 = tl.build(LLMConfig(tools=True, web_tool=False, say_tool=False), group_id=1)
     out = await tl._handle_send_image({"url": "https://img.example.com/ok.png"}, ctx3)

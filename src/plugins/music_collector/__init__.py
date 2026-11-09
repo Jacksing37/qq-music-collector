@@ -56,6 +56,7 @@ from . import memory as memory_mod  # noqa: E402
 from . import mention as mention_mod  # noqa: E402  回复里 @ 谁，由模型自己点
 from . import persona as persona_mod  # noqa: E402  听群友抱怨「AI 味」，只记不吭声
 from . import speak as speak_mod  # noqa: E402  这一条到底该不该开口（概率门）
+from . import stickers as sticker_mod  # noqa: E402  表情包库（自动收群友发的 mface）
 from . import timeguard as timeguard_mod  # noqa: E402  白天说「晚安」时改写一次
 from .models import PLATFORM_NAMES, Song  # noqa: E402
 from .naming import build_context, render_template, resolve_alias  # noqa: E402
@@ -303,6 +304,105 @@ async def _speak_account(bot: Bot, event: GroupMessageEvent) -> None:
         service._spawn_bg(
             banter_mod.tick(bot, gid, uid, _sender_nick(event), text)
         )
+
+
+# ----------------------------------------------------- 自动收群友的表情包
+
+#: 今天自动收了几张（键 = 本地日期）。只为「每天别收太多」这条闸；进程重启会按
+#: 索引里当天的记录重新数一遍（见 :func:`_auto_today_count`）
+_sticker_auto_count: dict[str, int] = {}
+
+sticker_listener = on_message(priority=96, block=False)
+
+
+def _auto_today_count(sticker_dir: str, day: str) -> int:
+    """索引里「今天自动收的 mface」有几条（重启后接手计数用）。"""
+    try:
+        rows = sticker_mod.find("", sticker_mod.MAX_ITEMS, sticker_dir=sticker_dir)
+    except Exception:  # noqa: BLE001 — 数不出来就当 0，不能因此不收
+        return 0
+    return sum(
+        1
+        for item in rows
+        if str(item.get("kind") or "") == "mface"
+        and str(item.get("created") or "").startswith(day)
+    )
+
+
+@sticker_listener.handle()
+async def _auto_collect_sticker(bot: Bot, event: GroupMessageEvent) -> None:
+    """群友发的 QQ 表情包**自动**收进表情包库（``llm.sticker_auto_collect``）。
+
+    为什么需要这条旁路：模型只在被 @ / 被戳 / 贴链接时才运行，群友随手丢个表情包
+    不会触发任何 LLM 调用——所以「让模型自己决定收」在真实群里几乎不会发生
+    （上线 20 小时实测：模型看见过的「可收藏表情」0 次，收下的 3 张全是它自己搜的网图）。
+
+    它只做最笨的那一半：把 mface 存下来，标签先用 QQ 给的 ``summary``（如「偷笑」），
+    之后在网页「表情包」页补标签，或者等它哪天被 ``sticker_find`` 找出来用。
+
+    三道闸：开关（``llm.stickers`` + ``llm.sticker_auto_collect``）、每天张数上限
+    （``llm.sticker_auto_daily``）、以及 :func:`stickers.add` 里的 sha1 去重。
+    **失败一律静默**：收表情包绝不能影响群聊处理。
+    """
+    gid = int(getattr(event, "group_id", 0) or 0)
+    uid = int(getattr(event, "user_id", 0) or 0)
+    if not gid or not uid or uid == int(getattr(event, "self_id", 0) or 0):
+        return
+    try:
+        llm = service.cfg(gid).llm
+    except Exception:  # noqa: BLE001 — 配置没就绪就当没这个功能
+        return
+    if not (getattr(llm, "stickers", True) and getattr(llm, "sticker_auto_collect", True)):
+        return
+
+    rows = collect_stickers(event.message)
+    if not rows:
+        return
+
+    sticker_dir = str(getattr(llm, "sticker_dir", "") or "")
+    day = datetime.now(service.resolver.tz).strftime("%Y-%m-%d")
+    if day not in _sticker_auto_count:
+        _sticker_auto_count.clear()          # 跨天就把旧计数丢掉，别一直涨
+        _sticker_auto_count[day] = _auto_today_count(sticker_dir, day)
+    cap = int(getattr(llm, "sticker_auto_daily", 30) or 0)
+    if cap > 0 and _sticker_auto_count[day] >= cap:
+        logger.debug(f"[sticker] 群{gid} 今天自动收已达上限 {cap} 张，跳过")
+        return
+
+    row = rows[0]
+    url = str(row.get("url") or "")
+    if not url:
+        return
+    summary = str(row.get("summary") or "").strip()
+    try:
+        data = await sticker_mod.download(url, timeout=float(getattr(llm, "fetch_timeout", 15)))
+    except ValueError as exc:
+        logger.debug(f"[sticker] 群{gid} 自动收失败（{exc}）")
+        return
+    try:
+        entry, created = await sticker_mod.add(
+            data,
+            tags=summary or "未分类",
+            note=summary,
+            source=f"群{gid} 的{mface_label(row)}",
+            group=gid,
+            kind=str(row.get("kind") or "mface"),
+            sticker_dir=sticker_dir,
+        )
+    except Exception as exc:  # noqa: BLE001 — 落盘失败也不该冒泡
+        logger.debug(f"[sticker] 群{gid} 自动收落库失败: {exc}")
+        return
+    if entry is not None and created:
+        _sticker_auto_count[day] = _sticker_auto_count.get(day, 0) + 1
+        logger.info(
+            f"[sticker] 群{gid} 自动收下表情包 {entry.get('id')}"
+            f"（标签 {entry.get('tags')}，今天第 {_sticker_auto_count[day]}/{cap or '∞'} 张）"
+        )
+
+
+def mface_label(row: dict) -> str:
+    """来源里写清楚是「商城表情」还是「当表情包发的图」。"""
+    return "商城表情" if str(row.get("kind") or "") == "mface" else "表情图"
 
 
 # ----------------------------------------------------- 被 @ 时回复自我介绍

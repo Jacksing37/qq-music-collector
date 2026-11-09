@@ -99,7 +99,9 @@ TOOL_RULES = (
 
     # ---- 表情包与发图：这几条决定它到底「会不会用图说话」----
     "\n\n【表情包与发图】你有一整套用图说话的能力，该用的时候别只会打字：\n"
-    "· 想接一句玩笑、表示无语 / 赞同 / 敷衍 / 开心时，先 sticker_find 按情绪找库里的"
+    "· **只要库里有货，要发图就先 sticker_find 查库**（库里有更省：不用下载、不怕直链过期），"
+    "库里确实没有合适的才 search_images——它返回时也会先把库里的候选摆给你；\n"
+    "· 想接一句玩笑、表示无语 / 赞同 / 敷衍 / 开心时，先 sticker_find 按情绪找"
     "（**先看候选再发**，别凭印象瞎发），再 sticker_send 发出去；\n"
     "· 看到好玩的表情包（群友发的、或你搜到的图）就用 sticker_add 收进库，"
     "**标签必须写具体**（情绪 + 内容，例如「无语」「猫 笑到打滚」「狗头 嘲讽」），"
@@ -1226,8 +1228,22 @@ async def _handle_search_images(args: dict, ctx: ToolContext) -> str:
     query = str(args.get("query") or "").strip()
     if not query:
         return "错误：query 不能为空。写具体的实体词（「柴犬 表情包」「猫猫 无语」「某作品 海报」）。"
+
+    # 先把**库里现成的**摆出来：实测模型从不回头看库（上线 20 小时 sticker_find 0 次，
+    # 要图就现场搜），而库里那几张不用下载、不怕直链过期。这句提示摆在返回的最前面，
+    # 是让它先发库里的唯一有效办法（纯靠提示词里写「先查库」压不住）。
+    have = sticker_mod.find(query, 3, sticker_dir=_sticker_dir(ctx))
+    head = ""
+    if have:
+        head = (
+            f"【先看库里】库里已有 {len(have)} 张跟「{query}」相关的——"
+            "**能发就先发这些**（已经在库里，不用下载、也不怕直链过期）：\n"
+            + sticker_mod.format_entries(have)
+            + "\n\n"
+        )
+
     if not await imagesearch_mod.throttle(float(ctx.cfg.image_search_interval)):
-        return "刚搜过一次，等几秒再搜——搜太密会被搜索引擎要求验证码。"
+        return head + "刚搜过一次，等几秒再搜——搜太密会被搜索引擎要求验证码。"
     try:
         count = int(args.get("count") or 6)
     except (TypeError, ValueError):
@@ -1237,21 +1253,28 @@ async def _handle_search_images(args: dict, ctx: ToolContext) -> str:
         query, want, float(ctx.cfg.image_search_timeout)
     )
     if not rows:
-        return (
+        tail = (
             f"图片搜索没结果：{error}。\n"
             "换个更具体的词再试一次（角色名 / 作品名 / 具体的梗）；还不行就用 web_search "
             "找到图片所在的页面，再用 browse 打开它——browse 会附上页面里的图片直链。"
             "真找不到就直接告诉群友你找不到，别编一个链接。"
         )
-    return imagesearch_mod.format_results(query, rows)
+        if have:
+            return head + "网上这边：\n" + tail
+        return tail
+    body = imagesearch_mod.format_results(query, rows)
+    if have:
+        body += "\n（网上搜到的这些是备选：库里那几张够用就别发这些，省得重复。）"
+    return head + body
 
 
 SEARCH_IMAGES = Tool(
     name="search_images",
     description=(
-        "搜**图片**（不是网页）：按关键词拿回若干图片直链 + 来源页，用来回答「发张 XX 的图」"
-        "「找个表情包」这类要求。用完再用 send_image 把挑中的那张发出去"
-        "（想留着以后用就 sticker_add 收进库）。"
+        "搜**图片**（不是网页）：按关键词拿回若干图片直链 + 来源页。"
+        "**先在库里找**——有人要「发张 XX 的图」时先 sticker_find，库里没有合适的再用它；"
+        "它返回时也会把库里的候选摆在最前面。"
+        "搜到之后用 send_image 发出去（想留着以后用就 sticker_add 收进库）。"
         "关键词要用**实体词**，「柴犬 表情包」「猫 无语」这种；堆形容词会被拆词、搜出无关图。"
         "它只给直链、不保证都能下载（图床防盗链/链接过期），发不出去就换下一条。"
     ),

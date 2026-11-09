@@ -642,6 +642,15 @@ class LLMConfig(BaseModel):
     stickers: bool = True
     #: 表情包库目录；留空 = data/stickers（相对路径按 data/ 解析）
     sticker_dir: str = ""
+    #: 群里有人发 QQ 表情包（``mface``）时**自动收进库**。
+    #: 为什么需要这个开关：模型只在被 @ / 被戳 / 贴链接时才运行，群友随手丢个表情包
+    #: **根本不会触发大模型**——实测上线 20 小时、「可收藏表情」轮次 0 次，
+    #: 「让模型自己决定收」在真实群里几乎不会发生。打开后由监听器把图存下来、
+    #: 标签先用 QQ 给的 summary，之后可以在「表情包」页补标签。
+    #: 关掉 = 回到「只由模型决定」（它被 @ 且消息带表情包时才可能收）
+    sticker_auto_collect: bool = True
+    #: 自动收每天最多几张（防一晚上囤几百张）。0 = 不限
+    sticker_auto_daily: int = Field(30, ge=0, le=500)
     #: 一轮最多发几张图（表情包也算）。0 = 不给发图工具（模型只能收、不能发）
     image_send_max: int = Field(2, ge=0, le=6)
     #: 是否给模型 ``search_images``（按关键词搜图片直链）。搜的是 Bing / 百度的公开

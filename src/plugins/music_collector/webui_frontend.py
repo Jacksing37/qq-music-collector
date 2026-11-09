@@ -1869,8 +1869,9 @@ const BOT_GROUPS=[
       + "🔒 <b>QQ 聊天中禁止安装任何技能</b>（代码硬规则、没有开关）：模型没有装技能的工具，"
       + "自己编个 <code>install_skill</code> 也会被拒绝；技能只能在这里配好目录后、由管理员把文件夹放到服务器上。"
       + "开了脚本执行后，脚本跑完还会比对技能目录，往里塞的东西会被还原。<br>"
-      + "唯一的写权限是<b>记忆档案</b>（<code>data/memory/</code>）：模型能用 remember / recall / forget "
-      + "记录群友特征，路径由代码拼死，出不了那个目录；内容在「群记忆」页随时可改可删。<br>"
+      + "写权限只有两处：<b>记忆档案</b>（<code>data/memory/</code>，remember / recall / forget）"
+      + "和<b>表情包库</b>（<code>data/stickers/</code>，sticker_add 收图）——路径都由代码拼死，"
+      + "出不了这两个目录；内容分别在「群记忆」和「表情包」页随时可改可删。<br>"
       + "⚠️ <b>允许执行技能脚本</b>等于「模型能让你服务器上跑代码」，只在完全信任技能来源时打开。",
    keys:["llm.tools","llm.tool_rounds","llm.tool_chars",
           "llm.slow_hint_seconds","llm.slow_hint_text","llm.slow_hint_max",
@@ -1881,7 +1882,8 @@ const BOT_GROUPS=[
          "llm.search_timeout","llm.search_interval",
          "llm.search_node","llm.search_tools_dir",
          "llm.image_lookup","llm.image_lookup_timeout","llm.image_lookup_interval",
-         "llm.stickers","llm.sticker_dir","llm.image_send_max",
+         "llm.stickers","llm.sticker_dir","llm.sticker_auto_collect","llm.sticker_auto_daily",
+         "llm.image_send_max",
          "llm.image_search","llm.image_search_max","llm.image_search_timeout",
          "llm.image_search_interval",
          "llm.skills","llm.skills_dir","llm.skill_body_chars","llm.skill_file_chars",
