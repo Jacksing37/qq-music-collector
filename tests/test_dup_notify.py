@@ -362,6 +362,38 @@ async def test_master_dup_text_who_fallback():
         mc.service = real_service
 
 
+async def test_master_compare_off_collects_anyway():
+    """[I] 关掉「分享对比总库」= 真不对比：跨窗口重复照样收进当前窗口。
+
+    2026-11-13 线上：compare_on_share=False 时仍被总库拦下且不回话，
+    群里看到的就是「发了却没收录」，日志只有一排 0。
+    """
+    print("\n[I] 关掉分享对比总库：总库已有的歌仍收进当前窗口")
+    tmp = Path(tempfile.mkdtemp())
+    svc, store = _make_svc(tmp)
+    await store.init()
+    gid = 6209
+    _quiet_side_effects()
+    config_manager.config.master.enabled = True
+    config_manager.config.master.compare_on_share = False
+    config_manager.config.playlist.one_per_sharer = True
+
+    # 预置：这首歌已在总库（来自另一个窗口 / 歌单导入），但当前窗口没有
+    await store.add_song(gid, MASTER_KEY, _song("555", "孤勇者"), src_window="import")
+    wk = svc.current_window(gid).key
+    restore = _patch_resolve(svc, {"555": _song("555", "孤勇者")})
+    try:
+        r = await svc.handle_segments(gid, _links("555"), 123, "张三")
+        check("跨窗口重复照样收录", len(r.accepted) == 1, str(r.accepted))
+        check("不记 master_duplicated", len(r.master_duplicated) == 0, str(r.master_duplicated))
+        check("总库不重复增加", await store.count(gid, MASTER_KEY) == 1,
+              str(await store.count(gid, MASTER_KEY)))
+        check("当前窗口收录 1 首", await store.count(gid, wk) == 1,
+              str(await store.count(gid, wk)))
+    finally:
+        restore()
+
+
 async def main() -> None:
     await test_same_window_dup_with_master()
     await test_cross_window_dup_still_master()
@@ -371,6 +403,7 @@ async def main() -> None:
     await test_window_dup_returns_claim()
     await test_accepted_still_holds_claim()
     await test_master_dup_text_who_fallback()
+    await test_master_compare_off_collects_anyway()
     print("\n====================================================")
     print(f"通过 {PASSED} 项，失败 {FAILED} 项")
     if FAILED:

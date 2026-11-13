@@ -290,9 +290,10 @@ class CollectorService:
                     result.sharer_limited.append((song, first))
                     continue
 
-            # 总库：启用后先判定该歌是否已存在于群级总库（跨窗口去重）。
-            # 若总库早已存在，则不再写入当前窗口，避免同一首歌在多个窗口重复收录，
-            # 仅记录为跨窗口重复提示（与同窗口重复互不冲突、不重复刷屏）。
+            # 总库：启用后先记一笔（跨窗口去重）。
+            # 命中「总库已有」时，**是否拦下当前窗口的收录**由 compare_on_share 决定：
+            #   开 -> 拦，只记 master_duplicated（页面提示重复）；
+            #   关 -> 不对比，照收当前窗口，总库那条不再重复插（等于只当账本）。
             master_dup_stored = None
             already_in_master = False
             if cfg.master.enabled:
@@ -300,8 +301,10 @@ class CollectorService:
                     group_id, MASTER_KEY, song, src_window=state.key
                 )
                 if not m_inserted:
-                    already_in_master = True
                     master_dup_stored = m_stored
+                    # 「分享对比总库」关掉 = 真的不对比：跨窗口重复也照收进当前窗口，
+                    # 总库那条记录原样留着（不再插一遍），既不拦也不提示。
+                    already_in_master = cfg.master.compare_on_share
 
             if already_in_master:
                 # 已在总库（跨窗口重复）：不再写入当前窗口（避免重复计数）。
@@ -342,8 +345,8 @@ class CollectorService:
                 # 同窗口已有这首歌、这次没收录：把本次刚占下的名额还回去，
                 # 让本人还能分享别的歌（否则会被误判成「本期已经分享过」）。
                 await _rollback_claim(song)
-            if master_dup_stored is not None:
-                result.master_duplicated.append(master_dup_stored)
+            # 走到这里说明没被总库拦下（命中但 compare_on_share 关着 -> 已收进当前窗口），
+            # 或压根没命中，不再记 master_duplicated（那样会同一首歌既 accepted 又重复）。
 
         for song in result.accepted + result.duplicated:
             if song.row_id is not None:
