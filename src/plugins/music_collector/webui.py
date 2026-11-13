@@ -187,6 +187,14 @@ FIELD_META: dict[str, tuple[str, str, bool]] = {
     "reply.match_fail_text": ("回填失败提示", "回填匹配失败时的回执（链接解析不出 / 拉不到详情 / 该歌已匹配过）。占位符：{title}原歌名 {reason}失败原因；用 \\n 换行", True),
     "reply.match_deny_text": ("回填无权限提示", "非管理员、也非该歌分享者却引用指定匹配时的提示。占位符：{title}原歌名 {nick}操作者；用 \\n 换行", True),
 
+    "reply.list_enabled": ("启用自定义文字榜单", "只管 /music list 的**文字**（长图另有一套「长图渲染」配置）。关闭时用内置格式，输出与默认模板一模一样", False),
+    "reply.list_title": ("榜单标题行", "占位符：{window}窗口文案 {count}首数 {group}群号", False),
+    "reply.list_item": ("榜单单条格式", "占位符：{index}序号 {title}歌名 {artists}歌手 {nick}分享者 {nick_line}「（昵称）」整段(没人时自动消失) {platform}平台 {album}专辑 {url}链接 {duration}时长", False),
+    "reply.list_template": ("榜单整体骨架", "占位符：{header}标题行 {count}首数 {divider}分隔线 {songs}歌曲块 {more}超出提示(不超时为空) {window}窗口文案；用 \\n 换行", True),
+    "reply.list_limit": ("榜单最多列几首", "超出的只写一行「还有 N 首，详见图片」", False),
+    "reply.list_more": ("超限补充行", "接在歌曲块后面。占位符：{left}剩余首数 {count}总首数", False),
+    "reply.list_empty_text": ("空榜文案", "一首都没收到时，接在标题后面的那句话", False),
+
     "playlist.name_template": ("歌单名模板", "占位符：{seq}期号 {slash}如26/8/7 {y}{yy}年 {m}{mm}月 {d}{dd}日 {ymd}{date}日期 {week}周数 {weekday}星期 {start}起始日 {end}结束日 {window}窗口文案 {count}收录数 {total}分享数 {sharers}人数 {group}群号", True),
     "playlist.description_template": ("简介开头模板", "后续自动接「谁分享了什么歌」清单。占位符同歌单名，另可用 {songlist}歌曲清单 {sharerlist}按人聚合清单；{group}群号 {window}窗口 {count}数", True),
 }

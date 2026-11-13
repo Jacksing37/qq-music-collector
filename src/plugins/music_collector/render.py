@@ -15,8 +15,8 @@ import httpx
 from PIL import Image, ImageDraw, ImageFont
 
 from .config import CACHE_DIR, RenderConfig
-from .models import Song
-from .naming import resolve_alias
+from .models import PLATFORM_NAMES, Song
+from .naming import render_template, resolve_alias
 
 # ---------------------------------------------------------------- 字体
 
@@ -230,28 +230,110 @@ FOOTER_H = 56
 # ---------------------------------------------------------------- 文字列表
 
 
+#: 文字榜单里标题 / 歌曲块之间的分隔线（模板里的 ``{divider}``）
+LIST_DIVIDER = "─" * 16
+#: 内置默认格式的「超出上限」那一行（模板未启用时用）
+_DEFAULT_MORE = "…… 还有 {left} 首，详见图片"
+
+
 def build_text_list(
-    songs: Sequence[Song], title: str, limit: int = 60,
+    songs: Sequence[Song],
+    title: str,
+    limit: int = 60,
     aliases: Optional[dict[str, str]] = None,
+    tmpl=None,
+    meta: Optional[dict[str, str]] = None,
 ) -> str:
-    """生成纯文字榜单。超过 limit 条只列前 limit 条，避免消息被风控截断。
+    """生成纯文字榜单。超过 ``limit`` 条只列前 ``limit`` 条，避免消息被风控截断。
 
     ``aliases`` 为分享者昵称映射，命中后展示映射名（仅展示层，不改数据）。
+
+    ``tmpl`` 传 ``ReplyConfig``，只有它开了 ``list_enabled`` 才走自定义模板
+    （``list_title`` / ``list_item`` / ``list_template`` / ``list_limit`` /
+    ``list_more`` / ``list_empty_text``）；关着走内置格式，输出与默认模板完全一致。
+    ``meta`` 是给模板的额外占位符（``window`` / ``group``），缺省也能渲染。
     """
+    use_tmpl = bool(tmpl is not None and getattr(tmpl, "list_enabled", False))
+    ctx: dict[str, str] = {k: str(v) for k, v in (meta or {}).items()}
+    ctx.setdefault("group", "")
+    ctx.setdefault("window", "")
+    ctx.setdefault("title", title)
+
+    if use_tmpl:
+        try:
+            limit = max(1, min(200, int(getattr(tmpl, "list_limit", limit) or limit)))
+        except (TypeError, ValueError):
+            limit = 60
+
     if not songs:
-        return f"{title}\n当前还没有收集到任何歌曲。"
-    lines = [title, f"共 {len(songs)} 首", "─" * 16]
+        empty = (str(getattr(tmpl, "list_empty_text", "") or "") if use_tmpl else "")
+        return f"{title}\n{empty or '当前还没有收集到任何歌曲。'}"
+
+    ctx["count"] = str(len(songs))
+    header = title
+    item_tpl = ""
+    if use_tmpl:
+        title_tpl = str(getattr(tmpl, "list_title", "") or "")
+        if title_tpl:
+            header = render_template(title_tpl, ctx) or title
+        item_tpl = str(getattr(tmpl, "list_item", "") or "")
+
+    lines: list[str] = []
     for idx, song in enumerate(songs[:limit], start=1):
         artist = song.artists or "未知歌手"
         raw = song.sharer_name or str(song.sharer_id or "")
         sharer = resolve_alias(raw, song.sharer_id, aliases)
+        if item_tpl:
+            lines.append(
+                render_template(
+                    item_tpl,
+                    {
+                        "index": str(idx),
+                        "title": song.title,
+                        "artists": artist,
+                        "nick": sharer,
+                        "nick_line": f"（{sharer}）" if sharer else "",
+                        "platform": PLATFORM_NAMES.get(song.platform, song.platform),
+                        "album": song.album or "",
+                        "url": song.url or "",
+                        "duration": song.duration_text or "",
+                    },
+                )
+            )
+            continue
         line = f"{idx}. {song.title} - {artist}"
         if sharer:
             line += f"（{sharer}）"
         lines.append(line)
-    if len(songs) > limit:
-        lines.append(f"…… 还有 {len(songs) - limit} 首，详见图片")
-    return "\n".join(lines)
+
+    songs_block = "\n".join(lines)
+    left = len(songs) - limit
+
+    if not use_tmpl:
+        out = [header, f"共 {len(songs)} 首", LIST_DIVIDER, songs_block]
+        if left > 0:
+            out.append(f"…… 还有 {left} 首，详见图片")
+        return "\n".join(out)
+
+    more = ""
+    if left > 0:
+        more_tpl = str(getattr(tmpl, "list_more", "") or "") or _DEFAULT_MORE
+        more = "\n" + render_template(more_tpl, {"left": str(left), "count": str(len(songs))})
+
+    body_tpl = str(getattr(tmpl, "list_template", "") or "")
+    if not body_tpl:
+        return "\n".join([header, f"共 {len(songs)} 首", LIST_DIVIDER, songs_block + more])
+    body = render_template(
+        body_tpl,
+        {
+            **ctx,
+            "header": header,
+            "divider": LIST_DIVIDER,
+            "songs": songs_block,
+            "more": more,
+        },
+    )
+    return body or "\n".join([header, LIST_DIVIDER, songs_block + more])
 
 
 # ---------------------------------------------------------------- 封面缓存

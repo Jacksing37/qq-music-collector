@@ -218,6 +218,26 @@ class ReplyConfig(BaseModel):
     #: 占位符：{title} 原歌名 {nick} 操作者
     match_deny_text: str = "只有管理员或这首歌的分享者能指定匹配哦"
 
+    # ---- 本期榜单（/music list）的文字模板 ----
+    #: 是否用自定义模板渲染**文字榜单**（长图另有一套 render 配置）。
+    #: 关闭时走内置格式，输出与默认模板完全一致
+    list_enabled: bool = False
+    #: 标题行。占位符：{window} 窗口文案  {count} 首数  {group} 群号
+    list_title: str = "群音乐收藏榜 · {window}"
+    #: 单条歌曲。占位符：{index} 序号 {title} 歌名 {artists} 歌手 {nick} 分享者（裸名）
+    #:   {nick_line} 分享者「（昵称）」整段，没人时消失
+    #:   {platform} 平台名 {album} 专辑 {url} 链接 {duration} 时长 mm:ss
+    list_item: str = "{index}. {title} - {artists}{nick_line}"
+    #: 整体骨架。占位符：{header} 标题行 {count} 首数 {divider} 分隔线
+    #:   {songs} 歌曲块 {more} 超出上限的补充行（不超时为空）{window} 窗口文案
+    list_template: str = "{header}\n共 {count} 首\n{divider}\n{songs}{more}"
+    #: 最多列几首，超出的只写一行「还有 N 首」
+    list_limit: int = Field(60, ge=1, le=200)
+    #: 超过上限时的补充行。占位符：{left} 剩余首数  {count} 总首数
+    list_more: str = "…… 还有 {left} 首，详见图片"
+    #: 一首都没收到时，接在标题后面的那句话
+    list_empty_text: str = "当前还没有收集到任何歌曲。"
+
 
 class IntroConfig(BaseModel):
     """被 @ 时的自我介绍。"""

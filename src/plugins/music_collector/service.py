@@ -834,7 +834,14 @@ class CollectorService:
         state = window or self.current_window(group_id)
         songs = await self.store.list_songs(group_id, state.key)
         title = f"群音乐收藏榜 · {state.label}"
-        text = build_text_list(songs, title, aliases=cfg.playlist.sharer_aliases)
+        text = build_text_list(
+            songs,
+            title,
+            aliases=cfg.playlist.sharer_aliases,
+            # 文字榜单模板（「收录回复模板」页里的 list_* 那组），关着时等价于内置格式
+            tmpl=cfg.reply,
+            meta={"window": state.label, "group": str(group_id), "count": str(len(songs))},
+        )
         images: list[Path] = []
         if songs:
             subtitle = f"共 {len(songs)} 首 · 窗口 {state.label}"
