@@ -74,11 +74,6 @@ _PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
     ("qq", "song_mid", re.compile(rf"y\.qq\.com/n/ryqq/songDetail/({_QQ_MID})", re.I)),
     ("qq", "song_mid", re.compile(rf"y\.qq\.com/n/yqq/song/({_QQ_MID})\.html", re.I)),
     ("qq", "song_mid", re.compile(rf"y\.qq\.com/n/m/detail/(?:taoge|song)/[^/]*/({_QQ_MID})", re.I)),
-    ("qq", "song_mid", re.compile(rf"[?&#]songmid=({_QQ_MID})", re.I)),
-    ("qq", "song_mid", re.compile(rf"[?&#]songMid=({_QQ_MID})")),
-    ("qq", "song_mid", re.compile(rf"[?&#]mid=({_QQ_MID})", re.I)),
-    ("qq", "song_id", re.compile(r"[?&#]songid=(\d+)", re.I)),
-    ("qq", "song_id", re.compile(r"[?&#]songId=(\d+)")),
     # ---- 酷狗 ----
     ("kugou", "song_hash", re.compile(r"kugou\.com/[^\s]*[#?&]hash=([0-9A-Fa-f]{32})", re.I)),
     ("kugou", "song_hash", re.compile(r"kugou\.com/mixsong/([0-9A-Za-z]+)", re.I)),
@@ -94,6 +89,26 @@ _PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
     # ---- 汽水音乐 ----
     ("qishui", "song_id", re.compile(r"qishui\.douyin\.com/s/([0-9A-Za-z_-]+)", re.I)),
 ]
+
+#: 只在 **QQ 音乐域名** 下才成立的泛化参数规则。
+#: ``mid=`` / ``songid=`` 这类参数名没有平台特征，微博、B 站、各类中转页都可能在用，
+#: 一旦放开到「任何域名」就会把别家链接错认成 QQ 音乐（2026-11-13 线上实证）。
+_QQ_QUERY_PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
+    ("qq", "song_mid", re.compile(rf"[?&#]songmid=({_QQ_MID})", re.I)),
+    ("qq", "song_mid", re.compile(rf"[?&#]songMid=({_QQ_MID})")),
+    ("qq", "song_mid", re.compile(rf"[?&#]mid=({_QQ_MID})", re.I)),
+    ("qq", "song_id", re.compile(r"[?&#]songid=(\d+)", re.I)),
+    ("qq", "song_id", re.compile(r"[?&#]songId=(\d+)")),
+]
+
+#: 集合页（歌单 / 专辑 / 电台 / 榜单 / 歌手 / 视频）不是单曲。
+#: 这类页面能命中域名兜底，但解析不出 song_id，以前会被 ``fallback_song``
+#: 拿卡片标题当歌名直接入库（2026-11-13：「分享歌单: …」成了总库里的一首歌）。
+_COLLECTION_RE = re.compile(
+    r"/(?:playlist|album|albumDetail|program|toplist|singer|artist|radio|djradio|"
+    r"category|taoge|songlist|disslist|my/music|video|mv)(?:/|[?#]|$)",
+    re.I,
+)
 
 # 只要域名命中就认为是音乐链接（用于短链展开后仍解析不出 id 的兜底）
 _HOST_HINTS: list[tuple[str, str]] = [
@@ -149,6 +164,17 @@ def _is_apple_collection(url: str) -> bool:
     return bool(_APPLE_COLLECTION_RE.search(url)) and not re.search(r"[?#&]i=\d+", url)
 
 
+def _is_collection(url: str) -> bool:
+    """歌单 / 专辑 / 电台 / 榜单 / 歌手页：不是单曲，兜底时不能当歌。
+
+    ``album?i=<track_id>`` 是「专辑里的某一首」，仍算单曲，先放行。
+    """
+    if re.search(r"[?#&]i=\d+", url):
+        return False
+    tail = re.sub(r"^https?://[^/]+", "", url, flags=re.I)
+    return bool(_COLLECTION_RE.search(tail))
+
+
 def _platform_of_host(host: str) -> Optional[str]:
     for host_frag, platform in _HOST_HINTS:
         if host == host_frag or host.endswith("." + host_frag):
@@ -159,14 +185,17 @@ def _platform_of_host(host: str) -> Optional[str]:
 def match_url(url: str) -> Optional[MusicLink]:
     """把单个 URL 匹配成 MusicLink，匹配不到返回 None。
 
-    先按域名判断平台，再只用该平台的规则去抠 id —— 避免 ``mid=`` /
-    ``songid=`` 这类泛化参数把别家链接错认成 QQ 音乐。
+    先按域名判断平台，再只用该平台的规则去抠 id —— ``mid=`` / ``songid=`` 这类
+    泛化参数**只在 QQ 域名下**参与匹配，避免把别家链接错认成 QQ 音乐；
+    歌单 / 专辑 / 电台这类集合页不做域名兜底（它们解析不出单曲 id，只会产出脏数据）。
     """
     url = _clean_url(url)
     # 分享链里常把真实地址塞在 url= / jumpUrl= 参数中，先剥一层
     for candidate in (url, *_inner_urls(url)):
         scope = _platform_of_host(_host_of(candidate))
-        for platform, field, pattern in _PATTERNS:
+        # 泛化参数（mid= / songid=）只在确认为 QQ 音乐域名时才参与匹配
+        patterns = _PATTERNS + _QQ_QUERY_PATTERNS if scope == "qq" else _PATTERNS
+        for platform, field, pattern in patterns:
             if scope is not None and platform != scope:
                 continue
             m = pattern.search(candidate)
@@ -175,7 +204,12 @@ def match_url(url: str) -> Optional[MusicLink]:
                 setattr(link, field, m.group(1))
                 return link
     host_platform = _platform_of_host(_host_of(url))
-    if host_platform and _is_meaningful(url) and not _is_apple_collection(url):
+    if (
+        host_platform
+        and _is_meaningful(url)
+        and not _is_apple_collection(url)
+        and not _is_collection(url)
+    ):
         return MusicLink(platform=host_platform, raw=url)
     return None
 

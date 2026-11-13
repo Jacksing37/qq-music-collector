@@ -101,13 +101,31 @@ def parse_page_title(html_text: str) -> tuple[str, str, str]:
     return title, artist, cover
 
 
+#: 卡片标题本身是「分享歌单: xxx」这类集合文案时，不能拿来当歌名。
+#: 2026-11-13 线上：网易云歌单分享卡的 desc/title 被 fallback_song 当成歌名入库。
+_COLLECTION_TITLE_RE = re.compile(
+    r"^\s*(?:分享|推荐|收藏)?\s*(?:歌单|专辑|播放列表|电台|节目|榜单|合集)\s*(?:[:：]|$)"
+)
+
+
+def _looks_like_collection_title(title: str) -> bool:
+    return bool(_COLLECTION_TITLE_RE.search(title or ""))
+
+
 def fallback_song(link: MusicLink) -> Song:
-    """所有解析手段都失败时，用卡片自带信息或链接本身兜底，保证不丢记录。"""
-    title = (link.hint_title or "").strip() or "未识别歌曲"
+    """所有解析手段都失败时，用卡片自带信息或链接本身兜底，保证不丢记录。
+
+    唯一例外：卡片标题明显是「歌单 / 专辑」这类集合文案，或压根没有标题 ——
+    那就返回「未识别歌曲」，让上层走 ``unidentified``（提示没识别成音乐），
+    而不是拿一句「分享歌单: …」当歌名写进库里。
+    """
+    title = (link.hint_title or "").strip()
+    if _looks_like_collection_title(title):
+        title = ""
     return Song(
         platform=link.platform,
         song_id=link.key,
-        title=title,
+        title=title or "未识别歌曲",
         artists=(link.hint_artist or "").strip(),
         cover=link.hint_cover or "",
         url=link.raw,
