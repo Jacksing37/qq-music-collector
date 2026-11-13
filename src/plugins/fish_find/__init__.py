@@ -240,7 +240,12 @@ async def _run(image_path: str) -> dict:
         out, err = await asyncio.wait_for(proc.communicate(), RUN_TIMEOUT)
     except asyncio.TimeoutError:
         _kill_tree(proc)
-        await proc.wait()
+        # 光 kill 不够：chromium 若还握着 stdout/stderr 管道，proc.wait() 会永久挂住，
+        # 于是连「查询超时」这句都发不出去（2026-11-13 17:27 那次就是这样）。
+        try:
+            await asyncio.wait_for(proc.wait(), 10)
+        except asyncio.TimeoutError:
+            logger.warning("[fish] node 进程杀不掉，管道可能被子进程占着")
         _cleanup_stale_browser()
         raise RuntimeError(f"查询超时（{RUN_TIMEOUT:.0f} 秒）")
     text = (out or b"").decode("utf-8", "replace").strip()
