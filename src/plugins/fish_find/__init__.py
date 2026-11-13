@@ -117,17 +117,34 @@ def image_urls_of(raw: object) -> list[str]:
 
 
 async def _collect(bot: Bot, event: MessageEvent) -> tuple[list[str], str]:
-    """返回 ``(图片地址, 失败原因)``。本条消息自带的图优先，没有才去捞被引用的。"""
-    message = event.get_message()
-    urls = image_urls_of(message)
+    """返回 ``(图片地址, 失败原因)``。本条消息自带的图优先，没有再看被引用的那条。
+
+    ⚠️ **引用消息不在 ``event.message`` 里**。适配器的 ``_check_reply`` 已经调过
+    ``get_msg``，把 reply 段从 message 里 ``del`` 掉、内容塞进 ``event.reply``
+    （NoneBot v11 `bot.py` 的 41~46 行）。所以别再遍历 message 找 ``type=="reply"``
+    —— 2026-11-13 就是栽在这里：循环永远进不去，图永远是 0 张，机器人一声不吭。
+    """
+    urls = image_urls_of(event.get_message())
     if urls:
         return urls, ""
-    for seg in message:
+
+    reply = getattr(event, "reply", None)
+    if reply is not None:
+        reply_msg = getattr(reply, "message", None)
+        urls = image_urls_of(reply_msg or [])
+        mid = getattr(reply, "message_id", "?")
+        if urls:
+            logger.info(f"[fish] 引用的消息 {mid} 里有 {len(urls)} 张图")
+            return urls, ""
+        logger.info(f"[fish] 引用的消息 {mid} 里没有图片：{str(reply_msg)[:120]!r}")
+        return [], "被引用的那条消息里没有图片"
+
+    # 兜底：个别实现没填 event.reply，reply 段可能还留在 message 里
+    for seg in event.get_message():
         if seg.type != "reply":
             continue
         mid = str((seg.data or {}).get("id") or "")
         if not mid.isdigit():
-            logger.warning(f"[fish] 引用段没有可用的消息 id: {seg.data!r}")
             continue
         try:
             got = await bot.get_msg(message_id=int(mid))
@@ -136,7 +153,10 @@ async def _collect(bot: Bot, event: MessageEvent) -> tuple[list[str], str]:
             return [], f"取不到被引用的那条消息（{exc}）"
         urls = image_urls_of((got or {}).get("message") or [])
         logger.info(f"[fish] 引用消息 mid={mid} 里找到 {len(urls)} 张图")
-        return urls, ""
+        if urls:
+            return urls, ""
+        return [], "被引用的那条消息里没有图片"
+
     return [], ""
 
 
