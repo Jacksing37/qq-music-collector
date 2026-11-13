@@ -1272,20 +1272,10 @@ async def _playlist_placeholder(group_id: int, window_key: str) -> str:
     """{playlist} 占位符：当前群当前窗口的网易云歌单（名称 + 链接）。
 
     本期还没归档时用 ``reply.playlist_empty_text`` 代替。
+    实际逻辑在 ``service.playlist_link``——文字榜单也用同一份，别各写一套。
     """
     cfg = service.cfg(group_id).reply
-    try:
-        arch = await service.store.get_archive(group_id, window_key)
-    except Exception as exc:  # 查库异常不该打断回复
-        logger.warning(f"[music] 读取本期歌单失败: {exc}")
-        arch = None
-    url = str((arch or {}).get("playlist_url") or "")
-    pid = str((arch or {}).get("playlist_id") or "")
-    if not url and pid.isdigit():
-        url = service.netease.playlist_url(int(pid))
-    if not url:
-        return cfg.playlist_empty_text
-    return url
+    return await service.playlist_link(group_id, window_key, cfg.playlist_empty_text)
 
 
 def _fmt_dup_date(ts: float) -> str:

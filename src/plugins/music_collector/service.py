@@ -827,6 +827,26 @@ class CollectorService:
 
     # ------------------------------------------------------------ 榜单
 
+    async def playlist_link(
+        self, group_id: int, window_key: str, empty_text: str = ""
+    ) -> str:
+        """当前群当前窗口的网易云歌单链接；本期还没归档时返回 ``empty_text``。
+
+        ``{playlist}`` 占位符的**唯一出口**：收录回复文案和文字榜单都走这里，
+        别再各写一份（2026-11-13 从插件层抽上来，避免 render 反向依赖）。
+        """
+        try:
+            arch = await self.store.get_archive(group_id, window_key)
+        except Exception as exc:  # noqa: BLE001  查库失败不该打断回复
+            logger.warning(f"[music] 读取本期歌单失败: {exc}")
+            arch = None
+        url = str((arch or {}).get("playlist_url") or "")
+        if not url:
+            pid = str((arch or {}).get("playlist_id") or "")
+            if pid.isdigit():
+                url = self.netease.playlist_url(int(pid))
+        return url or empty_text
+
     async def build_report(
         self, group_id: int, window: Optional[WindowState] = None
     ) -> tuple[str, list[Path], list[Song]]:
@@ -834,13 +854,19 @@ class CollectorService:
         state = window or self.current_window(group_id)
         songs = await self.store.list_songs(group_id, state.key)
         title = f"群音乐收藏榜 · {state.label}"
+        meta = {"window": state.label, "group": str(group_id), "count": str(len(songs))}
+        if cfg.reply.list_enabled:
+            # 开了自定义模板才算 {playlist}，否则白查一次库
+            meta["playlist"] = await self.playlist_link(
+                group_id, state.key, cfg.reply.playlist_empty_text
+            )
         text = build_text_list(
             songs,
             title,
             aliases=cfg.playlist.sharer_aliases,
             # 文字榜单模板（「收录回复模板」页里的 list_* 那组），关着时等价于内置格式
             tmpl=cfg.reply,
-            meta={"window": state.label, "group": str(group_id), "count": str(len(songs))},
+            meta=meta,
         )
         images: list[Path] = []
         if songs:

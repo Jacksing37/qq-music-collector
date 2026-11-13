@@ -115,6 +115,20 @@ weird = build_text_list(make_songs(1), TITLE, tmpl=ReplyConfig(
     list_enabled=True, list_template="{header}\n{不存在的占位符}"))
 check("不崩且保留原文", "{不存在的占位符}" in weird, weird)
 
+print("\n[G] {playlist} 由 service 塞进 meta，透传到模板")
+cfg_pl = ReplyConfig(
+    list_enabled=True,
+    list_template="{header}\n共 {count} 首\n{playlist}\n{songs}",
+)
+got_pl = build_text_list(
+    make_songs(2), TITLE, tmpl=cfg_pl,
+    meta={"window": "测试窗口", "playlist": "https://music.163.com/playlist?id=18590586694"},
+)
+check("歌单链接出现在榜单里",
+      "https://music.163.com/playlist?id=18590586694" in got_pl, got_pl)
+check("没传 playlist 时原样保留占位符",
+      "{playlist}" in build_text_list(make_songs(1), TITLE, tmpl=cfg_pl))
+
 print(f"\n通过 {PASSED} / {PASSED + FAILED}")
 if FAILED:
     sys.exit(1)

@@ -230,6 +230,7 @@ class ReplyConfig(BaseModel):
     list_item: str = "{index}. {title} - {artists}{nick_line}"
     #: 整体骨架。占位符：{header} 标题行 {count} 首数 {divider} 分隔线
     #:   {songs} 歌曲块 {more} 超出上限的补充行（不超时为空）{window} 窗口文案
+    #:   {playlist} 本期网易云歌单（名称+链接），还没归档时用 playlist_empty_text 代替
     list_template: str = "{header}\n共 {count} 首\n{divider}\n{songs}{more}"
     #: 最多列几首，超出的只写一行「还有 N 首」
     list_limit: int = Field(60, ge=1, le=200)

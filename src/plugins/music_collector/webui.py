@@ -190,7 +190,7 @@ FIELD_META: dict[str, tuple[str, str, bool]] = {
     "reply.list_enabled": ("启用自定义文字榜单", "只管 /music list 的**文字**（长图另有一套「长图渲染」配置）。关闭时用内置格式，输出与默认模板一模一样", False),
     "reply.list_title": ("榜单标题行", "占位符：{window}窗口文案 {count}首数 {group}群号", False),
     "reply.list_item": ("榜单单条格式", "占位符：{index}序号 {title}歌名 {artists}歌手 {nick}分享者 {nick_line}「（昵称）」整段(没人时自动消失) {platform}平台 {album}专辑 {url}链接 {duration}时长", False),
-    "reply.list_template": ("榜单整体骨架", "占位符：{header}标题行 {count}首数 {divider}分隔线 {songs}歌曲块 {more}超出提示(不超时为空) {window}窗口文案；用 \\n 换行", True),
+    "reply.list_template": ("榜单整体骨架", "占位符：{header}标题行 {count}首数 {divider}分隔线 {songs}歌曲块 {more}超出提示(不超时为空) {window}窗口文案 {playlist}本期网易云歌单(名+链接，本期还没归档时用上面的「歌单未生成替代文案」)；用 \\n 换行", True),
     "reply.list_limit": ("榜单最多列几首", "超出的只写一行「还有 N 首，详见图片」", False),
     "reply.list_more": ("超限补充行", "接在歌曲块后面。占位符：{left}剩余首数 {count}总首数", False),
     "reply.list_empty_text": ("空榜文案", "一首都没收到时，接在标题后面的那句话", False),
