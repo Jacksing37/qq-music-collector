@@ -29,6 +29,7 @@ import time
 import httpx
 from nonebot import on_message
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageEvent, MessageSegment
+from nonebot.exception import FinishedException
 from nonebot.log import logger
 
 #: 插件本体所在目录。装了别处就设 ``FISH_FIND_DIR``
@@ -81,13 +82,31 @@ def _node_major(node: str) -> int:
         return 20
 
 
-async def _urls_in(message: Message) -> list[str]:
-    """按出现顺序取出消息里所有图片的地址（http）。"""
+def image_urls_of(raw: object) -> list[str]:
+    """按出现顺序取出图片地址。
+
+    ``raw`` 有三种形态，**都要吃得下**：
+
+    - ``Message``（``event.get_message()``）——元素是 ``MessageSegment``；
+    - ``list[dict]``（``bot.get_msg()`` 的原始返回，NapCat 就是这种）；
+    - ``str``（CQ 码格式）。
+
+    ⚠️ 2026-11-13 踩过：直接 ``Message(list_of_dict)`` 会抛
+    ``ValueError: Unexpected type: <class 'dict'>``，而那句在 handler 里没兜住，
+    表现就是「引用图片发 /鱼鱼找鸡，机器人一声不吭」。
+    """
     urls: list[str] = []
-    for seg in message:
-        if seg.type != "image":
-            continue
-        data = seg.data or {}
+    if isinstance(raw, str):
+        raw = Message(raw)
+    for item in raw or []:  # type: ignore[union-attr]
+        if isinstance(item, dict):
+            if item.get("type") != "image":
+                continue
+            data = item.get("data") or {}
+        else:
+            if getattr(item, "type", "") != "image":
+                continue
+            data = getattr(item, "data", None) or {}
         url = str(data.get("url") or "").strip()
         if not url:
             # 少数实现只给 file / 本地路径
@@ -97,24 +116,28 @@ async def _urls_in(message: Message) -> list[str]:
     return urls
 
 
-async def _collect(bot: Bot, event: MessageEvent) -> list[str]:
-    """本条消息自带的图 + 被引用消息里的图，按这个顺序。"""
-    urls = await _urls_in(event.get_message())
+async def _collect(bot: Bot, event: MessageEvent) -> tuple[list[str], str]:
+    """返回 ``(图片地址, 失败原因)``。本条消息自带的图优先，没有才去捞被引用的。"""
+    message = event.get_message()
+    urls = image_urls_of(message)
     if urls:
-        return urls
-    for seg in event.get_message():
+        return urls, ""
+    for seg in message:
         if seg.type != "reply":
             continue
         mid = str((seg.data or {}).get("id") or "")
         if not mid.isdigit():
+            logger.warning(f"[fish] 引用段没有可用的消息 id: {seg.data!r}")
             continue
         try:
             got = await bot.get_msg(message_id=int(mid))
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[fish] 取引用消息失败 mid={mid}: {exc}")
-            continue
-        urls.extend(await _urls_in(Message(got.get("message") or [])))
-    return urls
+            return [], f"取不到被引用的那条消息（{exc}）"
+        urls = image_urls_of((got or {}).get("message") or [])
+        logger.info(f"[fish] 引用消息 mid={mid} 里找到 {len(urls)} 张图")
+        return urls, ""
+    return [], ""
 
 
 async def _download(url: str) -> str:
@@ -179,9 +202,25 @@ async def _handle(bot: Bot, event: MessageEvent) -> None:
         logger.warning(f"[fish] 插件目录不存在：{PLUGIN_DIR}")
         await fish.finish("鱼鱼找鸡没装好（找不到插件目录），先别用。")
 
-    urls = await _collect(bot, event)
+    # 兜底：任何没预料到的异常都要回一句话，别再「一声不吭」（2026-11-13 的教训）
+    try:
+        await _run_query(bot, event)
+    except FinishedException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.opt(exception=exc).error("[fish] 处理失败")
+        await fish.finish(f"出错了：{type(exc).__name__}: {exc}")
+
+
+async def _run_query(bot: Bot, event: MessageEvent) -> None:
+    urls, why = await _collect(bot, event)
+    logger.info(
+        f"[fish] 收到请求 群{getattr(event, 'group_id', '-')} "
+        f"用户{getattr(event, 'user_id', '-')} 图 {len(urls)} 张"
+        + (f"（{why}）" if why else "")
+    )
     if not urls:
-        await fish.finish("引用一张图再发「鱼鱼找鸡」～")
+        await fish.finish(why or "引用一张图再发「鱼鱼找鸡」～")
 
     uid = int(getattr(event, "user_id", 0) or 0)
     now = time.time()
