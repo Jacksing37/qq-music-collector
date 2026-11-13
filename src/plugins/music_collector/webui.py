@@ -27,7 +27,7 @@ _ENV_PATH = Path(__file__).resolve().parents[3] / ".env"
 
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
-from nonebot import get_app
+from nonebot import get_app, get_bots
 from nonebot.log import logger
 from pydantic import BaseModel
 from pydantic_core import PydanticUndefined
@@ -65,6 +65,7 @@ from .llm import (
     thinking_budget,
 )
 from .models import PLATFORM_NAMES
+from .detector import detect_from_segments
 from .store import MASTER_KEY
 from .naming import resolve_alias
 from .scheduler import next_run_of, next_runs, reload_jobs
@@ -2890,8 +2891,148 @@ async def _api_bot_history(request: Request):
     where = f"群 {gid}" if gid is not None else "全部群"
     return JSONResponse({"ok": True, "message": f"已清空{where}的对话上下文（{n} 个群）"})
 
-#: 「聊天测试」用的虚拟群号。真实 QQ 群号都是正数，用负数保证永远撞不上，
-#: 这样测试对话的历史、上下文用量、LLM 调用记录都自成一份，不污染任何真群。
+async def _api_backfill(request: Request):
+    """把群里发过、但被旧逻辑漏掉的歌补录进当前窗口（运维用，2026-11-13）。
+
+    起因：``master.compare_on_share=false`` 时旧代码仍会拦下总库已存在的歌，
+    且不提示，群里表现为「发了却没收录」，日志里连歌名都没留下。事后只能回读
+    群历史重新识别一遍。
+
+    body（JSON）::
+
+        group_id  必填
+        count     回读多少条历史消息（默认 80，上限 200）
+        since     unix 时间戳，只补这之后的消息（默认 0 = 不限）
+        dry_run   默认 true，只返回清单不写库
+        archive   默认 false，补录后是否立刻归档（同步到本期歌单）
+
+    补录**不走** ``handle_segments``：那条路会再被总库判重拦一次，还会占用
+    「同一用户本期一首」的名额。这里直接写当前窗口，歌单由 ``archive`` 补齐。
+    """
+    if not _token_ok(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    try:
+        gid = int(body.get("group_id"))
+    except (TypeError, ValueError):
+        return JSONResponse({"ok": False, "message": "group_id 必填"}, status_code=400)
+    try:
+        count = min(200, max(1, int(body.get("count") or 80)))
+    except (TypeError, ValueError):
+        count = 80
+    try:
+        since = float(body.get("since") or 0)
+    except (TypeError, ValueError):
+        since = 0.0
+    dry = bool(body.get("dry_run", True))
+    want_archive = bool(body.get("archive", False))
+
+    try:
+        bot = next(iter(get_bots().values()), None)
+    except Exception:  # noqa: BLE001
+        bot = None
+    if bot is None:
+        return JSONResponse({"ok": False, "message": "机器人未连接"}, status_code=503)
+
+    try:
+        resp = await bot.call_api("get_group_msg_history", group_id=gid, count=count)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            {"ok": False, "message": f"拉取群历史失败: {exc}"}, status_code=502
+        )
+
+    messages = list((resp or {}).get("messages") or [])
+    state = service.current_window(gid)
+    found: list[dict] = []
+    added: list[dict] = []
+    skipped: list[dict] = []
+    resolved: dict[tuple[str, str], typing.Any] = {}
+
+    for msg in messages:
+        try:
+            ts = float(msg.get("time") or 0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        if since and ts < since:
+            continue
+        try:
+            links = await detect_from_segments(msg.get("message") or [])
+        except Exception:  # noqa: BLE001
+            continue
+        sender = msg.get("sender") or {}
+        nick = str(sender.get("card") or sender.get("nickname") or "").strip()
+        try:
+            uid = int(msg.get("user_id") or 0)
+        except (TypeError, ValueError):
+            uid = 0
+
+        for link in links:
+            sig = (link.platform, link.key)
+            if sig in resolved:
+                song = resolved[sig]
+            else:
+                try:
+                    song = await service.providers.resolve(link)
+                except Exception:  # noqa: BLE001
+                    song = None
+                resolved[sig] = song
+            if song is None or not song.title or song.title == "未识别歌曲":
+                skipped.append({
+                    "time": ts, "platform": link.platform,
+                    "key": link.key, "why": "解析不出歌名",
+                })
+                continue
+            item = {
+                "time": ts, "title": song.title, "artists": song.artists,
+                "platform": song.platform, "song_id": song.song_id,
+                "by": nick, "uid": uid,
+            }
+            exists = await service.store.find_in_window(gid, state.key, song)
+            if exists is not None:
+                item["why"] = "当前窗口已有"
+                found.append(item)
+                continue
+            found.append(item)
+            if dry:
+                continue
+            song.sharer_id = uid
+            song.sharer_name = nick
+            if ts:
+                song.created_at = ts
+            ok, _stored = await service.store.add_song(gid, state.key, song)
+            if ok:
+                added.append(item)
+
+    archive_report = None
+    if added and want_archive:
+        try:
+            rep = await service.run_archive(gid)
+            archive_report = {
+                "ok": rep.ok, "message": rep.message,
+                "total": rep.total, "added": rep.added,
+                "playlist_url": rep.playlist_url,
+            }
+        except Exception as exc:  # noqa: BLE001
+            archive_report = {"ok": False, "message": str(exc)}
+
+    return JSONResponse({
+        "ok": True,
+        "window": state.key,
+        "scanned": len(messages),
+        "dry_run": dry,
+        "found": found,
+        "added": added,
+        "skipped": skipped,
+        "archive": archive_report,
+    })
+
+
+#: 「聊天测试」用的虚拟群号。真实 QQ 群号都是正数，用负数保证永远撞不上，#: 这样测试对话的历史、上下文用量、LLM 调用记录都自成一份，不污染任何真群。
 CHAT_TEST_GID = -1
 
 
@@ -3095,6 +3236,7 @@ def register_webui() -> None:
     app.add_api_route("/api/music-admin/context", _api_context, methods=["GET"])
     app.add_api_route("/api/music-admin/bot/test", _api_bot_test, methods=["POST"])
     app.add_api_route("/api/music-admin/bot/history", _api_bot_history, methods=["POST"])
+    app.add_api_route("/api/music-admin/music/backfill", _api_backfill, methods=["POST"])
     app.add_api_route("/api/music-admin/chat-test", _api_chat_test, methods=["POST"])
     app.add_api_route("/api/music-admin/config", _api_patch, methods=["PATCH"])
     app.add_api_route("/api/music-admin/groups", _api_groups, methods=["GET"])
