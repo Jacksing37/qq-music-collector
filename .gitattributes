@@ -1,0 +1,18 @@
+# 统一行尾，避免 Windows 检出后把 CRLF 带到 Linux 上执行失败。
+# 踩过：CRLF 的 .sh 上传到服务器报 `set: -: invalid option` / `$'\r': command not found`；
+# CRLF 的 .service 会让 systemd 把 `Description\r` 当成未知指令。
+
+* text=auto
+
+*.sh       text eol=lf
+*.service  text eol=lf
+*.py       text eol=lf
+*.json     text eol=lf
+*.yaml     text eol=lf
+*.yml      text eol=lf
+*.md       text eol=lf
+Dockerfile text eol=lf
+
+*.bat      text eol=crlf
+*.cmd      text eol=crlf
+*.ps1      text eol=crlf
