@@ -31,3 +31,7 @@ logs/
 *.swp
 .DS_Store
 overview.md
+
+# ===== 境外代理 =====
+# 代理环境变量的真实文件（含本地端口配置），模板见 deploy/xray/README.md
+proxy.env

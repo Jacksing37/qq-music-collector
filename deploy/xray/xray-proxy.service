@@ -1,0 +1,29 @@
+# Xray 代理 · systemd 单元
+# 安装：
+#   sudo cp deploy/xray/xray-proxy.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now xray-proxy
+# 查看：
+#   systemctl status xray-proxy
+#   journalctl -u xray-proxy -n 50
+
+[Unit]
+Description=Xray Proxy (VLESS REALITY client, loopback only)
+# 等网络就绪再起：Reality 握手需要能解析并对上目标 SNI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 地理数据目录（geoip.dat / geosite.dat），缺失会导致路由规则整体失效
+Environment=XRAY_LOCATION_ASSET=/usr/local/share/xray
+ExecStart=/usr/local/bin/xray run -c /usr/local/etc/xray/config.json
+# always 而不是 on-failure：机器人所有出网都指向 127.0.0.1:10809，
+# 这个进程挂了机器人连国内接口都会失败，必须尽快拉起
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

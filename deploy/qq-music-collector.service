@@ -10,7 +10,10 @@
 
 [Unit]
 Description=QQ Music Collector Bot
-After=network.target
+# 境外代理（可选，见 deploy/xray/）。Wants 是**软依赖**：xray 起不来机器人照样启动。
+# 没装代理的机器上 systemd 只会记一条 "Unit not found" 警告，不影响启动。
+Wants=xray-proxy.service
+After=network.target xray-proxy.service
 
 [Service]
 Type=simple
@@ -21,6 +24,10 @@ User=YOUR_USER
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
+# 境外代理环境变量（可选）。`-` 前缀 = 文件不存在也不报错。
+# ⚠️ 里面只能写 HTTP_PROXY / HTTPS_PROXY：写 ALL_PROXY=socks5://… 会让
+#    httpx 因缺 socksio 抛 ImportError，导致**所有**请求（含国内）全挂。
+EnvironmentFile=-/opt/qq-music-collector/proxy.env
 
 [Install]
 WantedBy=multi-user.target
