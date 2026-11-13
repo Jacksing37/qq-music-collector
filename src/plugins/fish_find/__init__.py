@@ -22,6 +22,7 @@ import functools
 import json
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -38,8 +39,8 @@ PLUGIN_DIR = os.environ.get(
 )
 #: 触发词。都做子串匹配，``/`` 前缀可有可无
 TRIGGERS = ("鱼鱼找鸡", "找鸡")
-#: 单次查询总超时（秒）。插件内部每个引擎 60s，三个引擎串起来可能两分多钟
-RUN_TIMEOUT = float(os.environ.get("FISH_FIND_TIMEOUT", "240"))
+#: 单次查询总超时（秒）。关掉 lens 之后正常 2~3 秒就出结果，留足余量即可
+RUN_TIMEOUT = float(os.environ.get("FISH_FIND_TIMEOUT", "120"))
 #: 同一个人两次查询的最小间隔（秒）。防止连点刷爆 SauceNAO 额度
 USER_COOLDOWN = 30.0
 #: 原图大小上限（字节）。反查要上传，太大不仅慢还容易被引擎拒
@@ -178,6 +179,35 @@ async def _download(url: str) -> str:
     return path
 
 
+def _cleanup_stale_browser() -> None:
+    """杀掉上一轮遗留的 chromium。
+
+    插件的浏览器是**单例**（固定 ``--user-data-dir=state/fish-find-profile``）。
+    上一轮如果异常退出，chromium 会挂着占住 profile 锁，下一次启动起不来、
+    一直等 DevToolsActivePort 直到超时——2026-11-13 就是这么卡了 4 分钟没回话。
+    """
+    try:
+        subprocess.run(
+            ["pkill", "-f", "fish-find-profile"],
+            timeout=5,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _kill_tree(proc: asyncio.subprocess.Process) -> None:
+    """连 node 带它拉起的 chromium 一起杀（只 kill node 会留下孤儿浏览器）。"""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:  # noqa: BLE001
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 async def _run(image_path: str) -> dict:
     """跑一次 node，返回解析后的 JSON（含 ``text`` / ``accounts`` / ``failures``）。"""
     node = _node()
@@ -192,6 +222,8 @@ async def _run(image_path: str) -> dict:
         if "--experimental-websocket" not in opts:
             env["NODE_OPTIONS"] = f"{opts} --experimental-websocket".strip()
 
+    _cleanup_stale_browser()
+
     proc = await asyncio.create_subprocess_exec(
         node,
         "bin/fish.mjs",
@@ -199,16 +231,21 @@ async def _run(image_path: str) -> dict:
         "--json",
         cwd=PLUGIN_DIR,
         env=env,
+        # 自成进程组：超时能连 chromium 一起杀掉，不留孤儿占 profile
+        start_new_session=True,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     try:
         out, err = await asyncio.wait_for(proc.communicate(), RUN_TIMEOUT)
     except asyncio.TimeoutError:
-        proc.kill()
+        _kill_tree(proc)
         await proc.wait()
+        _cleanup_stale_browser()
         raise RuntimeError(f"查询超时（{RUN_TIMEOUT:.0f} 秒）")
     text = (out or b"").decode("utf-8", "replace").strip()
+    # node 正常退出也可能留下 chromium（自测时就留了一个跑 45 分钟的）
+    _cleanup_stale_browser()
     if proc.returncode != 0 or not text:
         tail = (err or b"").decode("utf-8", "replace").strip().splitlines()[-3:]
         raise RuntimeError("；".join(tail) or f"退出码 {proc.returncode}")
