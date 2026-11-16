@@ -330,6 +330,81 @@ async def main() -> int:
           "非空")
     check("图片能变成 data URL", stg.data_url(PNG).startswith("data:image/png;base64,"), "")
 
+    print("== 分组 / 发送白名单 ==")
+    # 分组名和图片字节都带唯一后缀：库状态在整段测试里共享，撞 sha1 会变成「已在库里」。
+    grouped, grouped_new = await st.add(PNG + b"bucket-a-unique", tags="猫 无语")
+    grouped_id = grouped["id"] if grouped else ""
+    check("分组测试图收下（新条目）", grouped_new is True and bool(grouped_id), str(grouped))
+
+    ok, msg = await st.set_bucket(grouped_id, "猫图")
+    check("set_bucket 成功", ok is True, msg)
+    check("分组名登记进 bucket_names", "猫图" in st.bucket_names(), str(st.bucket_names()))
+    check("条目的 bucket 变成「猫图」", (st.get(grouped_id) or {}).get("bucket") == "猫图",
+          str((st.get(grouped_id) or {}).get("bucket")))
+
+    done, msg = await st.set_bucket_batch([grouped_id], "搞笑")
+    check("批量分组返回成功条数", done >= 1, msg)
+    check("批量后 bucket 变「搞笑」", (st.get(grouped_id) or {}).get("bucket") == "搞笑",
+          str((st.get(grouped_id) or {}).get("bucket")))
+
+    ok, msg = await st.set_bucket(grouped_id, "")
+    check("移出分组成功", ok is True, msg)
+    check("移出后 bucket 是空串", (st.get(grouped_id) or {}).get("bucket") == "",
+          repr((st.get(grouped_id) or {}).get("bucket")))
+
+    ok, msg = await st.add_bucket("空桶")
+    check("新建空分组", ok is True, msg)
+    ok, msg = await st.add_bucket("空桶")
+    check("重名分组被拒", ok is False, msg)
+    ok, msg = await st.rename_bucket("空桶", "新名")
+    check("重命名空分组成功", ok is True, msg)
+    check("bucket_names 含新名、不含旧名",
+          "新名" in st.bucket_names() and "空桶" not in st.bucket_names(), str(st.bucket_names()))
+    ok, msg = await st.delete_bucket("新名")
+    check("空分组可删除", ok is True, msg)
+    check("删除后 bucket_names 不含它", "新名" not in st.bucket_names(), str(st.bucket_names()))
+
+    policy, allow = st.send_policy()
+    check("默认策略是 all + 空白名单", policy == "all" and allow == [], f"{policy}/{allow}")
+
+    sendable_one, _ = await st.add(PNG + b"send-cat-unique", tags="猫 发送")
+    sendable_id = sendable_one["id"] if sendable_one else ""
+    await st.set_bucket(sendable_id, "猫图")
+    loose_one, _ = await st.add(PNG + b"send-loose-unique", tags="猫 未分组")
+    loose_id = loose_one["id"] if loose_one else ""
+
+    ok, msg = await st.set_send_policy("bucket", ["猫图"])
+    check("设为只发白名单分组", ok is True, msg)
+    check("send_policy 读回 bucket + 白名单", st.send_policy() == ("bucket", ["猫图"]),
+          str(st.send_policy()))
+    check("白名单分组里的图能发", st.is_sendable(st.get(sendable_id)), str(st.get(sendable_id)))
+    check("未分组的图不能发", not st.is_sendable(st.get(loose_id)), str(st.get(loose_id)))
+
+    hit_ids = [h["id"] for h in st.find("猫", limit=10, sendable=True)]
+    check("find(sendable=True) 只留白名单里的", sendable_id in hit_ids and loose_id not in hit_ids,
+          str(hit_ids))
+
+    ok, msg = await st.set_send_policy("all")
+    check("切回 all 成功", ok is True, msg)
+    check("all 时未分组的图也能发", st.is_sendable(st.get(loose_id)), str(st.get(loose_id)))
+    ok, msg = await st.set_send_policy("bad")
+    check("非法策略被拒", ok is False, msg)
+    check("被拒后策略没变（仍是 all）", st.send_policy()[0] == "all", str(st.send_policy()))
+
+    imported, imported_new = await st.add(PNG + b"import-x-unique", tags="导入")
+    imported_id = imported["id"] if imported else ""
+    check("导入模拟：图先收进来", imported_new is True and bool(imported_id), str(imported))
+    ok, msg = await st.set_bucket(imported_id, "导入组")
+    check("导入模拟：add + set_bucket 组合成功", ok is True, msg)
+    check("导入图的 bucket 是「导入组」", (st.get(imported_id) or {}).get("bucket") == "导入组",
+          str((st.get(imported_id) or {}).get("bucket")))
+    check("导入图在当前策略（all）下能发", st.is_sendable(st.get(imported_id)), str(st.get(imported_id)))
+
+    ok, msg = await st.set_send_policy("bucket", ["导入组"])
+    check("白名单含「导入组」时导入图能发", ok is True and st.is_sendable(st.get(imported_id)), msg)
+    check("不在白名单的图仍被挡", not st.is_sendable(st.get(loose_id)), str(st.get(loose_id)))
+    await st.set_send_policy("all")
+
     out = await tl.dispatch(tools, "sticker_add", {"tags": "坏图", "url": "https://x.example.com/broken.jpg"}, ctx)
     check("下载失败时说清原因", "没能收下" in out and "403" in out, out[:80])
 

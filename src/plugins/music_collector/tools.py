@@ -1095,7 +1095,9 @@ async def _handle_sticker_find(args: dict, ctx: ToolContext) -> str:
         limit = int(args.get("limit") or 5)
     except (TypeError, ValueError):
         limit = 5
-    rows = sticker_mod.find(query, min(max(limit, 1), 10), sticker_dir=_sticker_dir(ctx))
+    rows = sticker_mod.find(
+        query, min(max(limit, 1), 10), sticker_dir=_sticker_dir(ctx), sendable=True
+    )
     if not rows:
         tags = sticker_mod.tag_summary(sticker_dir=_sticker_dir(ctx))
         head = f"库里没有匹配「{query}」的表情包。" if query else "表情包库现在还是空的。"
@@ -1140,6 +1142,8 @@ async def _handle_sticker_send(args: dict, ctx: ToolContext) -> str:
     entry = sticker_mod.get(sid, sticker_dir=_sticker_dir(ctx))
     if entry is None:
         return f"库里没有 id={sid} 的表情包。先用 sticker_find 查一下现有的 id。"
+    if not sticker_mod.is_sendable(entry, sticker_dir=_sticker_dir(ctx)):
+        return "这条表情包现在被发送白名单挡着（管理员只放开了部分分组）。先换一张，或者用文字回。"
     path = sticker_mod.path_of(entry, sticker_dir=_sticker_dir(ctx))
     if path is None:
         return "这条记录对应的图片文件不在了（可能被手工删过）。跟群友说一声就行，别反复重试。"

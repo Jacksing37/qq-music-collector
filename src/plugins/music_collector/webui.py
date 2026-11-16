@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import base64
 import os
+import re
 import secrets
 import time
 import typing
@@ -2557,6 +2559,7 @@ def _sticker_payload(item: dict, sticker_dir: str) -> dict:
         "source": str(item.get("source") or ""),
         "group": int(item.get("group") or 0),
         "kind": str(item.get("kind") or ""),
+        "bucket": str(item.get("bucket") or ""),
         "bytes": int(item.get("bytes") or 0),
         "created": str(item.get("created") or ""),
         "used": int(item.get("used") or 0),
@@ -2633,6 +2636,7 @@ async def _api_stickers(request: Request):
             )
 
         items = sticker_mod.find("", limit=sticker_mod.MAX_ITEMS, sticker_dir=sdir)
+        _sp = sticker_mod.send_policy(sdir)
         return JSONResponse(
             {
                 "ok": True,
@@ -2642,6 +2646,9 @@ async def _api_stickers(request: Request):
                 "stats": sticker_mod.stats(sticker_dir=sdir),
                 "items": [_sticker_payload(it, sdir) for it in items],
                 "recent": sticker_mod.recent(limit=30, sticker_dir=sdir),
+                "buckets": sticker_mod.bucket_names(sdir),
+                "send_policy": _sp[0],
+                "send_buckets": _sp[1],
                 # 批量补标签：还剩几张没标签 + 上一次跑到哪儿了
                 "untagged": len(sticker_mod.untagged(sticker_dir=sdir)),
                 "autotag": dict(_autotag_state),
@@ -2688,8 +2695,104 @@ async def _api_stickers(request: Request):
             }
         )
 
+    if action == "bucket_batch":
+        # 批量设分组：**不需要 id**（ids 在 body 里）。
+        ids = body.get("ids")
+        if not isinstance(ids, list):
+            return JSONResponse({"ok": False, "message": "ids 必须是数组"}, status_code=400)
+        done, msg = await sticker_mod.set_bucket_batch(
+            ids, str(body.get("bucket") or ""), sticker_dir=sdir
+        )
+        return JSONResponse({"ok": True, "done": done, "message": msg})
+
+    if action == "bucket_add":
+        ok, msg = await sticker_mod.add_bucket(
+            str(body.get("name") or ""), sticker_dir=sdir
+        )
+        return JSONResponse({"ok": ok, "message": msg}, status_code=200 if ok else 400)
+
+    if action == "bucket_rename":
+        ok, msg = await sticker_mod.rename_bucket(
+            str(body.get("old") or ""), str(body.get("new") or ""), sticker_dir=sdir
+        )
+        return JSONResponse({"ok": ok, "message": msg}, status_code=200 if ok else 400)
+
+    if action == "bucket_delete":
+        ok, msg = await sticker_mod.delete_bucket(
+            str(body.get("name") or ""), sticker_dir=sdir
+        )
+        return JSONResponse({"ok": ok, "message": msg}, status_code=200 if ok else 400)
+
+    if action == "send_policy":
+        # 发送白名单：**不需要 id**。
+        buckets = body.get("buckets")
+        if buckets is not None and not isinstance(buckets, list):
+            return JSONResponse({"ok": False, "message": "buckets 必须是数组"}, status_code=400)
+        ok, msg = await sticker_mod.set_send_policy(
+            str(body.get("policy") or ""), buckets, sticker_dir=sdir
+        )
+        return JSONResponse({"ok": ok, "message": msg}, status_code=200 if ok else 400)
+
+    if action == "import":
+        # 批量导入：图片是 base64 字符串（可带 data:…;base64, 前缀），**不需要 id**。
+        # 每张 add 只在本地 sha1 + 写文件，几十张串行跑也很快，不必丢后台。
+        images = body.get("images")
+        if not isinstance(images, list) or not images:
+            return JSONResponse(
+                {"ok": False, "message": "没有要导入的图片"}, status_code=400
+            )
+        bucket = str(body.get("bucket") or "")
+        imported = 0
+        skipped = 0
+        for img in images:
+            if not isinstance(img, dict):
+                skipped += 1
+                continue
+            raw = str(img.get("data") or "").strip()
+            raw = re.sub(r"^data:[^,]*;base64,", "", raw, flags=re.IGNORECASE)
+            try:
+                data = base64.b64decode(raw)
+            except Exception:  # noqa: BLE001 — 坏数据跳过，不打断整批
+                skipped += 1
+                continue
+            if not sticker_mod.sniff(data)[0]:
+                skipped += 1
+                continue
+            tags = str(img.get("tags") or "").strip() or "未分类"
+            entry, _created = await sticker_mod.add(
+                data,
+                tags=tags,
+                source="面板导入",
+                group=0,
+                kind="import",
+                sticker_dir=sdir,
+            )
+            if entry is None:
+                skipped += 1
+                continue
+            if bucket:
+                await sticker_mod.set_bucket(
+                    str(entry.get("id") or ""), bucket, sticker_dir=sdir
+                )
+            imported += 1
+        tail = f"，跳过 {skipped} 张（不是图片或数据坏了）" if skipped else ""
+        return JSONResponse(
+            {
+                "ok": True,
+                "imported": imported,
+                "skipped": skipped,
+                "message": f"导入了 {imported} 张{tail}",
+            }
+        )
+
     if not sid:
         return JSONResponse({"ok": False, "message": "缺少 id"}, status_code=400)
+
+    if action == "bucket_set":
+        ok, msg = await sticker_mod.set_bucket(
+            sid, str(body.get("bucket") or ""), sticker_dir=sdir
+        )
+        return JSONResponse({"ok": ok, "message": msg}, status_code=200 if ok else 400)
 
     if action == "update":
         tags = body.get("tags") if "tags" in body else None

@@ -32,7 +32,9 @@ from . import webtool
 
 #: 索引文件格式版本。以后要加字段就升这个号，读到时按版本迁移。
 #: v2 = 多了 ``recent``（最近发过哪些）。读老文件时按空列表兜底，不用迁移脚本
-INDEX_VERSION = 2
+#: v3 = 每条多了 ``bucket``（分组）、顶层多了 ``buckets``/``send_policy``/``send_buckets``
+#:     （分组 + 「只发哪些分组」的白名单）。老文件读到就按默认兜底，不用迁移脚本
+INDEX_VERSION = 3
 #: 单张图上限。QQ 表情包一般几十到几百 KB，8MB 足够兜住动图
 MAX_BYTES = 8 * 1024 * 1024
 #: 库容量上限。到顶后淘汰「最久没用过」的，别让一个群把磁盘吃满
@@ -83,7 +85,14 @@ def _index_path(base: Path) -> Path:
 
 
 def _empty_index() -> dict:
-    return {"version": INDEX_VERSION, "items": [], "recent": []}
+    return {
+        "version": INDEX_VERSION,
+        "items": [],
+        "recent": [],
+        "buckets": [],
+        "send_policy": "all",
+        "send_buckets": [],
+    }
 
 
 def _load(base: Path) -> dict:
@@ -100,10 +109,13 @@ def _load(base: Path) -> dict:
         return _empty_index()
     if not isinstance(data, dict):
         return _empty_index()
-    for key in ("items", "recent"):
+    for key in ("items", "recent", "buckets", "send_buckets"):
         if not isinstance(data.get(key), list):
-            # v1 的索引没有 recent，老仓库读进来就是空列表——不用迁移脚本
+            # v1/v2 的索引没有 buckets / send_buckets，老仓库读进来就是空列表——不用迁移脚本
             data[key] = []
+    if data.get("send_policy") not in ("all", "bucket"):
+        data["send_policy"] = "all"
+    # v1/v2 的条目没有 bucket 字段，这里兜底为空串（= 未分组），不必逐条改写
     data.setdefault("version", INDEX_VERSION)
     return data
 
@@ -322,6 +334,7 @@ async def add(
             "created": _now(),
             "used": 0,
             "last_used": "",
+            "bucket": "",
         }
         items.append(entry)
         _evict(base, index)
@@ -358,13 +371,18 @@ def _tokens(query: str) -> list[str]:
     return [t.lower() for t in _SPLIT.split(str(query or "").strip()) if t]
 
 
-def find(query: str = "", limit: int = 5, sticker_dir: str = "") -> list[dict]:
+def find(query: str = "", limit: int = 5, sticker_dir: str = "", sendable: bool = False) -> list[dict]:
     """按标签 / 备注找，返回得分最高的前几条。
 
     打分很简单，但够用：标签全等 4 分、标签互相包含 2 分、备注包含 1 分，
     同分时「用得多的」优先（用得多的通常更好笑 / 更常用）。
+
+    ``sendable=True`` 时只返回「当前发送策略下允许发」的条目（见 :func:`sendable_items`），
+    模型用 ``sticker_find`` 挑图、挑完直接发，所以这里就把它不该发的图挡在候选之外。
     """
     items = _items(sticker_dir=sticker_dir)
+    if sendable:
+        items = sendable_items(items, sticker_dir=sticker_dir)
     want = max(1, int(limit))
     toks = _tokens(query)
     if not toks:
@@ -387,6 +405,54 @@ def find(query: str = "", limit: int = 5, sticker_dir: str = "") -> list[dict]:
             scored.append((score, item))
     scored.sort(key=lambda pair: (-pair[0], -int(pair[1].get("used") or 0)))
     return [item for _, item in scored[:want]]
+
+
+# ---------------------------------------------------------------- 分组 / 发送白名单
+#
+# 分组和「只发哪些分组」的白名单都写在 index.json 里（不是 config）——它们是对「这个库」
+# 的管理，不是对「机器人行为」的全局开关。想限定机器人能发哪些表情包，就把能发的图
+# 分到一个桶、再把桶加进白名单；模型 find/send 时先按策略过滤，看不到就不该发的。
+
+def _buckets_index(base: Path) -> dict:
+    """带 buckets / send_policy / send_buckets 兜底的索引（读一次）。"""
+    return _load(base)
+
+
+def bucket_names(sticker_dir: str = "") -> list[str]:
+    """库里所有分组名（含空桶）。从顶层 ``buckets`` 读，兼容老索引（没有就返回空）。"""
+    return list(_buckets_index(root(sticker_dir)).get("buckets") or [])
+
+
+def send_policy(sticker_dir: str = "") -> tuple[str, list[str]]:
+    """当前发送策略：返回 ``(policy, 白名单桶列表)``。
+
+    ``policy`` 是 ``"all"``（全部可发）或 ``"bucket"``（只发白名单里的桶）。
+    """
+    idx = _buckets_index(root(sticker_dir))
+    return str(idx.get("send_policy") or "all"), list(idx.get("send_buckets") or [])
+
+
+def sendable_items(items: list[dict], sticker_dir: str = "") -> list[dict]:
+    """按当前发送策略筛出「能发」的条目。
+
+    - ``all``：全部可发（白名单不起作用）；
+    - ``bucket``：只发 ``bucket`` 在白名单里的；**未分组的（bucket 空串）一律不能发**，
+      逼管理员把能发的图显式归进某个桶——空库白名单开着的语义是「我还没整理，先什么都别发」。
+    """
+    policy, allow = send_policy(sticker_dir=sticker_dir)
+    if policy != "bucket":
+        return list(items)
+    allowed = {str(b).strip() for b in allow if str(b).strip()}
+    return [
+        it for it in items
+        if str(it.get("bucket") or "").strip() in allowed
+    ]
+
+
+def is_sendable(item: dict, sticker_dir: str = "") -> bool:
+    """单条是否在发送白名单内。``sticker_send`` 用它做最后一道闸。"""
+    return bool(sendable_items([item], sticker_dir=sticker_dir))
+
 
 
 def untagged(sticker_dir: str = "") -> list[dict]:
@@ -536,6 +602,156 @@ async def remove(sid: str, sticker_dir: str = "") -> tuple[bool, str]:
             logger.info(f"[sticker] 面板删除一条表情包 {key}")
             return True, "已删除"
     return False, "库里没有这条表情包"
+
+
+# ---------------------------------------------------------------- 分组 / 白名单写操作
+
+def _norm_bucket(name) -> str:
+    return " ".join(str(name or "").split())[:32]
+
+
+async def set_bucket(sid: str, bucket: str, *, sticker_dir: str = "") -> tuple[bool, str]:
+    """把一条表情包放进（或移出）一个分组。``bucket`` 空串 = 移出分组。
+
+    分组名只做规整（去首尾空白、压连续空白、限 32 字），不强制要求它已存在于
+    ``buckets`` 列表——单独给一张图设个新组，组名会顺手登记进去。
+    """
+    key = str(sid or "").strip()
+    if not key:
+        return False, "缺少 id"
+    bucket = _norm_bucket(bucket)
+    base = root(sticker_dir)
+    async with _lock:
+        index = _load(base)
+        items = index.get("items") or []
+        for item in items:
+            if str(item.get("id") or "") != key:
+                continue
+            item["bucket"] = bucket
+            buckets = index.setdefault("buckets", [])
+            if bucket and bucket not in buckets:
+                buckets.append(bucket)
+            _save(base, index)
+            return True, f"已分到「{bucket}」" if bucket else "已移出分组"
+    return False, "库里没有这条表情包"
+
+
+async def set_bucket_batch(
+    sids: list[str], bucket: str, *, sticker_dir: str = ""
+) -> tuple[int, str]:
+    """批量给若干条表情包设分组，返回 ``(成功条数, 说明)``。"""
+    ids = [str(s or "").strip() for s in (sids or []) if str(s or "").strip()]
+    if not ids:
+        return 0, "没有选中任何表情包"
+    bucket = _norm_bucket(bucket)
+    base = root(sticker_dir)
+    done = 0
+    async with _lock:
+        index = _load(base)
+        items = index.get("items") or []
+        by_id = {str(it.get("id") or ""): it for it in items}
+        buckets = index.setdefault("buckets", [])
+        if bucket and bucket not in buckets:
+            buckets.append(bucket)
+        for key in ids:
+            it = by_id.get(key)
+            if it is not None:
+                it["bucket"] = bucket
+                done += 1
+        _save(base, index)
+    return done, f"已给 {done} 张表情包设分组" + (f"「{bucket}」" if bucket else "（移出分组）")
+
+
+async def add_bucket(name: str, *, sticker_dir: str = "") -> tuple[bool, str]:
+    """新建一个（可空的）分组。重名返回失败。"""
+    name = _norm_bucket(name)
+    if not name:
+        return False, "分组名不能为空"
+    base = root(sticker_dir)
+    async with _lock:
+        index = _load(base)
+        buckets = index.setdefault("buckets", [])
+        if name in buckets:
+            return False, f"分组「{name}」已经存在"
+        buckets.append(name)
+        _save(base, index)
+    return True, f"已新建分组「{name}」"
+
+
+async def rename_bucket(old: str, new: str, *, sticker_dir: str = "") -> tuple[bool, str]:
+    """重命名一个分组：改 ``buckets`` 列表 + 所有条目的 ``bucket`` + 白名单里的名字。"""
+    old = _norm_bucket(old)
+    new = _norm_bucket(new)
+    if not old:
+        return False, "缺少原分组名"
+    if not new:
+        return False, "新分组名不能为空"
+    if old == new:
+        return True, "没变化"
+    base = root(sticker_dir)
+    async with _lock:
+        index = _load(base)
+        buckets = index.setdefault("buckets", [])
+        if new in buckets:
+            return False, f"分组「{new}」已经存在"
+        if old not in buckets:
+            return False, f"分组「{old}」不存在"
+        buckets[buckets.index(old)] = new
+        for item in index.get("items") or []:
+            if str(item.get("bucket") or "") == old:
+                item["bucket"] = new
+        send = index.setdefault("send_buckets", [])
+        if old in send:
+            send[send.index(old)] = new
+        _save(base, index)
+    return True, f"已把「{old}」改名「{new}」"
+
+
+async def delete_bucket(name: str, *, sticker_dir: str = "") -> tuple[bool, str]:
+    """删一个**空**分组。里面还有表情包就拒绝（先移出或删掉那几张）。"""
+    name = _norm_bucket(name)
+    if not name:
+        return False, "缺少分组名"
+    base = root(sticker_dir)
+    async with _lock:
+        index = _load(base)
+        buckets = index.setdefault("buckets", [])
+        if name not in buckets:
+            return False, f"分组「{name}」不存在"
+        used = any(
+            str(it.get("bucket") or "") == name for it in index.get("items") or []
+        )
+        if used:
+            return False, f"分组「{name}」里还有表情包，先移出或删掉再删分组"
+        buckets.remove(name)
+        send = index.setdefault("send_buckets", [])
+        if name in send:
+            send.remove(name)
+        _save(base, index)
+    return True, f"已删除分组「{name}」"
+
+
+async def set_send_policy(
+    policy: str, buckets: Optional[list[str]] = None, *, sticker_dir: str = ""
+) -> tuple[bool, str]:
+    """设置发送白名单：``policy`` 是 ``"all"``（全部可发）或 ``"bucket"``（只发白名单）。
+
+    ``buckets`` 只在 policy=bucket 时有意义，传 None 表示只改策略、不动白名单列表。
+    白名单里出现不存在的分组名会原样存下（等分组真建出来才生效），不会静默丢弃。
+    """
+    policy = str(policy or "").strip()
+    if policy not in ("all", "bucket"):
+        return False, "policy 只能是 all 或 bucket"
+    base = root(sticker_dir)
+    async with _lock:
+        index = _load(base)
+        index["send_policy"] = policy
+        if buckets is not None:
+            index["send_buckets"] = [_norm_bucket(b) for b in buckets if _norm_bucket(b)]
+        _save(base, index)
+    if policy == "all":
+        return True, "已设为「全部可发」（分组白名单不生效）"
+    return True, "已设为「只发白名单分组」"
 
 
 def stats(sticker_dir: str = "") -> dict:

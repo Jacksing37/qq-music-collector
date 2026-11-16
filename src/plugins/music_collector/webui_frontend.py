@@ -301,6 +301,22 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .stk-rrow .stk-rt{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums;min-width:112px}
 .stk-rrow .stk-rg{color:var(--muted);font-size:12px;min-width:100px}
 .stk-rrow .stk-rb{margin-left:auto;padding:3px 8px;font-size:12px}
+/* 多选 / 分组 / 发送白名单：都复用深色变量，不硬编码亮色 */
+.stk-tile .stk-pick{position:absolute;top:6px;left:6px;z-index:2;width:18px;height:18px;border-radius:5px;
+  border:1px solid var(--card-bd);background:rgba(0,0,0,.35);color:transparent;font-size:12px;line-height:16px;
+  text-align:center;cursor:pointer;user-select:none;transition:.15s}
+.stk-tile .stk-pick:hover{border-color:var(--accent)}
+.stk-tile .stk-pick.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.stk-tile.multi{border-color:var(--accent2);box-shadow:0 0 0 2px rgba(167,139,250,.22)}
+.stk-batch{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;padding:8px 10px;
+  border:1px dashed var(--accent2);border-radius:12px;background:var(--input)}
+.stk-buckets{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
+.stk-sep{height:1px;background:var(--card-bd);margin:14px 0}
+label.stk-radio{display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:14px}
+label.stk-radio input[type=radio]{width:16px;height:16px;margin:0;padding:0;flex:0 0 auto;accent-color:var(--accent)}
+#stkSetForm .field{grid-template-columns:260px 1fr}
+#page-stickers .msg.ok{color:var(--ok)}
+#page-stickers .msg.bad{color:var(--bad)}
 @media(max-width:860px){.stk-grid{grid-template-columns:repeat(auto-fill,minmax(84px,1fr))}}
 /* ---- 上下文用量（机器人页） ---- */
 .ctx-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:14px 0 0}
@@ -734,6 +750,53 @@ button:disabled{opacity:.5;cursor:not-allowed}
 
     <!-- 表情包 -->
     <section id="page-stickers" class="page hidden">
+      <!-- 这些开关原先在「机器人 → 工具与技能」里；只管表情包的东西放回这一页，
+           改完就在本卡保存（不用再跑回机器人页翻一大串 llm.*）。 -->
+      <div class="card" id="stkSetCard">
+        <h2><span class="dot"></span>表情包设置 · 收不收、发几张、标签怎么补</h2>
+        <p class="muted">只影响表情包库，和模型本身的参数无关。改完点「保存设置」立刻生效（不重启）。</p>
+        <div id="stkSetForm"><div class="empty">加载中…</div></div>
+        <div class="row" style="margin-top:12px">
+          <span class="msg" id="stkSetMsg"></span>
+          <span class="muted" id="stkSetDirty"></span>
+          <div class="spacer"></div>
+          <button id="stkSetReset" title="丢掉还没保存的改动，按磁盘上的值重画">↺ 撤销改动</button>
+          <button id="stkSetSave" class="btn-primary" disabled>💾 保存设置</button>
+        </div>
+        <div class="stk-sep"></div>
+        <div class="row">
+          <span class="muted">发送策略：</span>
+          <label class="stk-radio"><input type="radio" name="stkSendPolicy" id="stkPolicyAll" value="all">全部可发</label>
+          <label class="stk-radio"><input type="radio" name="stkSendPolicy" id="stkPolicyBucket" value="bucket">只发白名单分组</label>
+          <span class="muted" id="stkPolicyHint"></span>
+        </div>
+        <div class="row" id="stkAllowBox" style="margin-top:8px;display:none">
+          <span class="muted">可以发出去的分组：</span>
+          <div class="stk-buckets" id="stkAllowList"></div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <span class="msg" id="stkPolicyMsg"></span>
+          <div class="spacer"></div>
+          <button id="stkPolicySave">💾 保存发送策略</button>
+        </div>
+      </div>
+
+      <!-- 批量导入：选完图才出现，免得空卡占地方 -->
+      <div class="card hidden" id="stkImportBox">
+        <h2><span class="dot"></span>批量导入 · 从本机收图进库</h2>
+        <p class="muted" id="stkImportInfo">已选 0 张</p>
+        <div class="row">
+          <input id="stkImportTags" placeholder="统一标签（空格或逗号分隔，例如：无语 猫）" style="flex:1;min-width:200px">
+          <select id="stkImportBucket" style="width:auto;min-width:140px"></select>
+        </div>
+        <div class="row">
+          <span class="msg" id="stkImportMsg"></span>
+          <div class="spacer"></div>
+          <button id="stkImportCancel">取消</button>
+          <button id="stkImportGo" class="btn-primary">开始导入</button>
+        </div>
+      </div>
+
       <div class="card">
         <h2><span class="dot"></span>表情包库 · 它会拿来接话的图</h2>
         <p class="muted">群友发表情包时，后台监听器会<b>自动收进这里</b>（每天有张数上限），模型也会用
@@ -743,7 +806,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
           自动收的图拿不到 QQ 的说明词，所以标签一开始是「未分类」——点上面的
           <b>🏷 补标签</b> 让它逐张看一眼图补上（之后新收的会自动补）。同一条图收几次也只存一份，标签合并。</p>
         <p class="muted">库的位置：<code id="stkRoot">data/stickers</code>（图片本体 + <code>index.json</code>）。
-          「一轮最多发几张图」在「机器人 → 工具与技能」里改；这里只管理内容，不会替你发。</p>
+          「一轮最多发几张图」在上面的「表情包设置」里改；这里只管理内容，不会替你发。</p>
         <div class="row">
           <input id="stkSearch" placeholder="搜索标签 / 备注" style="flex:1;min-width:170px">
           <button id="stkReload" title="重新读磁盘上的库">↻ 刷新</button>
@@ -754,12 +817,30 @@ button:disabled{opacity:.5;cursor:not-allowed}
           <div class="spacer"></div>
           <span class="muted" id="stkStats">加载中…</span>
         </div>
+        <div class="row" style="margin-top:8px">
+          <span class="muted">分组：</span>
+          <select id="stkBucketFilter" style="width:auto;min-width:140px">
+            <option value="">全部分组</option>
+          </select>
+          <button id="stkBucketAdd" title="新建一个空分组">＋ 新建分组</button>
+          <button id="stkBucketRename" title="给「分组」里选中的分组改名">✎ 重命名</button>
+          <button id="stkBucketDelete" title="只能删空分组；里面还有图请先移出">🗑 删分组</button>
+          <div class="spacer"></div>
+          <button id="stkImport" title="从本机选几张图，一起收进库里">📥 批量导入</button>
+          <input type="file" id="stkImportFile" accept="image/*" multiple class="hidden">
+        </div>
         <div id="stkChips" class="stk-chips"></div>
         <div class="row" style="margin-top:8px"><span class="msg" id="stkMsg"></span></div>
       </div>
 
       <div class="stk-layout">
         <div class="card stk-side">
+          <div class="stk-batch hidden" id="stkBatchBar">
+            <span class="muted" id="stkBatchInfo">已选 0 张</span>
+            <select id="stkBatchBucket" style="width:auto;min-width:130px"></select>
+            <button id="stkBatchApply" class="btn-primary">批量设分组</button>
+            <button id="stkBatchClear">清空选择</button>
+          </div>
           <div id="stkGrid" class="stk-grid"><div class="empty">加载中…</div></div>
         </div>
         <div class="card stk-side">
@@ -774,6 +855,8 @@ button:disabled{opacity:.5;cursor:not-allowed}
           <input id="stkTags" placeholder="例如：无语 猫" style="width:100%;margin-top:4px">
           <label class="muted" for="stkNote" style="display:block;margin-top:10px">备注（一句画面描述，可空）</label>
           <input id="stkNote" placeholder="例如：歪头看镜头" style="width:100%;margin-top:4px">
+          <label class="muted" for="stkBucket" style="display:block;margin-top:10px">分组（用来批量挑图 / 发白名单）</label>
+          <select id="stkBucket" style="width:100%;margin-top:4px"></select>
           <p class="muted" style="margin-top:10px">标签是模型搜到它的唯一依据：<b>情绪 + 内容</b>写具体一点
             （「无语」「猫 笑到打滚」），别写「好看」「图1」。</p>
           <div class="row end" style="margin-top:12px">
@@ -1885,11 +1968,8 @@ const BOT_GROUPS=[
          "llm.search_timeout","llm.search_interval",
          "llm.search_node","llm.search_tools_dir",
          "llm.image_lookup","llm.image_lookup_timeout","llm.image_lookup_interval",
-         "llm.stickers","llm.sticker_dir","llm.sticker_auto_collect","llm.sticker_auto_daily",
-         "llm.sticker_autotag","llm.sticker_tag_model","llm.sticker_as_emoji",
-         "llm.image_send_max",
-         "llm.image_search","llm.image_search_max","llm.image_search_timeout",
-         "llm.image_search_interval",
+         /* 表情包 / 图片发送相关的字段挪到「表情包」页的「表情包设置」卡渲染，
+            这里不再列（renderBotForm 的「其它」卡也会跳过，见 STK_CFG_KEYS）。 */
          "llm.skills","llm.skills_dir","llm.skill_body_chars","llm.skill_file_chars",
          "llm.skill_scripts","llm.skill_timeout"]},
   {title:"真浏览器",
@@ -1999,7 +2079,8 @@ function renderBotForm(schema, values){
     }
   };
   BOT_GROUPS.forEach(g=>cardOut(g.title, g.note, g.keys));
-  const rest=Object.keys(fields).filter(k=>!drawn.has(k));
+  /* 表情包的配置项现在只画在「表情包」页（STK_CFG_KEYS），别在「其它」卡里重复一遍 */
+  const rest=Object.keys(fields).filter(k=>!drawn.has(k) && !STK_CFG_KEYS.includes(k));
   if(rest.length) cardOut("其它", "", rest);
   if(nav){
     if(navItems.length>1){
@@ -3078,7 +3159,114 @@ $("#logClear").onclick=async()=>{
    面板不该有第二条写入路径去改变它的判断依据——除了人手写的标签，那恰恰是
    比模型自己写的更准的东西。 */
 const STK = {items:[], recent:[], stats:{}, q:"", page:0, per:18, sel:"", t:null,
-             urls:new Map(), untagged:0, autotag:{}, poll:null};
+             urls:new Map(), untagged:0, autotag:{}, poll:null,
+             /* 分组 / 发送白名单 / 多选：后端 GET 一起带回来，改完也以它为准 */
+             buckets:[], send_policy:"all", send_buckets:[], multi:[], bucket:"",
+             setLoaded:false};
+
+/* 这 12 项原先在「机器人 → 工具与技能」里，现在只在本页的「表情包设置」卡渲染。
+   renderBotForm 的「其它」卡按这个列表跳过——否则同一个开关出现两次，
+   fieldControl 生成的 input id 还会撞。 */
+const STK_CFG_KEYS=[
+  "llm.stickers","llm.sticker_dir","llm.sticker_auto_collect","llm.sticker_auto_daily",
+  "llm.sticker_autotag","llm.sticker_tag_model","llm.sticker_as_emoji",
+  "llm.image_send_max",
+  "llm.image_search","llm.image_search_max","llm.image_search_timeout",
+  "llm.image_search_interval",
+];
+/* 本页自己的「待保存表」，和机器人页的 BOT_DIRTY 互不干扰 */
+let STK_CFG_SCHEMA=[], STK_CFG_ORIG={}, STK_CFG_DIRTY={}, STK_IMPORT_FILES=[];
+const STK_IMPORT_MAX=8*1024*1024;   // 后端单张上限 8MB，前端先挡一道，别白传
+
+function stkSetMsg(t, kind=""){
+  const el=$("#stkSetMsg"); if(!el) return;
+  el.textContent=t||""; el.className="msg"+(kind?(" "+kind):"");
+}
+function stkPolicyMsg(t, kind=""){
+  const el=$("#stkPolicyMsg"); if(!el) return;
+  el.textContent=t||""; el.className="msg"+(kind?(" "+kind):"");
+}
+function stkImportMsg(t, kind=""){
+  const el=$("#stkImportMsg"); if(!el) return;
+  el.textContent=t||""; el.className="msg"+(kind?(" "+kind):"");
+}
+function stkSetMarkDirty(key, val){
+  const orig=STK_CFG_ORIG[key]; let same=(orig===val);
+  if(!same && typeof orig==="boolean") same=(String(orig)===String(val));
+  /* 数字字段：input 回传的是字符串，5 和 "5" 不算改动 */
+  if(!same && orig!=null && typeof val==="string") same=(String(orig)===val);
+  if(same){ delete STK_CFG_DIRTY[key]; } else { STK_CFG_DIRTY[key]=val; }
+  stkRefreshSetDirty();
+}
+function stkRefreshSetDirty(){
+  const n=Object.keys(STK_CFG_DIRTY).length;
+  const cnt=$("#stkSetDirty"); if(cnt) cnt.textContent=n?`● ${n} 项待保存`:"";
+  const btn=$("#stkSetSave"); if(btn) btn.disabled=(n===0);
+  document.querySelectorAll("#stkSetForm .field").forEach(fr=>{
+    const ctrl=fr.querySelector(".fctrl");
+    if(ctrl) ctrl.classList.toggle("dirty", !!STK_CFG_DIRTY[fr.dataset.key]);
+  });
+}
+function stkRenderSettings(schema, values){
+  STK_CFG_SCHEMA=schema||[]; values=values||{};
+  STK_CFG_ORIG={}; STK_CFG_DIRTY={};
+  const fields={};
+  STK_CFG_SCHEMA.forEach(sec=>(sec.fields||[]).forEach(f=>{ if(f.type!=="map") fields[f.key]=f; }));
+  const fs=[], missing=[];
+  STK_CFG_KEYS.forEach(k=>{ if(fields[k]) fs.push(fields[k]); else missing.push(k); });
+  const box=$("#stkSetForm"); if(!box) return;
+  box.innerHTML="";
+  if(!fs.length){
+    box.innerHTML='<div class="empty">没拿到表情包配置项（后端可能还没更新）</div>';
+    stkRefreshSetDirty(); return;
+  }
+  fs.forEach(f=>{
+    STK_CFG_ORIG[f.key]=values[f.key];
+    const fr=document.createElement("div"); fr.className="field"; fr.dataset.key=f.key;
+    const lab=document.createElement("div"); lab.className="flabel";
+    lab.innerHTML=`${f.label}${f.hint?`<span class="hint">${f.hint}</span>`:""}`;
+    const row=document.createElement("div"); row.className="frow";
+    row.appendChild(fieldControl(f, values[f.key], false, stkSetMarkDirty));
+    fr.appendChild(lab); fr.appendChild(row); box.appendChild(fr);
+  });
+  if(missing.length){
+    const p=document.createElement("p"); p.className="muted";
+    p.textContent="没拿到这些字段的定义（后端版本可能较旧）："+missing.join("、");
+    box.appendChild(p);
+  }
+  stkRefreshSetDirty();
+}
+async function stkLoadSettings(){
+  try{
+    const j=await (await api("/api/music-admin/bot")).json();
+    stkRenderSettings(j.schema||[], j.values||{});
+    STK.setLoaded=true;
+  }catch(e){ if(e.message!=="unauthorized") stkSetMsg("设置加载失败："+e.message,"bad"); }
+}
+async function stkSaveSettings(){
+  const n=Object.keys(STK_CFG_DIRTY).length;
+  if(!n){ stkSetMsg("没有改动"); return; }
+  const btn=$("#stkSetSave"); if(btn) btn.disabled=true;
+  stkSetMsg("保存中…");
+  try{
+    const j=await (await api("/api/music-admin/config",{method:"PATCH",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({values:STK_CFG_DIRTY})})).json();
+    if(!j.ok){
+      const msgs=Object.entries(j.errors||{}).map(([k,v])=>`${k}: ${v}`).join("；");
+      stkSetMsg("保存失败 — "+(msgs||j.message||"未知错误"),"bad"); return;
+    }
+    stkSetMsg("已保存 ✓","ok"); toast("表情包设置已保存","ok");
+    await stkLoadSettings();
+    /* 收不收、发几张都影响库的提示条，顺手刷一遍（保留刚写的「已保存」） */
+    await loadStickers(true);
+  }catch(e){ stkSetMsg("保存失败："+e.message,"bad"); }
+  finally{ stkRefreshSetDirty(); }
+}
+function stkResetSettings(){
+  stkRenderSettings(STK_CFG_SCHEMA, STK_CFG_ORIG);
+  stkSetMsg("已撤销未保存的改动");
+}
 
 function stkMsg(t, kind){
   const el=$("#stkMsg"); if(!el) return;
@@ -3110,12 +3298,100 @@ async function stkBlobUrl(id){
 }
 
 function stkFiltered(){
+  /* 先按分组筛，再按搜索词筛：分组是「看某一批图」的硬过滤，搜索叠在它上面 */
+  let rows=STK.items;
+  if(STK.bucket==="__none__") rows=rows.filter(it=>!String(it.bucket||""));
+  else if(STK.bucket) rows=rows.filter(it=>String(it.bucket||"")===STK.bucket);
   const q=(STK.q||"").trim().toLowerCase();
-  if(!q) return STK.items;
-  return STK.items.filter(it=>
+  if(!q) return rows;
+  return rows.filter(it=>
     (it.tags||[]).some(t=>String(t).toLowerCase().includes(q))
     || String(it.note||"").toLowerCase().includes(q)
     || String(it.id||"").toLowerCase().includes(q));
+}
+
+/* ---- 分组：下拉 / 新建 / 改名 / 删除 / 批量 ---- */
+function stkOpt(sel, value, text){
+  const o=document.createElement("option"); o.value=value; o.textContent=text; sel.appendChild(o);
+}
+/* 统一填一个分组下拉：空值 = 未分组（或「全部」），再列现有分组，最后「新建…」。
+   keep 不传就保留当前选中值（轮询刷新时别把用户正在选的项重置掉）；
+   allowUnknown 给「编辑栏」用：老索引里可能有一条图的分组名没登记在 buckets 里，
+   把它的值补成选项，别静默改成空。 */
+function stkFillBuckets(sel, emptyText, withNew, keep, allowUnknown){
+  if(!sel) return;
+  const cur=(keep===undefined) ? sel.value : keep;
+  sel.innerHTML="";
+  stkOpt(sel,"",emptyText);
+  STK.buckets.forEach(b=>stkOpt(sel,b,b));
+  if(withNew) stkOpt(sel,"__new__","＋ 新建分组…");
+  if(allowUnknown && cur && cur!=="__new__" && !STK.buckets.includes(cur)) stkOpt(sel,cur,cur);
+  sel.value=(cur==null?"":cur);
+}
+function stkRenderBucketSelects(){
+  const ed=$("#stkBucket");
+  if(ed){
+    const it=STK.sel ? STK.items.find(x=>x.id===STK.sel) : null;
+    stkFillBuckets(ed,"（未分组）",true,String((it&&it.bucket)||""),true);
+  }
+  const bf=$("#stkBucketFilter");
+  if(bf){
+    bf.innerHTML="";
+    stkOpt(bf,"","全部分组");
+    STK.buckets.forEach(b=>stkOpt(bf,b,b));
+    stkOpt(bf,"__none__","（未分组）");
+    bf.value=STK.bucket;
+    if(bf.value!==STK.bucket) bf.value="";   // 分组被删了：退回「全部分组」
+  }
+  stkFillBuckets($("#stkBatchBucket"),"（移出分组）",true);
+  stkFillBuckets($("#stkImportBucket"),"（不分组）",true);
+}
+/* 分组名统一在这里问：prompt 返回 null = 取消，去空白后为空也当取消。
+   规整方式跟后端 _norm_bucket 一致（压连续空白、限 32 字），否则新建后筛不到它。 */
+function stkAskBucket(title, def){
+  const v=prompt(title, def||"");
+  if(v===null) return null;
+  const name=v.trim().replace(/\s+/g," ").slice(0,32);
+  return name ? name : null;
+}
+function stkRenderPolicy(){
+  const all=$("#stkPolicyAll"), bk=$("#stkPolicyBucket");
+  if(all && bk){
+    all.checked=(STK.send_policy!=="bucket");
+    bk.checked=(STK.send_policy==="bucket");
+  }
+  const box=$("#stkAllowBox");
+  if(box) box.style.display=(STK.send_policy==="bucket") ? "flex" : "none";
+  stkUpdatePolicyHint();
+  const list=$("#stkAllowList"); if(!list) return;
+  list.innerHTML="";
+  if(!STK.buckets.length){
+    list.innerHTML='<span class="muted">还没有分组，先在上面「＋ 新建分组」</span>';
+    return;
+  }
+  STK.buckets.forEach(b=>{
+    const lb=document.createElement("label"); lb.className="chk";
+    lb.style.fontSize="14px";
+    const cb=document.createElement("input"); cb.type="checkbox"; cb.value=b;
+    cb.checked=STK.send_buckets.includes(b);
+    /* 勾选先只改本地待保存状态，点「保存发送策略」才落盘 */
+    cb.onchange=()=>{
+      STK.send_buckets=cb.checked
+        ? Array.from(new Set(STK.send_buckets.concat([b])))
+        : STK.send_buckets.filter(x=>x!==b);
+      stkUpdatePolicyHint();
+    };
+    const sp=document.createElement("span"); sp.textContent=b;
+    lb.appendChild(cb); lb.appendChild(sp); list.appendChild(lb);
+  });
+}
+function stkUpdatePolicyHint(){
+  const hint=$("#stkPolicyHint"); if(!hint) return;
+  if(STK.send_policy==="bucket")
+    hint.textContent=STK.send_buckets.length
+      ? `只发这 ${STK.send_buckets.length} 个分组里的图`
+      : "一个分组都没勾 = 它一张都发不出去";
+  else hint.textContent="所有表情包都能被模型发出去";
 }
 
 async function renderStickers(){
@@ -3132,12 +3408,20 @@ async function renderStickers(){
   }else{
     pageRows.forEach(it=>{
       const d=document.createElement("div");
-      d.className="stk-tile"+(it.id===STK.sel?" active":"");
+      const picked=STK.multi.includes(it.id);
+      d.className="stk-tile"+(it.id===STK.sel?" active":"")+(picked?" multi":"");
       d.dataset.id=it.id;
-      d.title=`id ${it.id}｜${(it.tags||[]).join("、")||"无标签"}${it.note?("｜"+it.note):""}`;
+      d.title=`id ${it.id}｜${(it.tags||[]).join("、")||"无标签"}${it.bucket?("｜分组 "+it.bucket):""}${it.note?("｜"+it.note):""}`;
       d.innerHTML = it.has_file
         ? '<img class="stk-img" alt="">'
         : '<div class="stk-ph">文件<br>不在了</div>';
+      /* 左上角复选框：只切多选，不改变右边预览（点 tile 本体仍是单选） */
+      const pick=document.createElement("span");
+      pick.className="stk-pick"+(picked?" on":"");
+      pick.textContent="✓";
+      pick.title="勾选后可以批量设分组（点图本身仍是单选预览）";
+      pick.onclick=(e)=>{ e.stopPropagation(); stkToggleMulti(it.id); };
+      d.appendChild(pick);
       const tg=document.createElement("div");
       tg.className="stk-tg"; tg.textContent=(it.tags||[]).join(" · ")||"（无标签）";
       d.appendChild(tg);
@@ -3158,9 +3442,28 @@ async function renderStickers(){
         Object.assign(document.createElement("div"), {className:"stk-ph", textContent:"读不到"}));
     }
   }
+  stkRenderBatch();
   $("#stkPage").textContent=`${STK.page+1}/${pages} ｜ ${rows.length} 张`;
   $("#stkPrev").disabled=STK.page<=0;
   $("#stkNext").disabled=STK.page>=pages-1;
+}
+
+/* ---- 多选：勾一张就多一个 id，够两张就能批量设分组 ---- */
+function stkToggleMulti(id){
+  const i=STK.multi.indexOf(id);
+  if(i>=0) STK.multi.splice(i,1); else STK.multi.push(id);
+  stkRenderBatch();
+}
+function stkRenderBatch(){
+  const n=STK.multi.length;
+  const bar=$("#stkBatchBar");
+  if(bar) bar.classList.toggle("hidden", n===0);
+  const info=$("#stkBatchInfo"); if(info) info.textContent=`已选 ${n} 张`;
+  document.querySelectorAll("#stkGrid .stk-tile").forEach(d=>{
+    const on=STK.multi.includes(d.dataset.id);
+    d.classList.toggle("multi", on);
+    const p=d.querySelector(".stk-pick"); if(p) p.classList.toggle("on", on);
+  });
 }
 
 function renderStkStats(){
@@ -3219,6 +3522,7 @@ function stkResetEditor(){
   $("#stkSelId").textContent="未选中";
   $("#stkSelMeta").textContent="";
   $("#stkTags").value=""; $("#stkNote").value="";
+  stkFillBuckets($("#stkBucket"),"（未分组）",true,"");
   $("#stkPreview").innerHTML='<span class="muted">点左边一张图，这里看大图和改标签</span>';
 }
 
@@ -3241,6 +3545,7 @@ async function stkSelect(id){
     +(it.source?` ｜ ${it.source.slice(0,60)}`:"");
   $("#stkTags").value=(it.tags||[]).join(" ");
   $("#stkNote").value=it.note||"";
+  stkFillBuckets($("#stkBucket"),"（未分组）",true,String(it.bucket||""),true);
   const pv=$("#stkPreview");
   pv.innerHTML='<span class="muted">加载中…</span>';
   const url=it.has_file?await stkBlobUrl(id):"";
@@ -3258,10 +3563,19 @@ async function loadStickers(keepMsg){
     if(!j.ok){ stkMsg(j.message||"读取失败","bad"); return; }
     STK.items=j.items||[]; STK.recent=j.recent||[]; STK.stats=j.stats||{};
     STK.untagged=j.untagged||0; STK.autotag=j.autotag||{};
+    STK.buckets=Array.isArray(j.buckets)?j.buckets.slice():[];
+    STK.send_policy=(j.send_policy==="bucket")?"bucket":"all";
+    STK.send_buckets=Array.isArray(j.send_buckets)?j.send_buckets.slice():[];
+    /* 分组被删/被改名后，筛选条件可能已经失效；多选里也可能有刚被删掉的图 */
+    if(STK.bucket && STK.bucket!=="__none__" && !STK.buckets.includes(STK.bucket)) STK.bucket="";
+    STK.multi=STK.multi.filter(id=>STK.items.some(x=>x.id===id));
     stkClearUrls();
     if(STK.sel && !STK.items.some(x=>x.id===STK.sel)) STK.sel="";
+    stkRenderBucketSelects(); stkRenderPolicy();
     renderStkStats(); renderStkRecent(); await renderStickers();
     if(STK.sel) await stkSelect(STK.sel); else stkResetEditor();
+    /* 配置项只在第一次进来时拉一遍；之后靠「保存设置」自己刷新 */
+    if(!STK.setLoaded) stkLoadSettings();
     if(!j.enabled) stkMsg("表情包功能当前是关着的（库还能看和改，但模型不会再收/发）","bad");
     else if(j.send_max<=0) stkMsg("「一轮最多发几张图」设成了 0：模型能收进库，但发不出去","bad");
     else{
@@ -3330,6 +3644,179 @@ $("#stkSearch").addEventListener("input",()=>{
 });
 $("#stkPrev").onclick=()=>{ STK.page=Math.max(0, STK.page-1); renderStickers(); };
 $("#stkNext").onclick=()=>{ STK.page+=1; renderStickers(); };
+
+/* ---- 表情包设置（原「机器人 → 工具与技能」里的那批开关） ---- */
+$("#stkSetSave").onclick=stkSaveSettings;
+$("#stkSetReset").onclick=stkResetSettings;
+
+/* ---- 发送白名单 ---- */
+$("#stkPolicyAll").onchange=()=>{ STK.send_policy="all"; stkRenderPolicy(); };
+$("#stkPolicyBucket").onchange=()=>{ STK.send_policy="bucket"; stkRenderPolicy(); };
+$("#stkPolicySave").onclick=async()=>{
+  const policy=(STK.send_policy==="bucket")?"bucket":"all";
+  const buckets=(policy==="bucket")?STK.send_buckets.slice():[];
+  const btn=$("#stkPolicySave"); btn.disabled=true; stkPolicyMsg("保存中…");
+  try{
+    const body={action:"send_policy",policy};
+    if(policy==="bucket") body.buckets=buckets;
+    const j=await stkPost(body);
+    if(!j.ok){ stkPolicyMsg(j.message||"保存失败","bad"); return; }
+    stkPolicyMsg(j.message||"已保存 ✓","ok"); toast("发送策略已保存","ok");
+    await loadStickers(true);
+  }catch(e){ stkPolicyMsg("保存失败："+e.message,"bad"); }
+  finally{ btn.disabled=false; }
+};
+
+/* ---- 分组管理 ---- */
+async function stkBucketOp(body){
+  try{
+    const j=await stkPost(body);
+    if(!j.ok){ stkMsg(j.message||"操作失败","bad"); return null; }
+    stkMsg(j.message||"已更新","ok");
+    return j;
+  }catch(e){ stkMsg("操作失败："+e.message,"bad"); return null; }
+}
+$("#stkBucketFilter").onchange=()=>{
+  STK.bucket=$("#stkBucketFilter").value;
+  STK.page=0; renderStickers();
+};
+$("#stkBucketAdd").onclick=async()=>{
+  const name=stkAskBucket("新分组名（最多 32 字）");
+  if(!name) return;
+  const j=await stkBucketOp({action:"bucket_add", name});
+  if(!j) return;
+  STK.bucket=name; STK.page=0;   // 建完直接筛到新分组，省得再找
+  await loadStickers(true);
+};
+$("#stkBucketRename").onclick=async()=>{
+  const old=STK.bucket;
+  if(!old || old==="__none__"){ stkMsg("先在「分组」下拉里选中要改名的分组","bad"); return; }
+  const name=stkAskBucket(`把「${old}」改成：`, old);
+  if(!name || name===old) return;
+  const j=await stkBucketOp({action:"bucket_rename", old, "new":name});
+  if(!j) return;
+  STK.bucket=name;
+  await loadStickers(true);
+};
+$("#stkBucketDelete").onclick=async()=>{
+  const name=STK.bucket;
+  if(!name || name==="__none__"){ stkMsg("先在「分组」下拉里选中要删的分组","bad"); return; }
+  if(!confirm(`删除分组「${name}」？（只能删空分组，里面的图要先移出）`)) return;
+  const j=await stkBucketOp({action:"bucket_delete", name});
+  if(!j) return;
+  STK.bucket="";
+  await loadStickers(true);
+};
+$("#stkBucket").onchange=async()=>{
+  if(!STK.sel){ stkMsg("先在左边选一张图","bad"); stkRenderBucketSelects(); return; }
+  let bucket=$("#stkBucket").value;
+  if(bucket==="__new__"){
+    bucket=stkAskBucket("新分组名（这张图会放进去）");
+    if(bucket===null){ stkRenderBucketSelects(); await stkSelect(STK.sel); return; }
+  }
+  const sel=$("#stkBucket"); sel.disabled=true;
+  try{
+    const j=await stkPost({action:"bucket_set", id:STK.sel, bucket});
+    if(!j.ok){ stkMsg(j.message||"改分组失败","bad"); await stkSelect(STK.sel); return; }
+    stkMsg(j.message||"已更新分组","ok");
+    await loadStickers(true);
+  }catch(e){ stkMsg("改分组失败："+e.message,"bad"); }
+  finally{ sel.disabled=false; }
+};
+
+/* ---- 多选批量设分组 ---- */
+$("#stkBatchApply").onclick=async()=>{
+  const ids=STK.multi.slice();
+  if(!ids.length){ stkMsg("先从图上勾选几张","bad"); return; }
+  let bucket=$("#stkBatchBucket").value;
+  if(bucket==="__new__"){
+    bucket=stkAskBucket("新分组名（选中的图都会放进去）");
+    if(bucket===null) return;
+  }
+  const btn=$("#stkBatchApply"); btn.disabled=true;
+  try{
+    const j=await stkPost({action:"bucket_batch", ids, bucket});
+    if(!j.ok){ stkMsg(j.message||"批量设分组失败","bad"); return; }
+    STK.multi=[];
+    stkMsg(j.message||`已给 ${ids.length} 张设分组`,"ok");
+    await loadStickers(true);
+  }catch(e){ stkMsg("批量设分组失败："+e.message,"bad"); }
+  finally{ btn.disabled=false; }
+};
+$("#stkBatchClear").onclick=()=>{ STK.multi=[]; stkRenderBatch(); };
+
+/* ---- 批量导入：选图 -> 统一标签 + 分组 -> POST import ---- */
+function stkReadFile(file){
+  return new Promise((res, rej)=>{
+    const rd=new FileReader();
+    rd.onload=()=>res(rd.result);
+    rd.onerror=()=>rej(rd.error||new Error("读取失败"));
+    rd.readAsDataURL(file);
+  });
+}
+$("#stkImport").onclick=()=>{ $("#stkImportFile").value=""; $("#stkImportFile").click(); };
+$("#stkImportFile").onchange=(e)=>{
+  const all=Array.from(e.target.files||[]);
+  STK_IMPORT_FILES=all.filter(f=>/^image\//.test(f.type));
+  const skipped=all.length-STK_IMPORT_FILES.length;
+  const box=$("#stkImportBox");
+  if(!STK_IMPORT_FILES.length){ box.classList.add("hidden"); stkMsg("没选到图片文件","bad"); return; }
+  const names=STK_IMPORT_FILES.slice(0,5).map(f=>f.name).join("、");
+  $("#stkImportInfo").textContent=`已选 ${STK_IMPORT_FILES.length} 张（${names}`
+    +(STK_IMPORT_FILES.length>5?" 等）":"）")
+    +(skipped?`，跳过 ${skipped} 个非图片文件`:"")
+    +`；单张上限 ${stkFmtBytes(STK_IMPORT_MAX)}`;
+  $("#stkImportTags").value=""; stkImportMsg("");
+  stkFillBuckets($("#stkImportBucket"),"（不分组）",true,"");
+  box.classList.remove("hidden");
+  box.scrollIntoView({behavior:"smooth",block:"nearest"});
+};
+$("#stkImportCancel").onclick=()=>{
+  STK_IMPORT_FILES=[]; $("#stkImportFile").value="";
+  $("#stkImportBox").classList.add("hidden"); stkImportMsg("");
+};
+$("#stkImportGo").onclick=async()=>{
+  const files=STK_IMPORT_FILES.slice();
+  if(!files.length){ stkImportMsg("先选几张图","bad"); return; }
+  const tags=$("#stkImportTags").value.trim();
+  if(!tags){ stkImportMsg("给个统一标签（模型靠它搜图）","bad"); return; }
+  let bucket=$("#stkImportBucket").value;
+  if(bucket==="__new__"){
+    bucket=stkAskBucket("新分组名（这批图都会放进去）");
+    if(bucket===null) return;
+  }
+  const btn=$("#stkImportGo"); btn.disabled=true;
+  const images=[]; let skipped=0;
+  try{
+    for(let i=0;i<files.length;i++){
+      const f=files[i];
+      if(f.size>STK_IMPORT_MAX){ skipped++; continue; }
+      stkImportMsg(`读取 ${i+1}/${files.length}…`);
+      try{
+        const data=await stkReadFile(f);
+        if(typeof data==="string" && data.indexOf("data:")===0) images.push({data, tags});
+        else skipped++;
+      }catch(err){ skipped++; }
+    }
+    if(!images.length){
+      stkImportMsg(`没有可导入的图${skipped?`（${skipped} 张超过 ${stkFmtBytes(STK_IMPORT_MAX)} 或读取失败）`:""}`,"bad");
+      return;
+    }
+    stkImportMsg(`导入中…（${images.length} 张${skipped?`，跳过 ${skipped} 张`:""}）`);
+    const j=await stkPost({action:"import", images, bucket});
+    if(!j.ok){ stkImportMsg(j.message||"导入失败","bad"); return; }
+    const imported=Number(j.imported||0);
+    const msg=(j.message||`导入了 ${imported} 张`)+(skipped?`（本地另跳过 ${skipped} 张）`:"");
+    stkImportMsg(msg, imported?"ok":"bad");
+    toast(msg, imported?"ok":"bad");
+    STK_IMPORT_FILES=[]; $("#stkImportFile").value="";
+    $("#stkImportBox").classList.add("hidden");
+    stkMsg(msg, imported?"ok":"bad");
+    await loadStickers(true);
+  }catch(e){ stkImportMsg("导入失败："+e.message,"bad"); }
+  finally{ btn.disabled=false; }
+};
+
 window.addEventListener("beforeunload", stkClearUrls);
 
 /* ---- 启动 ---- */
