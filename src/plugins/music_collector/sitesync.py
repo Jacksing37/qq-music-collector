@@ -31,6 +31,9 @@ MAX_PULL = 500
 _FETCH_TIMEOUT = 30.0
 #: 默认目标站
 DEFAULT_SITE = "https://fisharchive.cc/stickers/index.json"
+#: 默认并发下载数。串行下载 300 张原图要十几分钟，并发 8 能把时间压到一两分钟。
+#: 别设太大——目标站是个人维护的静态站，礼貌点
+DEFAULT_CONCURRENCY = 8
 
 _HEADERS = {
     "User-Agent": (
@@ -87,12 +90,21 @@ async def pull(
     limit: int = 0,
     sticker_dir: str = "",
     progress=None,
+    cancel_check=None,
+    concurrency: int = DEFAULT_CONCURRENCY,
 ) -> dict:
     """把站点清单里的表情包拉进库。返回 ``{total, imported, skipped, existing}``。
 
     ``limit=0`` = 全拉（但封顶 :data:`MAX_PULL`）。``progress`` 是可选回调
-    ``fn(done, total, alt)``，给网页报进度。**不抛异常**：拉清单失败在返回里体现
-    （``error`` 字段），单张下载失败只算 ``skipped``。
+    ``fn(done, total, alt)``，给网页报进度。``cancel_check`` 是可选回调
+    ``fn() -> bool``，返回 True 就尽快收手（已经发出的请求收不回，但不再发新的）。
+
+    **并发下载**：共用一个 :class:`httpx.AsyncClient`（复用连接）+ :class:`asyncio.Semaphore`
+    限流，默认 :data:`DEFAULT_CONCURRENCY` 路并发——串行下 300 张要十几分钟，并发能压到
+    一两分钟。SSRF 校验逐张照做（复用 :mod:`webtool`）。
+
+    **不抛异常**：拉清单失败在返回里体现（``error`` 字段），单张下载失败只算 ``skipped``。
+    取消时返回里带 ``cancelled=True``。
     """
     try:
         data = await fetch_index(url)
@@ -113,55 +125,93 @@ async def pull(
         if str(it.get("kind") or "") == "site"
     }
 
-    imported = skipped = existing = 0
-    for index, st in enumerate(stickers[:total], 1):
+    want = max(1, min(int(concurrency), 32))
+    sem = asyncio.Semaphore(want)
+    counters = {"imported": 0, "skipped": 0, "existing": 0, "done": 0}
+    cancelled = False
+
+    def _cancelled() -> bool:
+        return bool(cancel_check is not None and cancel_check())
+
+    def _bump(key: str, st: dict) -> None:
+        counters[key] += 1
+        counters["done"] += 1
         alt = " ".join(str(st.get("alt") or "").split())[:80]
-        tags = sticker_mod.parse_tags(st.get("tags"))
-        src = _entry_url(st)
-        if not src:
-            skipped += 1
-        elif src in seen:
-            existing += 1
-        elif not tags:
-            # 没标签的图收进来也搜不到，但 alt 还能当备注——这里直接跳过，别制造「未分类」库存
-            skipped += 1
-        else:
+        if progress is not None:
             try:
-                raw = await sticker_mod.download(src)
+                progress(counters["done"], total, alt or _entry_url(st))
+            except Exception:  # noqa: BLE001 — 回调坏了不该中断批量
+                pass
+
+    async def _download_raw(src: str) -> bytes:
+        """共享 client 下载一张（绕过每次新建连接的 ``sticker_mod.download``）。
+
+        SSRF 校验照搬 :func:`stickers.download` 的第一道闸；bytes 大小 / 格式校验交给
+        调用方（``sniff`` / ``MAX_BYTES``），这里只负责把字节拿回来。
+        """
+        blocked = webtool.url_block_reason(src)
+        if blocked:
+            raise ValueError(blocked)
+        resp = await client.get(src)
+        resp.raise_for_status()
+        return resp.content
+
+    async def one(st: dict) -> None:
+        async with sem:
+            if _cancelled():
+                return
+            alt = " ".join(str(st.get("alt") or "").split())[:80]
+            tags = sticker_mod.parse_tags(st.get("tags"))
+            src = _entry_url(st)
+            if not src:
+                _bump("skipped", st)
+                return
+            if src in seen:
+                _bump("existing", st)
+                return
+            if not tags:
+                # 没标签的图收进来也搜不到，但 alt 还能当备注——这里直接跳过，别制造「未分类」库存
+                _bump("skipped", st)
+                return
+            try:
+                raw = await _download_raw(src)
+                if len(raw) > sticker_mod.MAX_BYTES:
+                    _bump("skipped", st)
+                    return
+                if not sticker_mod.sniff(raw)[0]:
+                    _bump("skipped", st)
+                    return
                 entry, created = await sticker_mod.add(
-                    raw,
-                    tags=tags,
-                    note=alt,
-                    source=src,
-                    kind="site",
-                    sticker_dir=sticker_dir,
+                    raw, tags=tags, note=alt, source=src, kind="site", sticker_dir=sticker_dir
                 )
                 if entry is None:
-                    skipped += 1
+                    _bump("skipped", st)
                 elif not created:
-                    # sha1 撞车（清单里自己就有重复，或之前别的渠道收过同一张）——不算新收
-                    existing += 1
+                    _bump("existing", st)
                 else:
                     if bucket:
                         await sticker_mod.set_bucket(
                             str(entry.get("id") or ""), bucket, sticker_dir=sticker_dir
                         )
-                    imported += 1
-            except ValueError as exc:
+                    _bump("imported", st)
+            except (ValueError, httpx.HTTPError) as exc:
                 logger.debug(f"[sticker] 站点拉取单张失败 {src}: {exc}")
-                skipped += 1
-        if progress is not None:
-            try:
-                progress(index, total, alt or src)
-            except Exception:  # noqa: BLE001 — 回调坏了不该中断批量
-                pass
+                _bump("skipped", st)
+
+    async with httpx.AsyncClient(
+        timeout=_FETCH_TIMEOUT, headers=_HEADERS, follow_redirects=True
+    ) as client:
+        await asyncio.gather(*(one(st) for st in stickers[:total]))
+        cancelled = _cancelled()
 
     logger.info(
-        f"[sticker] 站点拉取结束：新收 {imported} / 已有 {existing} / 跳过 {skipped} / 共 {total}"
+        f"[sticker] 站点拉取结束：新收 {counters['imported']} / 已有 {counters['existing']}"
+        f" / 跳过 {counters['skipped']} / 共 {total}" + ("（已取消）" if cancelled else "")
     )
     return {
         "total": total,
-        "imported": imported,
-        "skipped": skipped,
-        "existing": existing,
+        "imported": counters["imported"],
+        "skipped": counters["skipped"],
+        "existing": counters["existing"],
+        "cancelled": cancelled,
     }

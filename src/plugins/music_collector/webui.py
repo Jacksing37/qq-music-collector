@@ -2575,7 +2575,17 @@ _autotag_state: dict = {"running": False, "done": 0, "total": 0, "sid": ""}
 
 #: 从公开表情清单站拉取的进度（同样只保留最近一次）。下载几十上百张要几分钟，
 #: 所以和补标签一样丢后台，状态留在内存里，GET 时一起带回去。
-_sitesync_state: dict = {"running": False, "done": 0, "total": 0, "label": ""}
+_sitesync_state: dict = {
+    "running": False,
+    "done": 0,
+    "total": 0,
+    "label": "",
+    "cancel": False,
+}
+
+#: 面板批量导入（base64 图片）的进度（同样只保留最近一次）。几十张串行解码 + 入库
+#: 会把请求挂很久，所以也丢后台，状态留在内存里，GET 时一起带回去。
+_import_state: dict = {"running": False, "done": 0, "total": 0, "label": ""}
 
 
 async def _run_autotag(cfg, sdir: str, limit: int, model: str) -> None:
@@ -2618,6 +2628,7 @@ async def _run_sitesync(url: str, sdir: str, bucket: str, limit: int) -> None:
             "label": "",
             "error": "",
             "started": time.strftime("%H:%M:%S"),
+            "cancel": False,
         }
     )
 
@@ -2626,13 +2637,90 @@ async def _run_sitesync(url: str, sdir: str, bucket: str, limit: int) -> None:
 
     try:
         res = await sitesync_mod.pull(
-            url, bucket=bucket, limit=limit, sticker_dir=sdir, progress=_progress
+            url,
+            bucket=bucket,
+            limit=limit,
+            sticker_dir=sdir,
+            progress=_progress,
+            cancel_check=lambda: bool(state.get("cancel")),
         )
         state.update({"running": False, "finished": time.strftime("%H:%M:%S"), **res})
     except Exception as exc:  # noqa: BLE001 — 后台任务，出错也要让页面看见
         logger.warning(f"[sticker] 站点拉取失败: {exc}")
         state.update(
             {"running": False, "error": str(exc), "finished": time.strftime("%H:%M:%S")}
+        )
+
+
+async def _run_import(images: list, bucket: str, sdir: str) -> None:
+    """后台把面板传来的一批 base64 图片逐张入库。**异常只记进状态**，不往上抛。"""
+    state = _import_state
+    total = len(images)
+    state.update(
+        {
+            "running": True,
+            "done": 0,
+            "total": total,
+            "label": "",
+            "error": "",
+            "started": time.strftime("%H:%M:%S"),
+        }
+    )
+    imported = 0
+    skipped = 0
+
+    try:
+        for idx, img in enumerate(images, 1):
+            state.update({"done": idx - 1, "label": f"第 {idx}/{total} 张"})
+            if not isinstance(img, dict):
+                skipped += 1
+                continue
+            raw = str(img.get("data") or "").strip()
+            raw = re.sub(r"^data:[^,]*;base64,", "", raw, flags=re.IGNORECASE)
+            try:
+                data = base64.b64decode(raw)
+            except Exception:  # noqa: BLE001 — 坏数据跳过，不打断整批
+                skipped += 1
+                continue
+            if not sticker_mod.sniff(data)[0]:
+                skipped += 1
+                continue
+            tags = str(img.get("tags") or "").strip() or "未分类"
+            entry, _created = await sticker_mod.add(
+                data,
+                tags=tags,
+                source="面板导入",
+                group=0,
+                kind="import",
+                sticker_dir=sdir,
+            )
+            if entry is None:
+                skipped += 1
+                continue
+            if bucket:
+                await sticker_mod.set_bucket(
+                    str(entry.get("id") or ""), bucket, sticker_dir=sdir
+                )
+            imported += 1
+        state.update(
+            {
+                "running": False,
+                "done": total,
+                "finished": time.strftime("%H:%M:%S"),
+                "imported": imported,
+                "skipped": skipped,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 — 后台任务，出错也要让页面看见
+        logger.warning(f"[sticker] 批量导入失败: {exc}")
+        state.update(
+            {
+                "running": False,
+                "error": str(exc),
+                "finished": time.strftime("%H:%M:%S"),
+                "imported": imported,
+                "skipped": skipped,
+            }
         )
 
 
@@ -2687,6 +2775,7 @@ async def _api_stickers(request: Request):
                 "untagged": len(sticker_mod.untagged(sticker_dir=sdir)),
                 "autotag": dict(_autotag_state),
                 "sitesync": dict(_sitesync_state),
+                "importing": dict(_import_state),
             }
         )
 
@@ -2768,6 +2857,15 @@ async def _api_stickers(request: Request):
         )
         return JSONResponse({"ok": ok, "message": msg}, status_code=200 if ok else 400)
 
+    if action == "cancel_site":
+        # 取消站点拉取：**不需要 id**。只置个旗子，正在下的几张会下完，随后停止发新请求。
+        if not _sitesync_state.get("running"):
+            return JSONResponse(
+                {"ok": False, "message": "没有正在进行的拉取"}, status_code=400
+            )
+        _sitesync_state["cancel"] = True
+        return JSONResponse({"ok": True, "message": "已请求取消（正在下的几张会下完）"})
+
     if action == "fetch_site":
         # 从公开表情清单站拉包入库：**不需要 id**。下载几十上百张要几分钟，
         # 所以和补标签一样丢后台，页面靠 GET 的 sitesync 看进度。
@@ -2794,53 +2892,25 @@ async def _api_stickers(request: Request):
 
     if action == "import":
         # 批量导入：图片是 base64 字符串（可带 data:…;base64, 前缀），**不需要 id**。
-        # 每张 add 只在本地 sha1 + 写文件，几十张串行跑也很快，不必丢后台。
+        # 几十张串行解码 + 入库会把请求挂很久，所以和补标签一样丢后台，
+        # 页面靠 GET 的 importing 看进度。
         images = body.get("images")
         if not isinstance(images, list) or not images:
             return JSONResponse(
                 {"ok": False, "message": "没有要导入的图片"}, status_code=400
             )
-        bucket = str(body.get("bucket") or "")
-        imported = 0
-        skipped = 0
-        for img in images:
-            if not isinstance(img, dict):
-                skipped += 1
-                continue
-            raw = str(img.get("data") or "").strip()
-            raw = re.sub(r"^data:[^,]*;base64,", "", raw, flags=re.IGNORECASE)
-            try:
-                data = base64.b64decode(raw)
-            except Exception:  # noqa: BLE001 — 坏数据跳过，不打断整批
-                skipped += 1
-                continue
-            if not sticker_mod.sniff(data)[0]:
-                skipped += 1
-                continue
-            tags = str(img.get("tags") or "").strip() or "未分类"
-            entry, _created = await sticker_mod.add(
-                data,
-                tags=tags,
-                source="面板导入",
-                group=0,
-                kind="import",
-                sticker_dir=sdir,
+        if _import_state.get("running"):
+            return JSONResponse(
+                {"ok": False, "message": "上一批还在导入，等它导完再点"}, status_code=409
             )
-            if entry is None:
-                skipped += 1
-                continue
-            if bucket:
-                await sticker_mod.set_bucket(
-                    str(entry.get("id") or ""), bucket, sticker_dir=sdir
-                )
-            imported += 1
-        tail = f"，跳过 {skipped} 张（不是图片或数据坏了）" if skipped else ""
+        bucket = str(body.get("bucket") or "")
+        asyncio.ensure_future(_run_import(images, bucket, sdir))
         return JSONResponse(
             {
                 "ok": True,
-                "imported": imported,
-                "skipped": skipped,
-                "message": f"导入了 {imported} 张{tail}",
+                "message": "开始导入",
+                "total": len(images),
+                "bucket": bucket,
             }
         )
 

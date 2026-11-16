@@ -417,19 +417,39 @@ async def main() -> int:
         ]
     }
     _saved_ss_fetch = ss.fetch_index
-    _saved_st_dl = st.download
+    _saved_ss_client = ss.httpx.AsyncClient
+    _saved_url_block = ss.webtool.url_block_reason
 
     async def _fake_fetch_index(url):
         return fake_manifest
 
-    async def _fake_download(url, timeout=20.0, *, max_bytes=st.MAX_BYTES):
-        # a.gif 能下，其它直接报错
-        if url.endswith("a.gif"):
-            return GIF + b"site-pull"
-        raise ValueError("下载失败：测试桩")
+    class _FakeResp:
+        def __init__(self, data):
+            self.content = data
+
+        def raise_for_status(self):
+            if self.content is None:
+                raise ValueError("HTTP 404（测试桩）")
+
+    class _FakeClient:
+        """共享 client 的假实现：``__aenter__`` 返回自己，``get`` 按 URL 后缀给字节。"""
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url):
+            # a.gif 能下，其它 404（content=None → raise_for_status 抛）
+            if str(url).endswith("a.gif"):
+                return _FakeResp(GIF + b"site-pull")
+            return _FakeResp(None)
 
     ss.fetch_index = _fake_fetch_index
-    st.download = _fake_download
+    ss.httpx.AsyncClient = lambda **kw: _FakeClient()
+    # SSRF 校验不是这里要测的（webtool 有独立测试），放行假清单里的 URL
+    ss.webtool.url_block_reason = lambda url: None
     try:
         res = await ss.pull("https://fish.example/index.json", limit=0)
         # 4 张：1 张新收(a.gif)、1 张原图空→跳过、1 张没标签→跳过、1 张同 source 同字节→sha1 撞车算 existing
@@ -440,9 +460,16 @@ async def main() -> int:
         res2 = await ss.pull("https://fish.example/index.json", limit=0)
         check("再拉：同一张按 source 去重，计入 existing",
               res2.get("existing") == 2 and res2.get("imported") == 0, str(res2))
+        # 取消：cancel_check 一上来就返回 True，应该一张都不发、返回 cancelled
+        res3 = await ss.pull(
+            "https://fish.example/index.json", limit=0, cancel_check=lambda: True
+        )
+        check("取消：cancel_check=True 时一张不收、标记 cancelled",
+              res3.get("cancelled") is True and res3.get("imported") == 0, str(res3))
     finally:
         ss.fetch_index = _saved_ss_fetch
-        st.download = _saved_st_dl
+        ss.httpx.AsyncClient = _saved_ss_client
+        ss.webtool.url_block_reason = _saved_url_block
     check("_entry_url 取 original 优先", ss._entry_url({"original": "https://x/o.gif", "large": "https://x/l.webp"})
           == "https://x/o.gif", "")
     check("_entry_url 没 original 退 large", ss._entry_url({"large": "https://x/l.webp"}) == "https://x/l.webp", "")

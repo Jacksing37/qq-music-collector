@@ -308,6 +308,29 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .stk-tile .stk-pick:hover{border-color:var(--accent)}
 .stk-tile .stk-pick.on{background:var(--accent);border-color:var(--accent);color:#fff}
 .stk-tile.multi{border-color:var(--accent2);box-shadow:0 0 0 2px rgba(167,139,250,.22)}
+/* 视图切换 / 排序：和上面那排按钮同款，只是小一号 */
+.stk-viewbar{flex-wrap:wrap;gap:8px}
+.stk-vbtn{font-size:12px;padding:4px 10px}
+.stk-vbtn.on{border-color:var(--accent);color:var(--accent)}
+/* 列表视图：一行一张，缩略图固定 44px，文字列吃掉剩余宽度；
+   高度上限跟网格一样，翻页时不会把整页撑长 */
+.stk-list{display:flex;flex-direction:column;max-height:min(60vh,620px);overflow-y:auto;
+  overscroll-behavior:contain;padding-right:4px;scrollbar-width:thin}
+.stk-lrow{display:flex;align-items:center;gap:10px;padding:6px 8px;border-bottom:1px dashed var(--card-bd);
+  cursor:pointer;transition:.15s}
+.stk-lrow:hover{background:var(--input)}
+.stk-lrow.active{background:var(--input);box-shadow:inset 3px 0 0 var(--accent)}
+.stk-lrow .stk-lthumb{width:44px;height:44px;flex:0 0 44px;display:flex;align-items:center;justify-content:center;
+  border:1px solid var(--card-bd);border-radius:8px;background:rgba(127,127,127,.06);overflow:hidden}
+.stk-lrow .stk-limg{width:100%;height:100%;object-fit:contain}
+.stk-lrow .stk-lph{font-size:10px;color:var(--muted)}
+.stk-lrow .stk-lmain{flex:1;min-width:0;display:flex;flex-direction:column}
+.stk-lrow .stk-ltags{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stk-lrow .stk-lnote{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stk-lrow .stk-lmeta{display:flex;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--muted);
+  justify-content:flex-end;max-width:52%}
+.stk-lrow .stk-lb{color:var(--accent2)}
+@media(max-width:760px){.stk-lrow .stk-lmeta{max-width:100%;justify-content:flex-start}}
 .stk-batch{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;padding:8px 10px;
   border:1px dashed var(--accent2);border-radius:12px;background:var(--input)}
 .stk-buckets{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
@@ -835,6 +858,7 @@ label.stk-radio input[type=radio]{width:16px;height:16px;margin:0;padding:0;flex
           <button id="stkReload" title="重新读磁盘上的库">↻ 刷新</button>
           <button id="stkAutotag" title="让模型看一眼「未分类」的图，自动补上标签">🏷 补标签</button>
           <button id="stkFetchSite" title="从公开表情清单站（如 fisharchive.cc）拉取表情包入库">🌐 从站点拉取</button>
+          <button id="stkFetchStop" class="hidden" title="让后台把当前这张下完就停，已经收进来的不动">✕ 取消拉取</button>
           <button id="stkPrev" title="上一页">←</button>
           <span class="muted" id="stkPage">—</span>
           <button id="stkNext" title="下一页">→</button>
@@ -865,7 +889,20 @@ label.stk-radio input[type=radio]{width:16px;height:16px;margin:0;padding:0;flex
             <button id="stkBatchApply" class="btn-primary">批量设分组</button>
             <button id="stkBatchClear">清空选择</button>
           </div>
+          <div class="row stk-viewbar" style="margin-bottom:8px">
+            <span class="muted">视图：</span>
+            <button id="stkViewGrid" class="stk-vbtn on" title="缩略图网格（原来的样子）">▦ 网格</button>
+            <button id="stkViewList" class="stk-vbtn" title="一行一张，能看见分组、发送次数和时间">☰ 列表</button>
+            <div class="spacer"></div>
+            <span class="muted">排序：</span>
+            <select id="stkSort" style="width:auto;min-width:132px">
+              <option value="created" selected>导入日期</option>
+              <option value="recent_sent">最近发送</option>
+              <option value="sent_count">发送次数</option>
+            </select>
+          </div>
           <div id="stkGrid" class="stk-grid"><div class="empty">加载中…</div></div>
+          <div id="stkList" class="stk-list hidden"></div>
         </div>
         <div class="card stk-side">
           <div class="row" style="margin-bottom:8px">
@@ -3186,6 +3223,10 @@ const STK = {items:[], recent:[], stats:{}, q:"", page:0, per:18, sel:"", t:null
              urls:new Map(), untagged:0, autotag:{}, poll:null,
              /* 从公开清单站拉取：进度状态由后端 GET 带回，单独一个轮询计时器 */
              sitesync:{}, sitepoll:null,
+             /* 批量导入改成后台任务后，进度同样靠 GET 的 importing 字段刷 */
+             importing:{}, importpoll:null,
+             /* 看库的方式：网格 / 列表；排序默认「导入日期」（最新收录在前） */
+             view:"grid", sort:"created",
              /* 分组 / 发送白名单 / 多选：后端 GET 一起带回来，改完也以它为准 */
              buckets:[], send_policy:"all", send_buckets:[], multi:[], bucket:"",
              setLoaded:false};
@@ -3327,17 +3368,37 @@ async function stkBlobUrl(id){
   }catch(e){ return ""; }
 }
 
+/* 时间统一转成数字再比：后端写的是「2024-05-01 12:30」，空值给一个极小值，
+   降序排序时自然沉到最后（别用 Infinity-Infinity，那样比较器会返回 NaN） */
+function stkTs(v){
+  const s=String(v||"").trim().replace(" ","T");
+  if(!s) return -1e15;
+  const t=Date.parse(s);
+  return isNaN(t) ? -1e15 : t;
+}
+/* 排序只看 STK.sort：recent_sent 最近发送 / sent_count 发送次数 / created 导入日期。
+   都给个「同分按收录时间倒序」的兜底，比完还一样就保持原顺序（Array#sort 是稳定排序）。 */
+function stkSortRows(rows){
+  const out=rows.slice();
+  const byCreated=(a,b)=>stkTs(b.created)-stkTs(a.created);
+  if(STK.sort==="sent_count") out.sort((a,b)=>(Number(b.used)||0)-(Number(a.used)||0) || byCreated(a,b));
+  else if(STK.sort==="recent_sent") out.sort((a,b)=>stkTs(b.last_used)-stkTs(a.last_used) || byCreated(a,b));
+  else out.sort(byCreated);
+  return out;
+}
+
 function stkFiltered(){
-  /* 先按分组筛，再按搜索词筛：分组是「看某一批图」的硬过滤，搜索叠在它上面 */
+  /* 先按分组筛，再按搜索词筛：分组是「看某一批图」的硬过滤，搜索叠在它上面。
+     排完序再交给渲染：分页和「点最近发送定位到第几页」都用这一份顺序。 */
   let rows=STK.items;
   if(STK.bucket==="__none__") rows=rows.filter(it=>!String(it.bucket||""));
   else if(STK.bucket) rows=rows.filter(it=>String(it.bucket||"")===STK.bucket);
   const q=(STK.q||"").trim().toLowerCase();
-  if(!q) return rows;
-  return rows.filter(it=>
+  if(q) rows=rows.filter(it=>
     (it.tags||[]).some(t=>String(t).toLowerCase().includes(q))
     || String(it.note||"").toLowerCase().includes(q)
     || String(it.id||"").toLowerCase().includes(q));
+  return stkSortRows(rows);
 }
 
 /* ---- 分组：下拉 / 新建 / 改名 / 删除 / 批量 ---- */
@@ -3425,16 +3486,54 @@ function stkUpdatePolicyHint(){
 }
 
 async function renderStickers(){
+  /* 两种视图共用一份 rows / 分页：网格和列表只是同一页数据的两种画法 */
   const rows=stkFiltered();
   const pages=Math.max(1, Math.ceil(rows.length/STK.per));
   STK.page=Math.min(Math.max(0, STK.page), pages-1);
   const pageRows=rows.slice(STK.page*STK.per, STK.page*STK.per+STK.per);
-  const box=$("#stkGrid");
+  const list=STK.view==="list";
+  const box=$(list?"#stkList":"#stkGrid");
+  const other=$(list?"#stkGrid":"#stkList");
+  if(other) other.classList.add("hidden");
+  if(box) box.classList.remove("hidden");
+  const gbtn=$("#stkViewGrid"), lbtn=$("#stkViewList");
+  if(gbtn) gbtn.classList.toggle("on", !list);
+  if(lbtn) lbtn.classList.toggle("on", list);
   box.innerHTML="";
   if(!rows.length){
     box.innerHTML='<div class="empty">'+(STK.items.length
       ? "没有匹配的表情包（搜别的词试试，或者点标签清掉筛选）"
       : "库还是空的：在群里发一张表情包让它「收下」，或者让它自己搜图收进来")+'</div>';
+  }else if(list){
+    /* 列表：一行一张。不给多选复选框（看图时更想知道「发过几次、什么时候收的」），
+       点行仍是单选预览，和网格一样。用户内容一律 esc 再拼。 */
+    pageRows.forEach(it=>{
+      const d=document.createElement("div");
+      d.className="stk-lrow"+(it.id===STK.sel?" active":"");
+      d.dataset.id=it.id;
+      d.title=`id ${it.id}｜${(it.tags||[]).join("、")||"无标签"}${it.note?("｜"+it.note):""}`;
+      const tags=(it.tags||[]).join(" · ")||"（无标签）";
+      d.innerHTML=(it.has_file
+          ? '<span class="stk-lthumb"><img class="stk-limg" alt=""></span>'
+          : '<span class="stk-lthumb"><span class="stk-lph">无图</span></span>')
+        +'<span class="stk-lmain"><span class="stk-ltags">'+esc(tags)+'</span>'
+        +(it.note?'<span class="stk-lnote muted">'+esc(it.note)+'</span>':"")
+        +'</span><span class="stk-lmeta">'
+        +(it.bucket?'<span class="stk-lb">'+esc(it.bucket)+'</span>':"")
+        +'<span>发过 '+(Number(it.used)||0)+' 次</span>'
+        +'<span>最近 '+esc(it.last_used||"—")+'</span>'
+        +'<span>收录 '+esc(it.created||"—")+'</span></span>';
+      d.onclick=()=>{ stkMsg(""); stkSelect(it.id); };
+      box.appendChild(d);
+    });
+    // 缩略图同样先摆骨架再异步灌 blob
+    for(const d of box.querySelectorAll(".stk-lrow")){
+      const img=d.querySelector("img.stk-limg");
+      if(!img) continue;
+      const url=await stkBlobUrl(d.dataset.id);
+      if(url) img.src=url; else img.replaceWith(
+        Object.assign(document.createElement("span"), {className:"stk-lph", textContent:"读不到"}));
+    }
   }else{
     pageRows.forEach(it=>{
       const d=document.createElement("div");
@@ -3520,6 +3619,12 @@ function renderStkStats(){
     else fbtn.textContent="🌐 从站点拉取";
     fbtn.disabled=!!ss.running;
   }
+  /* 「取消拉取」只在真的在拉的时候露面，平时不占地方 */
+  const sbtn=$("#stkFetchStop");
+  if(sbtn){ sbtn.classList.toggle("hidden", !ss.running); sbtn.disabled=!ss.running; }
+  /* 导入跑着的时候，导入面板里的「开始导入」也按死，免得点两次排两个后台任务 */
+  const ibtn=$("#stkImportGo");
+  if(ibtn) ibtn.disabled=!!(STK.importing||{}).running;
   const box=$("#stkChips"); box.innerHTML="";
   const tags=(s.tags||[]).slice(0,14);
   if(!tags.length) return;
@@ -3572,7 +3677,7 @@ async function stkSelect(id){
     const page=Math.floor(idx/STK.per);
     if(page!==STK.page){ STK.page=page; await renderStickers(); }
   }
-  document.querySelectorAll(".stk-tile").forEach(d=>d.classList.toggle("active", d.dataset.id===id));
+  document.querySelectorAll(".stk-tile, .stk-lrow").forEach(d=>d.classList.toggle("active", d.dataset.id===id));
   const it=STK.items.find(x=>x.id===id);
   if(!it) return;
   $("#stkSelId").textContent="id "+it.id;
@@ -3601,7 +3706,11 @@ async function loadStickers(keepMsg){
     if(!j.ok){ stkMsg(j.message||"读取失败","bad"); return; }
     STK.items=j.items||[]; STK.recent=j.recent||[]; STK.stats=j.stats||{};
     STK.untagged=j.untagged||0; STK.autotag=j.autotag||{};
+    /* 记下「上一轮还在跑」：轮询时 keepMsg=true，靠它才能在刚结束的那一次把结果说出来 */
+    const wasSite=!!(STK.sitesync||{}).running;
+    const wasImp=!!(STK.importing||{}).running;
     STK.sitesync=j.sitesync||{};
+    STK.importing=j.importing||{};
     STK.buckets=Array.isArray(j.buckets)?j.buckets.slice():[];
     STK.send_policy=(j.send_policy==="bucket")?"bucket":"all";
     STK.send_buckets=Array.isArray(j.send_buckets)?j.send_buckets.slice():[];
@@ -3633,9 +3742,19 @@ async function loadStickers(keepMsg){
       stkMsg(`正在从站点拉取：第 ${ss.done||0}/${ss.total||0} 张（后台跑，可以关页面）`);
       stkPollSite();
     }else if(ss.error) stkMsg("站点拉取失败："+ss.error,"bad");
+    else if(ss.cancelled && (wasSite || !keepMsg))
+      stkMsg(`已取消拉取：处理了 ${ss.done||0} 张，新收 ${ss.imported||0} 张（已收的留在库里）`);
     else if(ss.finished && !keepMsg)
       stkMsg(`拉取完成：新收 ${ss.imported||0} / 已有 ${ss.existing||0} / 跳过 ${ss.skipped||0}`,
              ss.imported?"ok":"");
+    /* 批量导入同样改成了后台任务：POST 只回一句「开始了」，进度看 importing */
+    const im=STK.importing||{};
+    if(im.running){
+      stkMsg(`正在导入：第 ${im.done||0}/${im.total||0} 张（后台跑，可以关页面）`);
+      stkPollImport();
+    }else if(im.error) stkMsg("批量导入失败："+im.error,"bad");
+    else if(im.finished && (wasImp || !keepMsg))
+      stkMsg(`导入完成：成功 ${im.imported||0} / 跳过 ${im.skipped||0}`, im.imported?"ok":"");
   }catch(e){ if(e.message!=="unauthorized") stkMsg("加载失败: "+e.message,"bad"); }
 }
 
@@ -3693,6 +3812,22 @@ function stkPollSite(){
   if(!(STK.sitesync||{}).running) return;
   STK.sitepoll=setTimeout(async()=>{ await loadStickers(true); }, 3000);
 }
+/* 批量导入也照这套：3 秒回头看一眼 GET 里的 importing */
+function stkPollImport(){
+  clearTimeout(STK.importpoll);
+  if(!(STK.importing||{}).running) return;
+  STK.importpoll=setTimeout(async()=>{ await loadStickers(true); }, 3000);
+}
+$("#stkFetchStop").onclick=async()=>{
+  const btn=$("#stkFetchStop"); btn.disabled=true;
+  try{
+    const j=await stkPost({action:"cancel_site"});
+    if(!j.ok){ stkMsg(j.message||"取消失败","bad"); return; }
+    stkMsg("已请求取消…","ok");
+    await loadStickers(true);
+  }catch(e){ stkMsg("取消失败："+e.message,"bad"); }
+  finally{ btn.disabled=!(STK.sitesync||{}).running; }
+};
 $("#stkFetchSite").onclick=()=>{
   $("#stkFetchUrl").value="https://fisharchive.cc/stickers/index.json";
   $("#stkFetchLimit").value="";
@@ -3727,6 +3862,14 @@ $("#stkSearch").addEventListener("input",()=>{
   clearTimeout(STK.t);
   STK.t=setTimeout(()=>{ STK.q=$("#stkSearch").value; STK.page=0; renderStickers(); }, 250);
 });
+/* ---- 视图切换 / 排序：都只动本地的 STK，重新画当前页 ---- */
+$("#stkViewGrid").onclick=()=>{ STK.view="grid"; renderStickers(); };
+$("#stkViewList").onclick=()=>{ STK.view="list"; renderStickers(); };
+$("#stkSort").onchange=()=>{
+  STK.sort=$("#stkSort").value||"created";
+  STK.page=0;                 // 换了顺序，原来的第几页已经对不上了
+  renderStickers();
+};
 $("#stkPrev").onclick=()=>{ STK.page=Math.max(0, STK.page-1); renderStickers(); };
 $("#stkNext").onclick=()=>{ STK.page+=1; renderStickers(); };
 
@@ -3887,19 +4030,18 @@ $("#stkImportGo").onclick=async()=>{
       stkImportMsg(`没有可导入的图${skipped?`（${skipped} 张超过 ${stkFmtBytes(STK_IMPORT_MAX)} 或读取失败）`:""}`,"bad");
       return;
     }
-    stkImportMsg(`导入中…（${images.length} 张${skipped?`，跳过 ${skipped} 张`:""}）`);
+    stkImportMsg(`上传中…（${images.length} 张${skipped?`，跳过 ${skipped} 张`:""}）`);
     const j=await stkPost({action:"import", images, bucket});
     if(!j.ok){ stkImportMsg(j.message||"导入失败","bad"); return; }
-    const imported=Number(j.imported||0);
-    const msg=(j.message||`导入了 ${imported} 张`)+(skipped?`（本地另跳过 ${skipped} 张）`:"");
-    stkImportMsg(msg, imported?"ok":"bad");
-    toast(msg, imported?"ok":"bad");
+    /* 后端改成后台任务了：这里只说明「已经交上去」，进度看 GET 回来的 importing */
+    const msg=`已提交 ${Number(j.total)||images.length} 张，后台导入中`;
     STK_IMPORT_FILES=[]; $("#stkImportFile").value="";
-    $("#stkImportBox").classList.add("hidden");
-    stkMsg(msg, imported?"ok":"bad");
+    $("#stkImportBox").classList.add("hidden"); stkImportMsg("");
+    toast(msg,"ok");
+    stkMsg("已开始导入，后台进行中…","ok");
     await loadStickers(true);
   }catch(e){ stkImportMsg("导入失败："+e.message,"bad"); }
-  finally{ btn.disabled=false; }
+  finally{ btn.disabled=!!(STK.importing||{}).running; }
 };
 
 window.addEventListener("beforeunload", stkClearUrls);
