@@ -16,8 +16,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
-from typing import Optional
+import time
 
 import httpx
 from nonebot.log import logger
@@ -31,9 +30,10 @@ MAX_PULL = 500
 _FETCH_TIMEOUT = 30.0
 #: 默认目标站
 DEFAULT_SITE = "https://fisharchive.cc/stickers/index.json"
-#: 默认并发下载数。串行下载 300 张原图要十几分钟，并发 8 能把时间压到一两分钟。
-#: 别设太大——目标站是个人维护的静态站，礼貌点
-DEFAULT_CONCURRENCY = 8
+#: 默认并发下载数。串行下载 300 张原图要十几分钟，并发能把时间压下来。但目标站是
+#: 个人维护的静态站（作者明说「请勿高频抓取」），且原图多为几 MB 的 gif、走代理访问
+#: Cloudflare 单张就可能十几秒——并发别拉太高，否则既慢又容易被限流
+DEFAULT_CONCURRENCY = 4
 
 _HEADERS = {
     "User-Agent": (
@@ -152,9 +152,13 @@ async def pull(
         blocked = webtool.url_block_reason(src)
         if blocked:
             raise ValueError(blocked)
+        t0 = time.monotonic()
         resp = await client.get(src)
         resp.raise_for_status()
-        return resp.content
+        data = resp.content
+        # 原图经常是几 MB 的 gif、走代理还慢——记一条耗时，拉取「怎么这么慢」时一眼能定位
+        logger.debug(f"[sticker] 站点下载 {src[:60]} {len(data) // 1024} KB 耗时 {time.monotonic() - t0:.1f}s")
+        return data
 
     async def one(st: dict) -> None:
         async with sem:
