@@ -30,6 +30,7 @@ from nonebot.adapters.onebot.v11 import Message, MessageSegment  # noqa: E402
 
 from music_collector import browser as br  # noqa: E402
 from music_collector import imagesearch as isr  # noqa: E402
+from music_collector import sitesync as ss  # noqa: E402
 from music_collector import stickers as st  # noqa: E402
 from music_collector import tools as tl  # noqa: E402
 from music_collector.bot_utils import collect_stickers  # noqa: E402
@@ -404,6 +405,57 @@ async def main() -> int:
     check("白名单含「导入组」时导入图能发", ok is True and st.is_sendable(st.get(imported_id)), msg)
     check("不在白名单的图仍被挡", not st.is_sendable(st.get(loose_id)), str(st.get(loose_id)))
     await st.set_send_policy("all")
+
+    print("== 从站点拉取（sitesync，离线：mock fetch_index + download）==")
+    # 一份假清单：3 张，其中一张 original 为空、一张没标签（都要被跳过），一张正常
+    fake_manifest = {
+        "stickers": [
+            {"alt": "鲸鱼娘挥手", "tags": ["卖萌", "打招呼"], "original": "https://fish.example/a.gif"},
+            {"alt": "没原图的", "tags": ["搞笑"], "original": ""},
+            {"alt": "没标签的", "tags": [], "original": "https://fish.example/c.png"},
+            {"alt": "重复的", "tags": ["卖萌"], "original": "https://fish.example/a.gif"},
+        ]
+    }
+    _saved_ss_fetch = ss.fetch_index
+    _saved_st_dl = st.download
+
+    async def _fake_fetch_index(url):
+        return fake_manifest
+
+    async def _fake_download(url, timeout=20.0, *, max_bytes=st.MAX_BYTES):
+        # a.gif 能下，其它直接报错
+        if url.endswith("a.gif"):
+            return GIF + b"site-pull"
+        raise ValueError("下载失败：测试桩")
+
+    ss.fetch_index = _fake_fetch_index
+    st.download = _fake_download
+    try:
+        res = await ss.pull("https://fish.example/index.json", limit=0)
+        # 4 张：1 张新收(a.gif)、1 张原图空→跳过、1 张没标签→跳过、1 张同 source 同字节→sha1 撞车算 existing
+        check("拉取：新收 1、跳过 2、sha1 撞车算 existing 1",
+              res.get("imported") == 1 and res.get("skipped") == 2 and res.get("existing") == 1,
+              str(res))
+        # 再拉一次：两张 a.gif（同 source）都按 source 去重，进 existing 不再下载
+        res2 = await ss.pull("https://fish.example/index.json", limit=0)
+        check("再拉：同一张按 source 去重，计入 existing",
+              res2.get("existing") == 2 and res2.get("imported") == 0, str(res2))
+    finally:
+        ss.fetch_index = _saved_ss_fetch
+        st.download = _saved_st_dl
+    check("_entry_url 取 original 优先", ss._entry_url({"original": "https://x/o.gif", "large": "https://x/l.webp"})
+          == "https://x/o.gif", "")
+    check("_entry_url 没 original 退 large", ss._entry_url({"large": "https://x/l.webp"}) == "https://x/l.webp", "")
+
+    async def _bad_fetch(url):
+        raise ValueError("清单炸了")
+
+    ss.fetch_index = _bad_fetch
+    try:
+        res = await ss.pull("https://bad.example/index.json")
+        check("清单拉取失败在返回里体现、不抛异常", "error" in res and res.get("imported") == 0, str(res))
+    finally:
+        ss.fetch_index = _saved_ss_fetch
 
     out = await tl.dispatch(tools, "sticker_add", {"tags": "坏图", "url": "https://x.example.com/broken.jpg"}, ctx)
     check("下载失败时说清原因", "没能收下" in out and "403" in out, out[:80])

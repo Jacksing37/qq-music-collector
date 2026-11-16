@@ -797,6 +797,29 @@ label.stk-radio input[type=radio]{width:16px;height:16px;margin:0;padding:0;flex
         </div>
       </div>
 
+      <!-- 从站点拉取：填个清单地址就整批收图，默认那个站是公开的、允许跨域 -->
+      <div class="card hidden" id="stkFetchBox">
+        <h2><span class="dot"></span>从站点拉取 · 公开表情清单</h2>
+        <p class="muted">从一个公开的表情清单站整批收图（默认 <b>fisharchive.cc</b>）：下载的是<b>原图</b>，
+          动图会保留动画；标签直接用站点现成的 tags，画面描述记进备注。已经收过的按来源跳过、
+          不重复占空间；没标签的图也会跳过（收进来也搜不到）。单次最多 500 张。</p>
+        <div class="row">
+          <input id="stkFetchUrl" placeholder="清单地址（index.json）" style="flex:1;min-width:240px"
+            value="https://fisharchive.cc/stickers/index.json">
+        </div>
+        <div class="row">
+          <input id="stkFetchLimit" type="number" min="0" max="500" style="width:auto;min-width:200px"
+            placeholder="留空 = 全拉（0 也是全拉，上限 500）">
+          <select id="stkFetchBucket" style="width:auto;min-width:140px"></select>
+        </div>
+        <div class="row">
+          <span class="msg" id="stkFetchMsg"></span>
+          <div class="spacer"></div>
+          <button id="stkFetchCancel">取消</button>
+          <button id="stkFetchGo" class="btn-primary">开始拉取</button>
+        </div>
+      </div>
+
       <div class="card">
         <h2><span class="dot"></span>表情包库 · 它会拿来接话的图</h2>
         <p class="muted">群友发表情包时，后台监听器会<b>自动收进这里</b>（每天有张数上限），模型也会用
@@ -811,6 +834,7 @@ label.stk-radio input[type=radio]{width:16px;height:16px;margin:0;padding:0;flex
           <input id="stkSearch" placeholder="搜索标签 / 备注" style="flex:1;min-width:170px">
           <button id="stkReload" title="重新读磁盘上的库">↻ 刷新</button>
           <button id="stkAutotag" title="让模型看一眼「未分类」的图，自动补上标签">🏷 补标签</button>
+          <button id="stkFetchSite" title="从公开表情清单站（如 fisharchive.cc）拉取表情包入库">🌐 从站点拉取</button>
           <button id="stkPrev" title="上一页">←</button>
           <span class="muted" id="stkPage">—</span>
           <button id="stkNext" title="下一页">→</button>
@@ -3160,6 +3184,8 @@ $("#logClear").onclick=async()=>{
    比模型自己写的更准的东西。 */
 const STK = {items:[], recent:[], stats:{}, q:"", page:0, per:18, sel:"", t:null,
              urls:new Map(), untagged:0, autotag:{}, poll:null,
+             /* 从公开清单站拉取：进度状态由后端 GET 带回，单独一个轮询计时器 */
+             sitesync:{}, sitepoll:null,
              /* 分组 / 发送白名单 / 多选：后端 GET 一起带回来，改完也以它为准 */
              buckets:[], send_policy:"all", send_buckets:[], multi:[], bucket:"",
              setLoaded:false};
@@ -3188,6 +3214,10 @@ function stkPolicyMsg(t, kind=""){
 }
 function stkImportMsg(t, kind=""){
   const el=$("#stkImportMsg"); if(!el) return;
+  el.textContent=t||""; el.className="msg"+(kind?(" "+kind):"");
+}
+function stkFetchMsg(t, kind=""){
+  const el=$("#stkFetchMsg"); if(!el) return;
   el.textContent=t||""; el.className="msg"+(kind?(" "+kind):"");
 }
 function stkSetMarkDirty(key, val){
@@ -3482,6 +3512,14 @@ function renderStkStats(){
     else btn.textContent=miss?`🏷 补标签 (${miss})`:"🏷 补标签";
     btn.disabled=!!at.running;
   }
+  /* 「从站点拉取」按钮：同样当进度用，拉的时候不能重复点 */
+  const ss=STK.sitesync||{};
+  const fbtn=$("#stkFetchSite");
+  if(fbtn){
+    if(ss.running) fbtn.textContent=`🌐 拉取中 ${ss.done||0}/${ss.total||0}`;
+    else fbtn.textContent="🌐 从站点拉取";
+    fbtn.disabled=!!ss.running;
+  }
   const box=$("#stkChips"); box.innerHTML="";
   const tags=(s.tags||[]).slice(0,14);
   if(!tags.length) return;
@@ -3563,6 +3601,7 @@ async function loadStickers(keepMsg){
     if(!j.ok){ stkMsg(j.message||"读取失败","bad"); return; }
     STK.items=j.items||[]; STK.recent=j.recent||[]; STK.stats=j.stats||{};
     STK.untagged=j.untagged||0; STK.autotag=j.autotag||{};
+    STK.sitesync=j.sitesync||{};
     STK.buckets=Array.isArray(j.buckets)?j.buckets.slice():[];
     STK.send_policy=(j.send_policy==="bucket")?"bucket":"all";
     STK.send_buckets=Array.isArray(j.send_buckets)?j.send_buckets.slice():[];
@@ -3588,6 +3627,15 @@ async function loadStickers(keepMsg){
       else if(at.finished && !keepMsg)
         stkMsg(`上次补标签：成功 ${at.done||0} 张 / 失败 ${at.failed||0} 张`, at.done?"ok":"bad");
     }
+    /* 站点拉取也是后台任务：跑着就轮询；开关状态无关，照常显示（提示条会盖掉上面那句） */
+    const ss=STK.sitesync||{};
+    if(ss.running){
+      stkMsg(`正在从站点拉取：第 ${ss.done||0}/${ss.total||0} 张（后台跑，可以关页面）`);
+      stkPollSite();
+    }else if(ss.error) stkMsg("站点拉取失败："+ss.error,"bad");
+    else if(ss.finished && !keepMsg)
+      stkMsg(`拉取完成：新收 ${ss.imported||0} / 已有 ${ss.existing||0} / 跳过 ${ss.skipped||0}`,
+             ss.imported?"ok":"");
   }catch(e){ if(e.message!=="unauthorized") stkMsg("加载失败: "+e.message,"bad"); }
 }
 
@@ -3637,6 +3685,43 @@ $("#stkAutotag").onclick=async()=>{
     await loadStickers(true);
   }catch(e){ stkMsg("启动失败："+e.message,"bad"); }
   finally{ btn.disabled=!!(STK.autotag||{}).running; }
+};
+
+/* 从公开清单站拉包：POST 一句「开始了」，进度和结果都看 GET 回来的 sitesync 字段 */
+function stkPollSite(){
+  clearTimeout(STK.sitepoll);
+  if(!(STK.sitesync||{}).running) return;
+  STK.sitepoll=setTimeout(async()=>{ await loadStickers(true); }, 3000);
+}
+$("#stkFetchSite").onclick=()=>{
+  $("#stkFetchUrl").value="https://fisharchive.cc/stickers/index.json";
+  $("#stkFetchLimit").value="";
+  stkFillBuckets($("#stkFetchBucket"),"（不分组）",true,"");
+  stkFetchMsg("");
+  const box=$("#stkFetchBox");
+  box.classList.remove("hidden");
+  box.scrollIntoView({behavior:"smooth",block:"nearest"});
+};
+$("#stkFetchCancel").onclick=()=>{
+  $("#stkFetchBox").classList.add("hidden"); stkFetchMsg("");
+};
+$("#stkFetchGo").onclick=async()=>{
+  const url=$("#stkFetchUrl").value.trim();
+  const limit=Math.max(0, parseInt($("#stkFetchLimit").value,10)||0);
+  let bucket=$("#stkFetchBucket").value;
+  if(bucket==="__new__"){
+    bucket=stkAskBucket("新分组名（这批图都会放进去）");
+    if(bucket===null) return;
+  }
+  const btn=$("#stkFetchGo"); btn.disabled=true; stkFetchMsg("启动中…");
+  try{
+    const j=await stkPost({action:"fetch_site", url, limit, bucket});
+    if(!j.ok){ stkFetchMsg(j.message||"启动失败","bad"); return; }
+    $("#stkFetchBox").classList.add("hidden"); stkFetchMsg("");
+    stkMsg("已开始拉取，后台进行中…","ok");
+    await loadStickers(true);
+  }catch(e){ stkFetchMsg("启动失败："+e.message,"bad"); }
+  finally{ btn.disabled=false; }
 };
 $("#stkSearch").addEventListener("input",()=>{
   clearTimeout(STK.t);

@@ -51,6 +51,7 @@ from . import llmtrace as llmtrace_mod
 from . import memory as memory_mod
 from . import mention as mention_mod
 from . import persona as persona_mod
+from . import sitesync as sitesync_mod
 from . import skills as skills_mod
 from . import style as style_mod
 from . import stickers as sticker_mod
@@ -2572,6 +2573,10 @@ def _sticker_payload(item: dict, sticker_dir: str) -> dict:
 #: 所以任务放后台、状态留在内存里，GET 时一起带回去。
 _autotag_state: dict = {"running": False, "done": 0, "total": 0, "sid": ""}
 
+#: 从公开表情清单站拉取的进度（同样只保留最近一次）。下载几十上百张要几分钟，
+#: 所以和补标签一样丢后台，状态留在内存里，GET 时一起带回去。
+_sitesync_state: dict = {"running": False, "done": 0, "total": 0, "label": ""}
+
 
 async def _run_autotag(cfg, sdir: str, limit: int, model: str) -> None:
     """后台把「未分类」的图逐张补标签。**异常只记进状态**，不往上抛。"""
@@ -2597,6 +2602,35 @@ async def _run_autotag(cfg, sdir: str, limit: int, model: str) -> None:
         state.update({"running": False, "finished": time.strftime("%H:%M:%S"), **res})
     except Exception as exc:  # noqa: BLE001 — 后台任务，出错也要让页面看见
         logger.warning(f"[sticker] 批量补标签失败: {exc}")
+        state.update(
+            {"running": False, "error": str(exc), "finished": time.strftime("%H:%M:%S")}
+        )
+
+
+async def _run_sitesync(url: str, sdir: str, bucket: str, limit: int) -> None:
+    """后台从公开清单站拉表情包入库。**异常只记进状态**，不往上抛。"""
+    state = _sitesync_state
+    state.update(
+        {
+            "running": True,
+            "done": 0,
+            "total": 0,
+            "label": "",
+            "error": "",
+            "started": time.strftime("%H:%M:%S"),
+        }
+    )
+
+    def _progress(done: int, total: int, label: str) -> None:
+        state.update({"done": done, "total": total, "label": label})
+
+    try:
+        res = await sitesync_mod.pull(
+            url, bucket=bucket, limit=limit, sticker_dir=sdir, progress=_progress
+        )
+        state.update({"running": False, "finished": time.strftime("%H:%M:%S"), **res})
+    except Exception as exc:  # noqa: BLE001 — 后台任务，出错也要让页面看见
+        logger.warning(f"[sticker] 站点拉取失败: {exc}")
         state.update(
             {"running": False, "error": str(exc), "finished": time.strftime("%H:%M:%S")}
         )
@@ -2652,6 +2686,7 @@ async def _api_stickers(request: Request):
                 # 批量补标签：还剩几张没标签 + 上一次跑到哪儿了
                 "untagged": len(sticker_mod.untagged(sticker_dir=sdir)),
                 "autotag": dict(_autotag_state),
+                "sitesync": dict(_sitesync_state),
             }
         )
 
@@ -2732,6 +2767,30 @@ async def _api_stickers(request: Request):
             str(body.get("policy") or ""), buckets, sticker_dir=sdir
         )
         return JSONResponse({"ok": ok, "message": msg}, status_code=200 if ok else 400)
+
+    if action == "fetch_site":
+        # 从公开表情清单站拉包入库：**不需要 id**。下载几十上百张要几分钟，
+        # 所以和补标签一样丢后台，页面靠 GET 的 sitesync 看进度。
+        if _sitesync_state.get("running"):
+            return JSONResponse(
+                {"ok": False, "message": "上一批还在拉，等它拉完再点"}, status_code=409
+            )
+        url = str(body.get("url") or "").strip() or sitesync_mod.DEFAULT_SITE
+        bucket = str(body.get("bucket") or "")
+        try:
+            limit = max(0, int(body.get("limit") or 0))
+        except (TypeError, ValueError):
+            limit = 0
+        asyncio.ensure_future(_run_sitesync(url, sdir, bucket, limit))
+        return JSONResponse(
+            {
+                "ok": True,
+                "message": "开始拉取",
+                "url": url,
+                "limit": limit,
+                "bucket": bucket,
+            }
+        )
 
     if action == "import":
         # 批量导入：图片是 base64 字符串（可带 data:…;base64, 前缀），**不需要 id**。
