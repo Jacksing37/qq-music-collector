@@ -197,6 +197,12 @@ async def main() -> int:
     check("有回调就有 send_image", "send_image" in names(cfg, group_id=1, image_out=image_out, image_max=2))
     check("有回调就有 sticker_send",
           "sticker_send" in names(cfg, group_id=1, image_out=image_out, image_max=2))
+    check("只给表情通道也能发 sticker_send",
+          "sticker_send" in names(cfg, group_id=1, sticker_out=image_out, image_max=2))
+    check("只有表情通道时不给 send_image（网络图还是普通图片）",
+          "send_image" not in names(cfg, group_id=1, sticker_out=image_out, image_max=2))
+    check("表情通道也受 image_send_max=0 管",
+          "sticker_send" not in names(cfg, group_id=1, sticker_out=image_out, image_max=0))
     check("image_send_max=0 → 只给收、不给发",
           "send_image" not in names(cfg, group_id=1, image_out=image_out, image_max=0)
           and "sticker_send" not in names(cfg, group_id=1, image_out=image_out, image_max=0))
@@ -278,6 +284,51 @@ async def main() -> int:
     )
     out = await tl.dispatch(tools_fresh, "sticker_send", {"id": "deadbeef"}, ctx_fresh)
     check("id 不存在时提示先 find", "sticker_find" in out or "没有 id" in out, out[:60])
+
+    print("== 表情通道（sticker_out 优先于 image_out）==")
+    sticker_calls: list[bytes] = []
+    plain_calls: list[bytes] = []
+
+    async def fake_sticker_out(data: bytes) -> bool:
+        sticker_calls.append(data)
+        return True
+
+    async def fake_plain_out(data: bytes) -> bool:
+        plain_calls.append(data)
+        return True
+
+    tools_emoji, ctx_emoji = tl.build(
+        stickers_cfg,
+        group_id=1,
+        image_out=fake_plain_out,
+        sticker_out=fake_sticker_out,
+        image_max=2,
+    )
+    out = await tl.dispatch(tools_emoji, "sticker_send", {"id": saved_id}, ctx_emoji)
+    check("sticker_send 走表情通道", len(sticker_calls) == 1, str(len(sticker_calls)))
+    check("没有退回普通图片", not plain_calls, str(len(plain_calls)))
+    check("表情通道也记账（额度 +1）", ctx_emoji.image_used == 1, str(ctx_emoji.image_used))
+
+    out = await tl.dispatch(tools_emoji, "send_image", {"url": "https://img.example.com/ok.png"}, ctx_emoji)
+    check("网络直链仍走普通图片", len(plain_calls) == 1 and len(sticker_calls) == 1,
+          f"{len(plain_calls)}/{len(sticker_calls)}")
+
+    print("== 未分类识别 / 看图打标签的解析 ==")
+    from music_collector import stickertag as stg
+
+    rows = st.untagged()
+    check("untagged 只挑「未分类」或空标签",
+          all((not r.get("tags")) or all(t == "未分类" for t in r["tags"]) for r in rows),
+          str([r.get("tags") for r in rows][:3]))
+    check("有正经标签的不在未分类里", all(r.get("id") != saved_id for r in rows), str(saved_id))
+
+    tags, desc = stg.parse_reply('```json\n{"desc":"红发少女","tags":["二次元","红发","高冷"]}\n```')
+    check("能解析围栏里的 JSON", tags == ["二次元", "红发", "高冷"] and desc == "红发少女", str(tags))
+    tags, _ = stg.parse_reply('好的：{"desc":"猫","tags":"猫 无语 嘲讽"}')
+    check("tags 给字符串也认（逗号/空格都分）", tags == ["猫", "无语", "嘲讽"], str(tags))
+    check("不是 JSON 就返回空（绝不乱猜标签）", stg.parse_reply("我看不出来") == ([], ""),
+          "非空")
+    check("图片能变成 data URL", stg.data_url(PNG).startswith("data:image/png;base64,"), "")
 
     out = await tl.dispatch(tools, "sticker_add", {"tags": "坏图", "url": "https://x.example.com/broken.jpg"}, ctx)
     check("下载失败时说清原因", "没能收下" in out and "403" in out, out[:80])

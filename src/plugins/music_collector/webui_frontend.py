@@ -736,15 +736,18 @@ button:disabled{opacity:.5;cursor:not-allowed}
     <section id="page-stickers" class="page hidden">
       <div class="card">
         <h2><span class="dot"></span>表情包库 · 它会拿来接话的图</h2>
-        <p class="muted">群友发了个好玩的表情包、或者它自己搜到一张图时，模型会调 <code>sticker_add</code> 把它收进这里并打标签；
-          想用图接话时，它先 <code>sticker_find</code> 按情绪找、再用 <code>sticker_send</code> 发出去。</p>
+        <p class="muted">群友发表情包时，后台监听器会<b>自动收进这里</b>（每天有张数上限），模型也会用
+          <code>sticker_add</code> 把它自己搜到的好图收进来。想用图接话时，它先 <code>sticker_find</code>
+          按情绪找、再用 <code>sticker_send</code> 发出去（发出来是<b>表情</b>，不是一张图片）。</p>
         <p class="muted">这一页就是那个库：<b>能看、能改标签、能删</b>，改完立刻生效（不重启）。
-          <b>只会收模型主动收的图</b>——不会把群里每张图都囤下来；同一条图收几次也只存一份，标签合并。</p>
+          自动收的图拿不到 QQ 的说明词，所以标签一开始是「未分类」——点上面的
+          <b>🏷 补标签</b> 让它逐张看一眼图补上（之后新收的会自动补）。同一条图收几次也只存一份，标签合并。</p>
         <p class="muted">库的位置：<code id="stkRoot">data/stickers</code>（图片本体 + <code>index.json</code>）。
           「一轮最多发几张图」在「机器人 → 工具与技能」里改；这里只管理内容，不会替你发。</p>
         <div class="row">
           <input id="stkSearch" placeholder="搜索标签 / 备注" style="flex:1;min-width:170px">
           <button id="stkReload" title="重新读磁盘上的库">↻ 刷新</button>
+          <button id="stkAutotag" title="让模型看一眼「未分类」的图，自动补上标签">🏷 补标签</button>
           <button id="stkPrev" title="上一页">←</button>
           <span class="muted" id="stkPage">—</span>
           <button id="stkNext" title="下一页">→</button>
@@ -1883,6 +1886,7 @@ const BOT_GROUPS=[
          "llm.search_node","llm.search_tools_dir",
          "llm.image_lookup","llm.image_lookup_timeout","llm.image_lookup_interval",
          "llm.stickers","llm.sticker_dir","llm.sticker_auto_collect","llm.sticker_auto_daily",
+         "llm.sticker_autotag","llm.sticker_tag_model","llm.sticker_as_emoji",
          "llm.image_send_max",
          "llm.image_search","llm.image_search_max","llm.image_search_timeout",
          "llm.image_search_interval",
@@ -3073,7 +3077,8 @@ $("#logClear").onclick=async()=>{
 /* 这一页只做「看和改」：收/发都由模型在群里完成（sticker_add / sticker_send），
    面板不该有第二条写入路径去改变它的判断依据——除了人手写的标签，那恰恰是
    比模型自己写的更准的东西。 */
-const STK = {items:[], recent:[], stats:{}, q:"", page:0, per:18, sel:"", t:null, urls:new Map()};
+const STK = {items:[], recent:[], stats:{}, q:"", page:0, per:18, sel:"", t:null,
+             urls:new Map(), untagged:0, autotag:{}, poll:null};
 
 function stkMsg(t, kind){
   const el=$("#stkMsg"); if(!el) return;
@@ -3161,9 +3166,19 @@ async function renderStickers(){
 function renderStkStats(){
   const s=STK.stats||{};
   $("#stkRoot").textContent=s.root||"data/stickers";
+  const miss=STK.untagged||0;
   $("#stkStats").textContent=
     `共 ${s.count||0} 张 / ${stkFmtBytes(s.bytes)} ｜ 累计发送 ${s.sent||0} 次`
-    + ` ｜ 标签 ${(s.tags||[]).length} 个`;
+    + ` ｜ 标签 ${(s.tags||[]).length} 个`
+    + (miss ? ` ｜ 未分类 ${miss} 张` : "");
+  /* 「补标签」按钮：跑着的时候当进度条用（不能点），跑完/没缺的图时也能点（补新收的） */
+  const at=STK.autotag||{};
+  const btn=$("#stkAutotag");
+  if(btn){
+    if(at.running) btn.textContent=`补标签中 ${at.done||0}/${at.total||0}`;
+    else btn.textContent=miss?`🏷 补标签 (${miss})`:"🏷 补标签";
+    btn.disabled=!!at.running;
+  }
   const box=$("#stkChips"); box.innerHTML="";
   const tags=(s.tags||[]).slice(0,14);
   if(!tags.length) return;
@@ -3242,12 +3257,23 @@ async function loadStickers(keepMsg){
     const j=await (await api("/api/music-admin/stickers")).json();
     if(!j.ok){ stkMsg(j.message||"读取失败","bad"); return; }
     STK.items=j.items||[]; STK.recent=j.recent||[]; STK.stats=j.stats||{};
+    STK.untagged=j.untagged||0; STK.autotag=j.autotag||{};
     stkClearUrls();
     if(STK.sel && !STK.items.some(x=>x.id===STK.sel)) STK.sel="";
     renderStkStats(); renderStkRecent(); await renderStickers();
     if(STK.sel) await stkSelect(STK.sel); else stkResetEditor();
     if(!j.enabled) stkMsg("表情包功能当前是关着的（库还能看和改，但模型不会再收/发）","bad");
     else if(j.send_max<=0) stkMsg("「一轮最多发几张图」设成了 0：模型能收进库，但发不出去","bad");
+    else{
+      /* 批量补标签是后台任务：开着就轮询，跑完/失败都把结果说一句 */
+      const at=STK.autotag||{};
+      if(at.running){
+        stkMsg(`正在补标签：第 ${at.done||0}/${at.total||0} 张（后台跑，可以关页面）`);
+        stkPollAutotag();
+      }else if(at.error) stkMsg("补标签失败："+at.error,"bad");
+      else if(at.finished && !keepMsg)
+        stkMsg(`上次补标签：成功 ${at.done||0} 张 / 失败 ${at.failed||0} 张`, at.done?"ok":"bad");
+    }
   }catch(e){ if(e.message!=="unauthorized") stkMsg("加载失败: "+e.message,"bad"); }
 }
 
@@ -3281,6 +3307,23 @@ $("#stkDelete").onclick=async()=>{
   finally{ btn.disabled=false; }
 };
 $("#stkReload").onclick=()=>{ STK.q=$("#stkSearch").value; loadStickers(); };
+
+/* 批量补标签：POST 一句「开始了」，进度靠 GET 回来的 autotag 字段慢慢刷 */
+function stkPollAutotag(){
+  clearTimeout(STK.poll);
+  if(!(STK.autotag||{}).running) return;
+  STK.poll=setTimeout(async()=>{ await loadStickers(true); }, 3000);
+}
+$("#stkAutotag").onclick=async()=>{
+  const btn=$("#stkAutotag"); btn.disabled=true;
+  try{
+    const j=await stkPost({action:"autotag"});
+    if(!j.ok){ stkMsg(j.message||"启动失败","bad"); return; }
+    stkMsg(j.message||"开始补标签","ok");
+    await loadStickers(true);
+  }catch(e){ stkMsg("启动失败："+e.message,"bad"); }
+  finally{ btn.disabled=!!(STK.autotag||{}).running; }
+};
 $("#stkSearch").addEventListener("input",()=>{
   clearTimeout(STK.t);
   STK.t=setTimeout(()=>{ STK.q=$("#stkSearch").value; STK.page=0; renderStickers(); }, 250);

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import os
 import secrets
 import time
@@ -51,6 +52,7 @@ from . import persona as persona_mod
 from . import skills as skills_mod
 from . import style as style_mod
 from . import stickers as sticker_mod
+from . import stickertag as stickertag_mod
 from . import tools as tools_mod
 from . import webtool
 from .llm import (
@@ -759,8 +761,8 @@ FIELD_META["llm.stickers"] = (
     "给它一整库表情包：看到好玩的表情包（群友发的、或它自己搜到的）"
     "可以用 <code>sticker_add</code> 收进库并打标签，想接话时先用 <code>sticker_find</code> "
     "按情绪找、再 <code>sticker_send</code> 发出去。"
-    "<br>库在服务器的 <code>data/stickers/</code>（图片 + <code>index.json</code>），"
-    "<b>只有模型主动收的才会进库</b>——不会把群里所有图都囤成垃圾堆。"
+    "<br>库在服务器的 <code>data/stickers/</code>（图片 + <code>index.json</code>）。"
+    "收有两条路：模型主动收 —— 或者打开下面「自动收群友发的表情包」让监听器顺手收。"
     "<br>嫌它乱发表情包，就把下面「一轮最多发几张图」调成 <code>0</code>（那是硬上限）",
     False,
 )
@@ -784,6 +786,29 @@ FIELD_META["llm.sticker_auto_daily"] = (
     "自动收每天上限（张）",
     "防止一晚上被刷进来几百张。超出就不再自动收（模型自己 <code>sticker_add</code> 不受此限）。"
     "<code>0</code> = 不限",
+    False,
+)
+FIELD_META["llm.sticker_autotag"] = (
+    "自动给收下的图打标签",
+    "自动收的表情包<b>拿不到 QQ 的说明</b>（图片型表情没有 <code>summary</code>），落库就是"
+    "「未分类」——模型 <code>sticker_find</code> 一个词也搜不到，等于死库存。"
+    "打开后每收一张就在后台让模型看一眼，把标签换成「画面 + 情绪」（如「猫 嘲讽 无语」）。"
+    "<br>成本：一张图约 800 token，一天最多 30 张。关掉 = 只存不标，之后可以到"
+    "「🧩 表情包」页点「补标签」批量补",
+    False,
+)
+FIELD_META["llm.sticker_tag_model"] = (
+    "打标签用的模型",
+    "留空 = 跟聊天用同一个（线上那个已经支持看图）。"
+    "想「聊天用便宜模型、看图用视觉模型」时才填，填的模型必须支持图片输入",
+    False,
+)
+FIELD_META["llm.sticker_as_emoji"] = (
+    "发图时按表情发",
+    "打开：<code>sticker_send</code> 发出去的是<b>表情</b>（image 段带 <code>sub_type=1</code>），"
+    "客户端显示成表情包——和群友自己发的一样，不会顶着白底缩略图。<br>"
+    "关掉：退回普通图片。协议端不认这个字段、或者发出去报错时，也可以关掉试试"
+    "（发送失败会自动退回普通图片一次，一般不用管）",
     False,
 )
 FIELD_META["llm.image_send_max"] = (
@@ -2540,8 +2565,42 @@ def _sticker_payload(item: dict, sticker_dir: str) -> dict:
     }
 
 
+#: 批量补标签的进度（只保留最近一次）。批量要跑几十秒到几分钟，前端得能看见进度，
+#: 所以任务放后台、状态留在内存里，GET 时一起带回去。
+_autotag_state: dict = {"running": False, "done": 0, "total": 0, "sid": ""}
+
+
+async def _run_autotag(cfg, sdir: str, limit: int, model: str) -> None:
+    """后台把「未分类」的图逐张补标签。**异常只记进状态**，不往上抛。"""
+    state = _autotag_state
+    state.update(
+        {
+            "running": True,
+            "done": 0,
+            "total": 0,
+            "sid": "",
+            "error": "",
+            "started": time.strftime("%H:%M:%S"),
+        }
+    )
+
+    def _progress(done: int, total: int, sid: str) -> None:
+        state.update({"done": done, "total": total, "sid": sid})
+
+    try:
+        res = await stickertag_mod.retag_untagged(
+            cfg, sticker_dir=sdir, limit=limit, model=model, progress=_progress
+        )
+        state.update({"running": False, "finished": time.strftime("%H:%M:%S"), **res})
+    except Exception as exc:  # noqa: BLE001 — 后台任务，出错也要让页面看见
+        logger.warning(f"[sticker] 批量补标签失败: {exc}")
+        state.update(
+            {"running": False, "error": str(exc), "finished": time.strftime("%H:%M:%S")}
+        )
+
+
 async def _api_stickers(request: Request):
-    """表情包库：GET 列表 / 单张图片；POST 改标签备注 / 删除。
+    """表情包库：GET 列表 / 单张图片；POST 改标签备注 / 删除 / 批量补标签。
 
     和 ``_api_memory`` 一样「一个路由担几件事」，前端只记一个地址、鉴权只一处。
 
@@ -2583,6 +2642,9 @@ async def _api_stickers(request: Request):
                 "stats": sticker_mod.stats(sticker_dir=sdir),
                 "items": [_sticker_payload(it, sdir) for it in items],
                 "recent": sticker_mod.recent(limit=30, sticker_dir=sdir),
+                # 批量补标签：还剩几张没标签 + 上一次跑到哪儿了
+                "untagged": len(sticker_mod.untagged(sticker_dir=sdir)),
+                "autotag": dict(_autotag_state),
             }
         )
 
@@ -2595,6 +2657,37 @@ async def _api_stickers(request: Request):
 
     action = str(body.get("action") or "update")
     sid = str(body.get("id") or "").strip()
+
+    if action == "autotag":
+        # 批量补标签：把「未分类」的图逐张丢给模型看一眼。**不需要 id**。
+        # 放后台跑（几十张要几分钟），立刻回一句「开始了」，页面靠 GET 的 autotag 看进度。
+        if _autotag_state.get("running"):
+            return JSONResponse(
+                {"ok": False, "message": "上一批还在跑，等它跑完再点"},
+                status_code=409,
+            )
+        try:
+            limit = max(0, int(body.get("limit") or 0))
+        except (TypeError, ValueError):
+            limit = 0
+        pending = len(sticker_mod.untagged(sticker_dir=sdir))
+        if pending <= 0:
+            return JSONResponse(
+                {"ok": True, "message": "没有需要补标签的图（都有正经标签了）", "pending": 0}
+            )
+        asyncio.ensure_future(
+            _run_autotag(llm, sdir, limit, str(getattr(llm, "sticker_tag_model", "") or ""))
+        )
+        tail = f"，本次只补最早的 {limit} 张" if limit else ""
+        return JSONResponse(
+            {
+                "ok": True,
+                "message": f"开始补标签：待补 {pending} 张{tail}",
+                "pending": pending,
+                "limit": limit,
+            }
+        )
+
     if not sid:
         return JSONResponse({"ok": False, "message": "缺少 id"}, status_code=400)
 

@@ -182,6 +182,10 @@ class ToolContext:
     #: **None = 发不了图**（网页聊天测试/离线脚本），这时 ``send_image`` /
     #: ``sticker_send`` 不注册，``sticker_add``（只入库、不发）仍然可用
     image_out: Optional[Callable[[bytes], Awaitable[bool]]] = None
+    #: 表情包专用发图回调：和 ``image_out`` 同一份 bytes，但发送层会打上「这是表情」
+    #: 的标记（``image`` 段的 ``sub_type=1``），客户端显示成表情包而不是一张图片。
+    #: **None = 退回 ``image_out``**（网页测试页、老触发点都属于这种），发还是能发
+    sticker_out: Optional[Callable[[bytes], Awaitable[bool]]] = None
     #: 一轮最多发几张图（``llm.image_send_max``）。0 = 不给发图工具
     image_max: int = 0
     #: 这一轮已经发了几张（``send_image`` / ``sticker_send`` 自己累加）
@@ -1126,7 +1130,9 @@ async def _handle_sticker_send(args: dict, ctx: ToolContext) -> str:
     sid = str(args.get("id") or "").strip()
     if not sid:
         return "要发哪一条？先用 sticker_find 拿到 id。"
-    if ctx.image_out is None:
+    # 表情通道优先：同一张图，发成表情包比发成一张图片更像「群友在用它」
+    sender = ctx.sticker_out or ctx.image_out
+    if sender is None:
         return _no_image_out()
     spent = _quota_spent(ctx)
     if spent:
@@ -1141,7 +1147,7 @@ async def _handle_sticker_send(args: dict, ctx: ToolContext) -> str:
         data = path.read_bytes()
     except OSError as exc:
         return f"读图片失败：{exc}。别再试这张，继续用文字回。"
-    if not await ctx.image_out(data):
+    if not await sender(data):
         return "没发出去（网络或权限问题），别再重试同一张。"
     ctx.image_used += 1
     await sticker_mod.bump_use(
@@ -1330,6 +1336,7 @@ def build(
     stickers: Optional[list] = None,
     note: Optional[Handler] = None,
     image_out: Optional[ImageSender] = None,
+    sticker_out: Optional[ImageSender] = None,
     image_max: int = 0,
 ) -> tuple[list[Tool], ToolContext]:
     """按配置组装这次请求可用的工具，以及共享上下文。
@@ -1367,7 +1374,8 @@ def build(
         note=note,
         note_max=int(getattr(cfg, "say_max", 0) or 0) if note is not None else 0,
         image_out=image_out,
-        image_max=int(image_max or 0) if image_out is not None else 0,
+        sticker_out=sticker_out,
+        image_max=int(image_max or 0) if (image_out is not None or sticker_out is not None) else 0,
     )
     tools: list[Tool] = []
     if not cfg.tools:
@@ -1397,7 +1405,8 @@ def build(
         tools.append(STICKER_ADD)
         if sticker_mod.count(_sticker_dir(ctx)) > 0:
             tools.append(STICKER_FIND)
-            if ctx.image_out is not None and ctx.image_max > 0:
+            # 能发就行：优先表情通道，没有就退回普通图片通道
+            if (ctx.sticker_out is not None or ctx.image_out is not None) and ctx.image_max > 0:
                 tools.append(STICKER_SEND)
     if getattr(cfg, "image_search", True):
         # 只给直链、不下载，所以不受 image_out 限制（测试页也能搜）

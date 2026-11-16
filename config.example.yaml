@@ -399,6 +399,11 @@ llm:
   # ---- 表情包与发图（模型自己收、自己挑、自己发）----
   stickers: true              # 表情包库：sticker_add 收下 / sticker_find 查找 / sticker_send 发出去
   sticker_dir: ''             # 表情包库目录，留空=data/stickers；相对路径按 data/ 解析
+  sticker_auto_collect: true  # 群友发表情包时自动收进库（旁路监听，不经过模型）
+  sticker_auto_daily: 30      # 自动收每天上限（张），0=不限
+  sticker_autotag: true       # 自动收的图让模型看一眼补标签（否则标签永远是「未分类」，搜不到）
+  sticker_tag_model: ''       # 打标签用哪个模型，留空=跟聊天同一个（必须支持看图）
+  sticker_as_emoji: true      # 发表情包时按「表情」发（image 段 sub_type=1），关掉=普通图片
   image_send_max: 2           # 一轮最多发几张图（表情包也算），0=不给发图工具，0~6
   image_search: true          # 提供 search_images（按关键词搜图片直链，Bing + 百度兜底）
   image_search_max: 6         # 一次搜几张图给模型挑，1~12

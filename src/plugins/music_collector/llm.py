@@ -1133,6 +1133,7 @@ class LLMBot:
         body_out: Optional[dict] = None,
         note: Optional[object] = None,
         send_image: Optional[object] = None,
+        send_sticker: Optional[object] = None,
         stickers: Optional[list] = None,
     ) -> tuple[Optional[str], str]:
         """生成一条回复。
@@ -1150,7 +1151,10 @@ class LLMBot:
 
         ``send_image`` 是「往群里发一张图」的回调（同样由触发层注入）：模型通过
         ``send_image`` / ``sticker_send`` 工具发图时走它。不传 = 这个上下文发不了图，
-        那两个工具就不注册。``stickers`` 是这条消息里**可收藏的表情包**
+        那两个工具就不注册。``send_sticker`` 是**表情包专用**的发图回调（同一份 bytes，
+        但发送层会带上「这是表情」的标记，让客户端显示成表情包而不是普通图片）；
+        不传就退回 ``send_image``——两者都不影响「能不能发」，只影响「发出来的样子」。
+        ``stickers`` 是这条消息里**可收藏的表情包**
         （:func:`bot_utils.collect_stickers`），放进 :class:`tools.ToolContext` 供
         ``sticker_add`` 取图——模型自己看不到图片地址。
 
@@ -1334,6 +1338,8 @@ class LLMBot:
                     note=note,
                     # 「立刻往群里发一张图」：不传时 send_image / sticker_send 不注册
                     image_out=send_image,
+                    # 表情包走这条路发（带「是表情」的标记）；不传就退回 image_out
+                    sticker_out=send_sticker,
                     image_max=int(getattr(cfg, "image_send_max", 0) or 0),
                 )
                 tool_schemas = tools_mod.schemas(tool_list)
@@ -1580,12 +1586,18 @@ class LLMBot:
         model: str = "",
         max_tokens: Optional[int] = None,
         temperature: float = 0.3,
+        images: Optional[list[str]] = None,
     ) -> tuple[str, str]:
         """一次性纯文本补全：不带历史、不带工具、不占冷却、不写上下文。
 
-        专给后台任务用（目前是「整理群成员记忆」）。这类任务要的是模型的阅读
-        理解能力，不是聊天人格——所以 ``system`` 由调用方给任务说明，**不拼人设
-        也不拼记忆**，免得让它总结别人的时候先把自己的人设演一遍。
+        专给后台任务用（目前是「整理群成员记忆」和「给表情包打标签」）。这类任务要的是
+        模型的阅读理解能力，不是聊天人格——所以 ``system`` 由调用方给任务说明，**不拼
+        人设也不拼记忆**，免得让它总结别人的时候先把自己的人设演一遍。
+
+        ``images`` 是图片地址（``data:image/…;base64,…`` 或 http 直链）：给了就走
+        OpenAI vision 那套数组格式（:func:`build_question_content`）。**不受**
+        ``cfg.vision`` 约束——那个开关管的是「聊天时要不要把群友发的图发出去」，
+        后台任务自己决定了要看图，就不该被聊天的开关连累。
 
         ``max_tokens``：``None`` = 沿用 ``cfg.max_tokens``；**显式给 ``0`` = 不设上限**
         （请求体里不发这个字段），整理记忆那种「一次重写整份 JSON」的任务就靠它。
@@ -1598,7 +1610,8 @@ class LLMBot:
         messages: list[dict] = []
         if (system or "").strip():
             messages.append({"role": "system", "content": system.strip()})
-        messages.append({"role": "user", "content": text})
+        pics = [str(u) for u in (images or []) if str(u or "").strip()]
+        messages.append({"role": "user", "content": build_question_content(text, pics)})
         probe = cfg.model_copy(
             update={
                 "model": (model or cfg.model),

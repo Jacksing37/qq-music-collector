@@ -389,6 +389,22 @@ def find(query: str = "", limit: int = 5, sticker_dir: str = "") -> list[dict]:
     return [item for _, item in scored[:want]]
 
 
+def untagged(sticker_dir: str = "") -> list[dict]:
+    """**没标签可用**的条目：标签为空，或者只剩一个「未分类」。
+
+    自动收的图就是靠 QQ 的 summary 落库的，而图片型表情拿不到 summary——于是整库都是
+    「未分类」。这类条目 ``sticker_find`` 一个词也搜不到（标签匹配只在标签串里找），
+    所以它们等于死库存，值得单独捞出来批量补标签。按入库时间从旧到新，补的时候有次序。
+    """
+    out: list[dict] = []
+    for item in _items(sticker_dir=sticker_dir):
+        tags = [str(t).strip() for t in (item.get("tags") or []) if str(t).strip()]
+        if not tags or all(t == "未分类" for t in tags):
+            out.append(item)
+    out.sort(key=lambda it: str(it.get("created") or ""))
+    return out
+
+
 def tag_summary(limit: int = 24, sticker_dir: str = "") -> str:
     """库里现有标签的一句话概览（模型靠它知道「能发些什么」）。"""
     counter: dict[str, int] = {}

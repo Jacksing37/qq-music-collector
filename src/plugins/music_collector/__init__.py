@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import time
 from datetime import datetime
@@ -57,6 +58,7 @@ from . import mention as mention_mod  # noqa: E402  回复里 @ 谁，由模型�
 from . import persona as persona_mod  # noqa: E402  听群友抱怨「AI 味」，只记不吭声
 from . import speak as speak_mod  # noqa: E402  这一条到底该不该开口（概率门）
 from . import stickers as sticker_mod  # noqa: E402  表情包库（自动收群友发的 mface）
+from . import stickertag as stickertag_mod  # noqa: E402  自动收的图让模型看图补标签
 from . import timeguard as timeguard_mod  # noqa: E402  白天说「晚安」时改写一次
 from .models import PLATFORM_NAMES, Song  # noqa: E402
 from .naming import build_context, render_template, resolve_alias  # noqa: E402
@@ -398,6 +400,33 @@ async def _auto_collect_sticker(bot: Bot, event: GroupMessageEvent) -> None:
             f"[sticker] 群{gid} 自动收下表情包 {entry.get('id')}"
             f"（标签 {entry.get('tags')}，今天第 {_sticker_auto_count[day]}/{cap or '∞'} 张）"
         )
+        # 收下来就让模型看一眼补标签：图片型表情没有 summary，不补就永远是「未分类」
+        if bool(getattr(llm, "sticker_autotag", True)):
+            service._spawn_bg(_autotag_sticker(entry, data, llm, sticker_dir))
+
+
+async def _autotag_sticker(entry: dict, data: bytes, llm, sticker_dir: str) -> None:
+    """后台给刚收的表情包补标签。**失败就保持「未分类」**，不影响任何事。
+
+    为什么放后台：一次看图要几秒，而 ``sticker_listener`` 跑在群消息链上——同步等它，
+    群友发的下一句话就会被拖住。
+    """
+    sid = str((entry or {}).get("id") or "")
+    if not sid or not data:
+        return
+    try:
+        ok, _ = await stickertag_mod.retag_one(
+            sid,
+            data,
+            llm,
+            sticker_dir=sticker_dir,
+            model=str(getattr(llm, "sticker_tag_model", "") or ""),
+        )
+    except Exception as exc:  # noqa: BLE001 — 补标签失败只是少个标签
+        logger.debug(f"[sticker] 补标签失败 {sid}: {exc}")
+        return
+    if ok:
+        logger.info(f"[sticker] 自动收的表情包 {sid} 已补标签")
 
 
 def mface_label(row: dict) -> str:
@@ -976,6 +1005,38 @@ async def _llm_answer(
         logger.info(f"[llm] 群{group_id} 模型发了一张图（{len(data) // 1024} KB）")
         return True
 
+    async def _send_sticker(data: bytes) -> bool:
+        """表情包走**表情**发：image 段带 ``sub_type=1``，客户端显示成表情包。
+
+        为什么不直接用 ``MessageSegment.image()``：它只填 ``file``，客户端收到就是一张
+        普通图片（白底、小缩略图），跟群友发的表情包长得不一样。``sub_type=1`` 正是
+        客户端自己发表情时带的那个标记（``bot_utils.collect_stickers`` 收图时也按它认）。
+
+        协议端不认这个字段时通常**不报错、只是显示成普通图片**；真发送失败（回执为
+        ``None``）就退回普通图片再发一次——宁可难看，不能不发。``llm.sticker_as_emoji``
+        关掉时直接走普通图片。
+        """
+        if not data or int(group_id) <= 0:
+            return False
+        if not bool(getattr(llm_cfg, "sticker_as_emoji", True)):
+            return await _send_image(data)
+        hint_task.cancel()
+        message = Message(
+            MessageSegment(
+                "image",
+                {
+                    "file": "base64://" + base64.b64encode(data).decode(),
+                    "sub_type": 1,
+                    "summary": "[表情]",
+                },
+            )
+        )
+        if await safe_send_group(bot, group_id, message) is None:
+            logger.debug(f"[llm] 群{group_id} 按表情发送失败，退回普通图片")
+            return await _send_image(data)
+        logger.info(f"[llm] 群{group_id} 模型发了一张表情（{len(data) // 1024} KB）")
+        return True
+
     try:
         reply, reason = await llm_bot.chat(
             group_id,
@@ -996,6 +1057,8 @@ async def _llm_answer(
             note=_note,
             # 发图能力（send_image / sticker_send 工具）——不传就发不了图
             send_image=_send_image,
+            # 表情包单独一条通道：同一份 bytes，但发出来是「表情」而不是一张图片
+            send_sticker=_send_sticker,
             # 这条消息里可收藏的表情包（sticker_add 取图用）
             stickers=list(stickers or []),
         )

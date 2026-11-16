@@ -673,6 +673,19 @@ class LLMConfig(BaseModel):
     sticker_auto_collect: bool = True
     #: 自动收每天最多几张（防一晚上囤几百张）。0 = 不限
     sticker_auto_daily: int = Field(30, ge=0, le=500)
+    #: 自动收下的图**要不要让模型看图补标签**。
+    #: 为什么需要：自动收只拿得到 QQ 给的 ``summary``，而图片型表情（``image`` +
+    #: ``sub_type=1``）**压根没有 summary**——落库就是「未分类」，``sticker_find``
+    #: 一个词也搜不到，等于死库存（线上 72 张全这样）。打开后每收一张就在后台调一次
+    #: 视觉模型（不阻塞群聊、不占冷却、不写历史），把标签换成「画面 + 情绪」。
+    #: 关掉 = 只存不标（省调用），之后可在网页「表情包」页手动补 / 一键批量补。
+    sticker_autotag: bool = True
+    #: 打标签用哪个模型；**留空 = 跟聊天用同一个**（线上那个已支持看图）。
+    #: 单独留一个是为了「聊天用小模型、看图用视觉模型」这种搭配
+    sticker_tag_model: str = ""
+    #: 发图时**按表情发**：image 段带 ``sub_type=1``，客户端显示成表情包（大图、无白边）
+    #: 而不是一张普通图片。关掉 = 退回普通图片（老协议端不认这个字段时也可以关）
+    sticker_as_emoji: bool = True
     #: 一轮最多发几张图（表情包也算）。0 = 不给发图工具（模型只能收、不能发）
     image_send_max: int = Field(2, ge=0, le=6)
     #: 是否给模型 ``search_images``（按关键词搜图片直链）。搜的是 Bing / 百度的公开
